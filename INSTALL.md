@@ -11,6 +11,7 @@
 | Node.js | 18+ |
 | uv | 最新版 (`curl -LsSf https://astral.sh/uv/install.sh \| sh`) |
 | Docker | 仅用于 MySQL / ES / MinIO / Redis 基础设施 |
+| GPU | 推荐 NVIDIA GPU + CUDA 12+（OCR 加速 10x） |
 
 ## 一、克隆项目
 
@@ -27,10 +28,14 @@ uv sync
 ```
 
 > **注意**: RAGFlow v0.25+ 要求 Python >=3.13。`uv sync` 自动处理版本，无需手动安装。
+>
+> **GPU 用户**: 确认 `onnxruntime-gpu` 已安装（而非 `onnxruntime`）:
+> ```bash
+> .venv/bin/pip list | grep onnxruntime
+> # 应显示: onnxruntime-gpu
+> ```
 
 ## 三、准备 Docker 基础设施
-
-RAGFlow 依赖以下外部服务，用 Docker Compose 启动：
 
 ```bash
 cd docker
@@ -88,20 +93,108 @@ user_default_llm:
 
 > **关键**: 所有端口必须用 Docker 映射到宿主机的端口，不是容器内部端口。
 
-## 五、启动 RAGFlow
+## 五、GPU OCR 加速配置
 
-### 一键启动
+RAGFlow 使用 ONNX Runtime 进行 OCR（文本检测 & 识别），支持 CUDA GPU 加速。
+
+### 5.1 检查 GPU 可用性
+
+```bash
+# 确认 GPU 驱动正常
+nvidia-smi
+
+# 确认 onnxruntime-gpu 可用 CUDA
+.venv/bin/python -c "import onnxruntime; print(onnxruntime.get_available_providers())"
+# 应包含: CUDAExecutionProvider
+```
+
+### 5.2 确认 GPU OCR 补丁
+
+`deepdoc/vision/ocr.py` 中的 `cuda_is_available()` 已被修改为直接检查 ONNX Runtime providers，不再依赖 PyTorch：
+
+```python
+def cuda_is_available():
+    try:
+        return 'CUDAExecutionProvider' in ort.get_available_providers()
+    except Exception:
+        ...
+```
+
+### 5.3 验证 GPU 生效
+
+启动后检查 task executor 日志：
+
+```bash
+grep "load_model.*uses" /tmp/ragflow/taskexec_3.log | head -5
+# 应显示: load_model .../det.onnx uses GPU (device 0, ...)
+#         load_model .../rec.onnx uses GPU (device 0, ...)
+#         load_model .../layout.onnx uses GPU (device 0, ...)
+#         load_model .../tsr.onnx uses GPU (device 0, ...)
+```
+
+如果显示 `uses CPU`，说明 GPU 未生效，检查 `onnxruntime-gpu` 是否安装。
+
+### 5.4 GPU 显存调优
+
+```bash
+export OCR_GPU_MEM_LIMIT_MB=4096          # 默认 2048MB，大模型可调高
+export OCR_GPU_MEM_ARENA_SHRINKAGE=1      # 启用显存回收 (默认关闭)
+export OCR_INTRA_OP_NUM_THREADS=2         # ONNX 内部线程数 (默认 2)
+```
+
+### 5.5 性能参考
+
+| 指标 | CPU | GPU |
+|------|-----|-----|
+| 单页文本检测 | ~2-3s | ~0.3s |
+| 单页文本识别 | ~0.05s | ~0.00001s |
+| 12 页 PDF OCR | ~60s | ~6s |
+| 100 页含表 PDF 完整解析 | ~30-60min | ~8-15min |
+
+> **注意**: 表结构识别（tsr.onnx）仍然是 PDF 解析中最耗时的步骤，GPU 加速后仍需 10-70s/表。
+
+## 六、启动 RAGFlow
+
+### 6.1 一键启动
 
 ```bash
 bash start.sh start
 ```
 
-这会在后台依次启动：
-1. **Web Server** (端口 9380) — REST API
-2. **Task Executor** — 文档解析后台任务
-3. **Web 前端** (端口 9223) — React UI
+启动 3 个组件：
+1. **Web Server** (端口 `${BACKEND_PORT:-9380}`) — REST API
+2. **Task Executor** — ${TASK_EXECUTOR_COUNT} 个 worker 进程（默认 3 个）
+3. **Web 前端** (端口 `${FRONTEND_PORT:-9223}`) — React UI
 
-### 其他命令
+### 6.2 并发配置
+
+通过环境变量控制解析并发度：
+
+```bash
+# 默认配置 (可修改 start.sh 顶部常量)
+MAX_CONCURRENT_TASKS=10       # 每 worker 并发任务数 (默认 10)
+TASK_EXECUTOR_COUNT=3         # worker 进程数 (默认 3)
+TASK_EXECUTOR_OFFSET=3        # worker ID 起始偏移 (默认 3, 避免多实例冲突)
+
+# 总并发解析容量 = MAX_CONCURRENT_TASKS × TASK_EXECUTOR_COUNT
+# 默认: 10 × 3 = 30 个并发解析槽位
+```
+
+### 6.3 多实例部署
+
+同一台机器运行多个 RAGFlow 实例时：
+
+```bash
+# 实例 A (默认端口)
+BACKEND_PORT=9380 TASK_EXECUTOR_OFFSET=0 bash start.sh start
+
+# 实例 B (需不同端口和 worker ID 避免冲突)
+BACKEND_PORT=9381 TASK_EXECUTOR_OFFSET=3 bash start.sh start
+```
+
+不同 worker ID 的 task executor 在同一个 Redis stream 消费者组中协同工作，共享解析任务。
+
+### 6.4 其他命令
 
 ```bash
 bash start.sh stop      # 停止所有服务
@@ -109,33 +202,63 @@ bash start.sh status    # 查看运行状态
 bash start.sh restart   # 重启所有服务
 ```
 
-### 手动启动 (调试用)
+### 6.5 手动启动 (调试用)
 
 ```bash
 # 1. 后端 API
 PYTHONPATH=. HF_ENDPOINT=https://hf-mirror.com \
 nohup .venv/bin/python api/ragflow_server.py > /tmp/ragflow_server.log 2>&1 &
 
-# 2. 任务执行器 (文档解析必须)
-PYTHONPATH=. HF_ENDPOINT=https://hf-mirror.com \
-nohup .venv/bin/python rag/svr/task_executor.py 0 > /tmp/ragflow_taskexec.log 2>&1 &
+# 2. 任务执行器 (多 worker)
+PYTHONPATH=. HF_ENDPOINT=https://hf-mirror.com MAX_CONCURRENT_TASKS=10 \
+nohup .venv/bin/python rag/svr/task_executor.py 3 > /tmp/ragflow_taskexec_3.log 2>&1 &
 
 # 3. 前端
 cd web && npm install && PORT=9223 npm run dev -- --host 0.0.0.0 &
 ```
 
-## 六、验证
+## 七、知识库配置 (首次部署)
+
+首次部署需要在 RAGFlow 中手动创建知识库并获取 API Key。
+
+### 7.1 创建知识库
+
+通过 Web UI (http://<IP>:9223/) 或 API 创建 6 个知识库：
+
+```
+产品库    4c0f8e72544d11f1b0904d93f269c4c9  (chunk_method=manual)
+图片库    4c138356544d11f1b0904d93f269c4c9  (chunk_method=naive)
+视频库    4c15fd2a544d11f1b0904d93f269c4c9  (chunk_method=naive)
+文件库    4c18d086544d11f1b0904d93f269c4c9  (chunk_method=naive)
+程序库    4c1bfee6544d11f1b0904d93f269c4c9  (chunk_method=table)
+经验库    4c1e4994544d11f1b0904d93f269c4c9  (chunk_method=table)
+```
+
+### 7.2 获取 API Key
+
+Web UI → 右上角头像 → API → 生成 Key，配置到 deepagents 的 `.env`:
+
+```bash
+RAGFLOW_API_URL=http://localhost:9381
+RAGFLOW_API_KEY=ragflow-xxxxxxxxxxxx
+```
+
+## 八、验证
 
 ```bash
 # 后端 API
 curl http://localhost:9380/api/v1/datasets \
   -H "Authorization: Bearer <your-api-key>"
 
+# 解析状态
+curl 'http://localhost:9380/api/v1/datasets/<dataset_id>/documents?page=1&page_size=12' \
+  -H "Authorization: Bearer <your-api-key>"
+
 # 前端界面
 # 浏览器打开 http://<服务器IP>:9223/
 ```
 
-## 七、常见问题
+## 九、常见问题
 
 ### 1. 文档解析卡住不动
 
@@ -144,6 +267,7 @@ curl http://localhost:9380/api/v1/datasets \
 **原因**:
 - Task Executor 未启动
 - HuggingFace 模型下载失败（国内网络）
+- OCR 模型下载到 CPU 运行极慢
 
 **解决**:
 ```bash
@@ -152,6 +276,9 @@ bash start.sh status
 
 # 如果挂了，设置 HF 镜像重启
 HF_ENDPOINT=https://hf-mirror.com bash start.sh restart
+
+# 确认 OCR 使用 GPU (见第五节)
+grep "load_model.*GPU\|load_model.*CPU" /tmp/ragflow/taskexec_*.log
 ```
 
 ### 2. Redis 连接失败
@@ -190,53 +317,90 @@ HF_ENDPOINT=https://hf-mirror.com bash start.sh restart
 
 **解决**: 修改 `start.sh` 顶部的 `BACKEND_PORT` / `FRONTEND_PORT` 变量，或杀掉占用进程。
 
-### 7. OCR 解析速度极慢（未使用 GPU）
+### 7. 解析速度慢但不报错
 
-**症状**: 文档解析一直 RUNNING，每个 PDF 耗时 7-15 分钟，Task Executor 日志显示 `load_model ... uses CPU`
+**症状**: 文档一直在 RUNNING，但 task executor 在运行且无异常日志。
 
-**原因**: `deepdoc/vision/ocr.py` 中 `cuda_is_available()` 通过 `torch.cuda.is_available()` 判断 GPU 可用性，但 RAGFlow venv 中未安装 PyTorch（OCR 实际使用 ONNX Runtime，不依赖 PyTorch）。即使 `onnxruntime-gpu` 已安装且 `CUDAExecutionProvider` 可用，仍回退到 CPU。
-
-**解决**: 已修改 `deepdoc/vision/ocr.py`，`cuda_is_available()` 优先检查 ONNX Runtime 的 `CUDAExecutionProvider`，不再依赖 PyTorch：
-
-```python
-def cuda_is_available():
-    try:
-        return 'CUDAExecutionProvider' in ort.get_available_providers()
-    except Exception:
-        ...
-```
-
-重启后日志应显示 `load_model ... uses GPU (device 0, ...)`。
-
-**性能对比**:
-
-| 指标 | CPU | GPU |
-|------|-----|-----|
-| 单页 OCR | ~5s | ~0.5s |
-| 100 页 PDF | ~8min | ~1min |
-
-**GPU 显存调优** (可选):
-
+**诊断方法**:
 ```bash
-export OCR_GPU_MEM_LIMIT_MB=4096  # 默认 2048MB，大模型可调高
+# 查看 worker 心跳 (done/lag)
+grep "reported heartbeat" /tmp/ragflow/taskexec_3.log | tail -1 | python3 -c "
+import json,sys;l=sys.stdin.read().strip().split('reported heartbeat: ')[1];h=json.loads(l)
+print(f'done={h[\"done\"]} failed={h[\"failed\"]} lag={h[\"lag\"]} pending={h[\"pending\"]}')"
+
+# lag 持续很高 → 积压大
+# done 不增长 → 可能大文档阻塞 (RAGFlow 按 12 页一组拆分 PDF)
+# pending 稳定 → 处理正常但慢
 ```
 
-### 8. start.sh 多 Worker 配置
+**可能原因**:
+1. OCR 使用 CPU 而非 GPU → 参考第五节
+2. 大 PDF (200+ 页) 表结构识别耗时 → 正常现象
+3. Embedding API 慢 → 检查 vLLM/Ollama
 
-`start.sh` 支持以下环境变量控制并发解析能力：
+### 8. Task Executor 反复崩溃
 
+**症状**: start.sh 启动后 worker 秒退，日志 `PermissionError`
+
+**原因**: `logs/` 目录下有 root 拥有的日志文件。
+
+**解决**:
 ```bash
-MAX_CONCURRENT_TASKS=10    # 每 worker 并发任务数 (默认 10)
-TASK_EXECUTOR_COUNT=3      # worker 进程数 (默认 3)
-TASK_EXECUTOR_OFFSET=3     # worker ID 起始编号，避免与其他实例冲突 (默认 3)
-export MAX_CONCURRENT_TASKS
+# logs/ 目录默认 world-writable，直接删除旧日志
+rm -f /home/wangzilong/EST/ragflow/logs/task_executor_*.log
+bash start.sh restart
 ```
 
-总并发解析容量 = `MAX_CONCURRENT_TASKS × TASK_EXECUTOR_COUNT`。例如默认配置 10×3=30 个并发解析槽位。
+### 9. 大批量上传后部分文档始终 UNSTART/queued
 
-## 八、生产部署建议
+**症状**: 上传 + 触发解析后，大量文档 status 一直不是 RUNNING。
+
+**原因**: 批量触发时 RAGFlow 内部任务队列已满 (code=102 "already being processed")，或 trigger_parse 超时。
+
+**解决**:
+```bash
+# 等待 5-10 分钟后重新触发解析
+curl -X POST http://localhost:9380/api/v1/datasets/<ds_id>/chunks \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"document_ids": ["<doc_id1>", "<doc_id2>", ...]}'
+
+# 如果 RAGFlow 返回 code=102，说明已在处理，忽略即可
+```
+
+**预防**: deepagents 批量上传接口已内置:
+- 批次结束后统一触发解析（不逐个轮询）
+- 最多 3 次重试即时失败的文档
+- 最终失败入 Kafka DLQ 待人工补偿
+
+## 十、批量上传与知识库管理
+
+通过 deepagents 的批量上传 API 集成 RAGFlow：
+
+```
+deepagents (api/ragflow_router.py)
+    ↓ POST /api/v1/batch/upload-from-folder
+    ↓ manifest + folder_path
+    ↓
+RAGFlow (rest API)
+    ↓ 上传 + SHA256 去重 + 元数据注入
+    ↓ 批量触发解析
+    ↓ Excel 索引构建 (图片/视频/文件库)
+```
+
+API 文档: [deepagents/docs/kb-api.md](../deepagents/docs/kb-api.md)
+
+关键特性:
+- SHA256 增量上传（二次上传秒级完成）
+- 熔断 + 限流 + Kafka DLQ 容错
+- 产品库解析完成自动联动写入文件库索引
+- 图片/视频库自动构建 Excel 索引（table chunking）
+
+## 十一、生产部署建议
 
 - 使用 `vite build` 编译前端静态文件，由 nginx 托管
 - 配置 systemd service 实现开机自启
 - MySQL / ES 数据目录挂载到宿主机防止数据丢失
 - 配置日志轮转 (`logrotate`)
+- GPU 服务器: 设置 `MAX_CONCURRENT_TASKS=10` + `TASK_EXECUTOR_COUNT=3`
+- 非 GPU 服务器: 降低 `MAX_CONCURRENT_TASKS=3` + `TASK_EXECUTOR_COUNT=1`
