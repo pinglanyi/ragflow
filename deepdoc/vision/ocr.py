@@ -84,6 +84,11 @@ def load_model(model_dir, nm, device_id: int | None = None):
 
     def cuda_is_available():
         try:
+            # Check ONNX Runtime providers directly instead of relying on PyTorch
+            return 'CUDAExecutionProvider' in ort.get_available_providers()
+        except Exception:
+            pass
+        try:
             pip_install_torch()
             import torch
             target_id = 0 if device_id is None else device_id

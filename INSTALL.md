@@ -190,6 +190,50 @@ HF_ENDPOINT=https://hf-mirror.com bash start.sh restart
 
 **解决**: 修改 `start.sh` 顶部的 `BACKEND_PORT` / `FRONTEND_PORT` 变量，或杀掉占用进程。
 
+### 7. OCR 解析速度极慢（未使用 GPU）
+
+**症状**: 文档解析一直 RUNNING，每个 PDF 耗时 7-15 分钟，Task Executor 日志显示 `load_model ... uses CPU`
+
+**原因**: `deepdoc/vision/ocr.py` 中 `cuda_is_available()` 通过 `torch.cuda.is_available()` 判断 GPU 可用性，但 RAGFlow venv 中未安装 PyTorch（OCR 实际使用 ONNX Runtime，不依赖 PyTorch）。即使 `onnxruntime-gpu` 已安装且 `CUDAExecutionProvider` 可用，仍回退到 CPU。
+
+**解决**: 已修改 `deepdoc/vision/ocr.py`，`cuda_is_available()` 优先检查 ONNX Runtime 的 `CUDAExecutionProvider`，不再依赖 PyTorch：
+
+```python
+def cuda_is_available():
+    try:
+        return 'CUDAExecutionProvider' in ort.get_available_providers()
+    except Exception:
+        ...
+```
+
+重启后日志应显示 `load_model ... uses GPU (device 0, ...)`。
+
+**性能对比**:
+
+| 指标 | CPU | GPU |
+|------|-----|-----|
+| 单页 OCR | ~5s | ~0.5s |
+| 100 页 PDF | ~8min | ~1min |
+
+**GPU 显存调优** (可选):
+
+```bash
+export OCR_GPU_MEM_LIMIT_MB=4096  # 默认 2048MB，大模型可调高
+```
+
+### 8. start.sh 多 Worker 配置
+
+`start.sh` 支持以下环境变量控制并发解析能力：
+
+```bash
+MAX_CONCURRENT_TASKS=10    # 每 worker 并发任务数 (默认 10)
+TASK_EXECUTOR_COUNT=3      # worker 进程数 (默认 3)
+TASK_EXECUTOR_OFFSET=3     # worker ID 起始编号，避免与其他实例冲突 (默认 3)
+export MAX_CONCURRENT_TASKS
+```
+
+总并发解析容量 = `MAX_CONCURRENT_TASKS × TASK_EXECUTOR_COUNT`。例如默认配置 10×3=30 个并发解析槽位。
+
 ## 八、生产部署建议
 
 - 使用 `vite build` 编译前端静态文件，由 nginx 托管
