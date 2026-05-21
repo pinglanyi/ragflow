@@ -227,9 +227,9 @@ cd web && npm install && PORT=9223 npm run dev -- --host 0.0.0.0 &
 
 ```
 产品库    4c0f8e72544d11f1b0904d93f269c4c9  (chunk_method=manual)
-图片库    4c138356544d11f1b0904d93f269c4c9  (chunk_method=naive)
-视频库    4c15fd2a544d11f1b0904d93f269c4c9  (chunk_method=naive)
-文件库    4c18d086544d11f1b0904d93f269c4c9  (chunk_method=naive)
+图片库    4c138356544d11f1b0904d93f269c4c9  (chunk_method=table, Excel索引)
+视频库    4c15fd2a544d11f1b0904d93f269c4c9  (chunk_method=table, Excel索引)
+文件库    4c18d086544d11f1b0904d93f269c4c9  (chunk_method=table, Excel索引)
 程序库    4c1bfee6544d11f1b0904d93f269c4c9  (chunk_method=table)
 经验库    4c1e4994544d11f1b0904d93f269c4c9  (chunk_method=table)
 ```
