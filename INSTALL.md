@@ -319,7 +319,22 @@ grep "load_model.*GPU\|load_model.*CPU" /tmp/ragflow/taskexec_*.log
 
 **症状**: `address already in use`
 
-**解决**: 修改 `start.sh` 顶部的 `BACKEND_PORT` / `FRONTEND_PORT` 变量，或杀掉占用进程。
+**原因**: 目标端口被其他进程或上次未清理干净的僵尸进程占用。
+
+**解决**:
+```bash
+# 查看占用端口的进程
+ss -tlnp | grep <端口号>
+
+# 杀掉占用进程
+kill -9 <PID>
+
+# 或者使用 start.sh 内置的端口清理 (stop 时自动执行)
+bash start.sh stop   # 会自动清理端口残留进程
+bash start.sh start
+```
+
+**常见僵尸进程**: `npm run dev` 的 vite 子进程在父进程被 kill 后可能继续存活。多次 `restart` 会积累多个僵尸 vite 争抢同一端口，导致前端无法访问。start.sh 的 `stop_all()` 已内置端口级清理。
 
 ### 7. 解析速度慢但不报错
 
@@ -419,6 +434,56 @@ sudo ldconfig
 export OCR_GPU_MEM_LIMIT_MB=0
 ```
 当前代码默认值已改为 `0`（见 §5.4），无需手动设置。
+
+### 12. 前端端口无法访问 (9223 vs 9222)
+
+**症状**: 服务器上 `curl localhost:9223` 返回 200，但浏览器打不开 `http://<IP>:9223/`；切换到 9222 可以访问，或者反过来。
+
+**原因**:
+- 某些网络环境/防火墙对特定端口有限制
+- 不同版本 vite 可能占用了不同端口
+
+**解决**:
+```bash
+# 方案一: 修改默认端口
+FRONTEND_PORT=9222 bash start.sh restart
+
+# 方案二: 永久修改 start.sh 顶部配置
+# 编辑 start.sh: FRONTEND_PORT=9222
+
+# 方案三: 检查是否有其他进程占用
+ss -tlnp | grep -E '922[0-9]'
+```
+
+### 13. PDF 解析失败: Coordinate 错误
+
+**症状**: 日志 `Coordinate lower is less than upper`，文档 run=FAIL，无法解析。
+
+**原因**: 部分 PDF 内部坐标信息异常（如国标 PDF），RAGFlow 文本提取层报坐标错误。
+
+**解决**: 将 PDF 转换为扫描版（图像 PDF），让 RAGFlow 走 OCR 流程绕过文本提取：
+```bash
+# 150 DPI JPEG 压缩 (130 页 ~18MB, 在 128MB 限制内)
+pdftoppm -r 150 -jpeg input.pdf page
+img2pdf page-*.jpg -o scanned.pdf
+
+# 300 DPI 质量更高但文件更大 (仅页数少的 PDF)
+pdftoppm -r 300 -png input.pdf page
+img2pdf page-*.png -o scanned.pdf
+```
+
+> **注意**: RAGFlow 单文件限制 128MB，扫描版 PDF 务必控制 DPI。
+
+### 14. 文件大小超限 (128MB)
+
+**症状**: 日志 `File size exceeds( <= 128Mb )`，上传成功但解析被拒绝。
+
+**原因**: RAGFlow 限制单文件最大 128MB。高 DPI 扫描版 PDF 容易超出。
+
+**解决**:
+- 降低扫描 DPI（从 300 → 150）
+- 使用 JPEG 而非 PNG 作为中间格式（JPEG 体积小很多）
+- 如果仍超出，拆分 PDF 分批上传
 
 ## 十、批量上传与知识库管理
 
