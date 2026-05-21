@@ -137,10 +137,14 @@ grep "load_model.*uses" /tmp/ragflow/taskexec_3.log | head -5
 ### 5.4 GPU 显存调优
 
 ```bash
-export OCR_GPU_MEM_LIMIT_MB=4096          # 默认 2048MB，大模型可调高
-export OCR_GPU_MEM_ARENA_SHRINKAGE=1      # 启用显存回收 (默认关闭)
-export OCR_INTRA_OP_NUM_THREADS=2         # ONNX 内部线程数 (默认 2)
+export OCR_GPU_MEM_LIMIT_MB=0               # 默认 0 (不限制)，单会话上限由 ONNX Runtime 自动管理
+export OCR_GPU_MEM_ARENA_SHRINKAGE=1         # 启用显存回收 (默认关闭)
+export OCR_INTRA_OP_NUM_THREADS=2            # ONNX 内部线程数 (默认 2)
 ```
+
+> **显存限制说明**: 默认 `0` (无限制)。旧版默认 `2048` MB，但 `tsr.onnx` 表结构识别模型在 90° 旋转检测时单次 Conv 操作需要 >1GB 连续显存，2GB arena 碎片化后分配失败导致 OCR fallback。改为 0 后 ONNX Runtime 按需动态分配，避免人为限制导致 OOM。
+>
+> 如果设置了非零值，建议 ≥4096 MB 以留足余量。
 
 ### 5.5 性能参考
 
@@ -372,6 +376,49 @@ curl -X POST http://localhost:9380/api/v1/datasets/<ds_id>/chunks \
 - 批次结束后统一触发解析（不逐个轮询）
 - 最多 3 次重试即时失败的文档
 - 最终失败入 Kafka DLQ 待人工补偿
+
+### 10. CUDA provider 加载失败 (libcudnn.so.9 not found)
+
+**症状**: 日志中出现 `Failed to create CUDAExecutionProvider. Require cuDNN 9.* and CUDA 12.*`，但 `cuda_is_available()` 返回 True，模型加载显示 "uses GPU"。
+
+**根因**: `onnxruntime-gpu` 的 `libonnxruntime_providers_cuda.so` 动态链接 `libcudnn.so.9`，该库不在系统库路径中。虽然 `onnxruntime.get_available_providers()` 会列出 `CUDAExecutionProvider`（因为 .so 文件存在），但创建实际推理会话 (InferenceSession) 时 .so 加载失败，ONNX Runtime 静默回退到 `CPUExecutionProvider`。
+
+**验证**:
+```bash
+# 检查 ONNX Runtime 实际使用的 provider
+.venv/bin/python -c "
+import onnxruntime as ort
+sess = ort.InferenceSession('rag/res/deepdoc/det.onnx', providers=['CUDAExecutionProvider'])
+print(sess.get_providers())  # 应显示 ['CUDAExecutionProvider', 'CPUExecutionProvider']，而非仅 ['CPUExecutionProvider']
+"
+
+# 检查动态链接依赖
+ldd .venv/lib/python3.*/site-packages/onnxruntime/capi/libonnxruntime_providers_cuda.so | grep cudnn
+# 输出: libcudnn.so.9 => not found  ← 问题确认
+```
+
+**解决**:
+```bash
+# 方案一: pip 安装 cuDNN 到 venv
+.venv/bin/pip install nvidia-cudnn-cu12
+
+# 方案二: 从 conda env 复制 cuDNN 到系统 CUDA 路径
+sudo cp /opt/anaconda3/envs/ragclient/lib/python3.10/site-packages/nvidia/cudnn/lib/libcudnn*.so.9 \
+   /usr/local/cuda-12.6/lib64/
+sudo ldconfig
+```
+
+### 11. tsr.onnx 表识别 OOM (BFCArena allocation failed)
+
+**症状**: 日志 `Available memory of XXX is smaller than requested bytes of 1038435840`，OCR 在某角度旋转检测时失败，回退到最佳角度完成。
+
+**根因**: `OCR_GPU_MEM_LIMIT_MB` 默认限制（旧版 2048MB）下，`tsr.onnx` 在 90° 旋转检测时单次 Conv 操作需要 ~1GB 连续显存，但 ONNX Runtime BFC arena 碎片化导致分配失败。
+
+**解决**: 将 `OCR_GPU_MEM_LIMIT_MB` 设为 `0`（不限制），由 ONNX Runtime 自动管理显存:
+```bash
+export OCR_GPU_MEM_LIMIT_MB=0
+```
+当前代码默认值已改为 `0`（见 §5.4），无需手动设置。
 
 ## 十、批量上传与知识库管理
 

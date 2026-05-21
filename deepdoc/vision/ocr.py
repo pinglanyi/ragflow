@@ -109,7 +109,7 @@ def load_model(model_dir, nm, device_id: int | None = None):
     # Shrink GPU memory after execution
     run_options = ort.RunOptions()
     if cuda_is_available():
-        gpu_mem_limit_mb = int(os.environ.get("OCR_GPU_MEM_LIMIT_MB", "2048"))
+        gpu_mem_limit_mb = int(os.environ.get("OCR_GPU_MEM_LIMIT_MB", "0"))
         arena_strategy = os.environ.get("OCR_ARENA_EXTEND_STRATEGY", "kNextPowerOfTwo")
         provider_device_id = 0 if device_id is None else device_id
         cuda_provider_options = {
