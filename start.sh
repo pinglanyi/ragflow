@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 # RAGFlow 一键启动脚本 — 后端 + 任务执行器 + 前端
 # 用法: bash start.sh [start|stop|status|restart]
@@ -10,6 +11,14 @@ WEB_DIR="$PROJECT_DIR/web"
 # 端口配置
 BACKEND_PORT="${BACKEND_PORT:-9380}"     # 后端 API 端口 (从 service_conf.yaml 读取, 这里仅用于 echo)
 FRONTEND_PORT="${FRONTEND_PORT:-9222}"   # 前端 UI 端口
+
+# 依赖服务端口 (与 conf/service_conf.yaml 对应)
+REDIS_PORT="${REDIS_PORT:-16380}"
+MYSQL_PORT="${MYSQL_PORT:-5456}"
+ES_PORT="${ES_PORT:-1200}"
+MINIO_PORT="${MINIO_PORT:-19000}"
+SUDO_PASSWORD="${SUDO_PASSWORD:-wzl@123}"
+DOCKER_COMPOSE_DIR="$PROJECT_DIR/docker"
 
 # 日志
 LOG_DIR="/tmp/ragflow"
@@ -43,6 +52,74 @@ kill_port() {
             kill -9 "$pid" 2>/dev/null || true
         fi
     done
+}
+
+# ══════════════════════════════════════════════════════════════════════
+# 使用 sudo 运行 docker 命令
+run_docker() {
+    if docker ps >/dev/null 2>&1; then
+        docker "$@"
+    else
+        echo "$SUDO_PASSWORD" | sudo -S docker "$@"
+    fi
+}
+
+run_docker_compose() {
+    if docker ps >/dev/null 2>&1; then
+        docker compose "$@"
+    else
+        echo "$SUDO_PASSWORD" | sudo -S docker compose "$@"
+    fi
+}
+
+check_port() {
+    ss -tlnp 2>/dev/null | grep -qE ":$1\s"
+}
+
+check_and_start_deps() {
+    local need_start=false
+    local missing=""
+
+    for dep in "$REDIS_PORT:Redis" "$MYSQL_PORT:MySQL" "$ES_PORT:ES" "$MINIO_PORT:MinIO"; do
+        local port="${dep%%:*}"
+        local name="${dep##*:}"
+        if ! check_port "$port"; then
+            need_start=true
+            missing="$missing $name($port)"
+        fi
+    done
+
+    if ! $need_start; then
+        echo "[deps] 所有依赖服务已在运行 ✓"
+        return 0
+    fi
+
+    echo "[deps] 依赖服务未启动:$missing"
+    echo "[deps] 通过 docker compose 启动基础服务..."
+
+    cd "$DOCKER_COMPOSE_DIR"
+    if run_docker_compose -f docker-compose-base.yml up -d 2>&1; then
+        echo "[deps] 等待服务就绪..."
+        for i in $(seq 1 30); do
+            local ready=true
+            check_port "$REDIS_PORT"  || ready=false
+            check_port "$MYSQL_PORT"  || ready=false
+            check_port "$ES_PORT"     || ready=false
+            check_port "$MINIO_PORT"  || ready=false
+            if $ready; then
+                echo "[deps] 所有依赖服务已就绪 ✓"
+                cd "$PROJECT_DIR"
+                return 0
+            fi
+            sleep 2
+        done
+        echo "[deps] 等待超时, 部分服务可能未完全就绪"
+        cd "$PROJECT_DIR"
+    else
+        echo "[deps] docker compose 启动失败!"
+        cd "$PROJECT_DIR"
+        return 1
+    fi
 }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -201,6 +278,7 @@ status_all() {
 case "${1:-start}" in
     start)
         echo "===== RAGFlow 一键启动 ====="
+        check_and_start_deps || { echo "[deps] 依赖启动失败, 终止"; exit 1; }
         start_server
         start_taskexec
         start_web
