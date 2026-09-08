@@ -34,6 +34,16 @@ export interface IDocumentInfo {
 }
 
 export interface IParserConfig {
+  ext?: Record<string, any>;
+  multimodal?: {
+    enabled?: boolean;
+    model?: string;
+    prompt?: string;
+    max_tokens?: number;
+    model_revision?: string;
+    enable_thinking?: boolean;
+    reuse?: boolean;
+  };
   delimiter?: string;
   html4excel?: boolean;
   layout_recognize?: string;

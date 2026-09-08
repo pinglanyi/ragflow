@@ -75,7 +75,10 @@ class EmbeddingService:
             parser_config = {}
 
         # Prepare text for embedding using EmbeddingUtils
-        titles, contents = EmbeddingUtils.prepare_texts_for_embedding(docs)
+        multimodal_enabled = parser_config.get("multimodal", {}).get("enabled", False)
+        titles, contents = EmbeddingUtils.prepare_texts_for_embedding(docs, use_question_kwd=not multimodal_enabled)
+        if multimodal_enabled and any(truncate(c, embedding_model.max_length - 10) != c for c in contents):
+            raise ValueError("Multimodal Markdown exceeds embedding context. Use a larger-context embedding model or smaller source chunks; parsed results remain archived.")
 
         # Encode titles using EmbeddingUtils for truncation
         tk_count = 0

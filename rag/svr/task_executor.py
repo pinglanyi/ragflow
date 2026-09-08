@@ -309,6 +309,9 @@ async def build_chunks(task, progress_callback):
     # Table parser column roles / mode are stored on the dataset (KB) parser_config;
     # chunk tasks carry document-level parser_config only — merge KB keys so manual roles apply.
     parser_config_for_chunk = merge_table_parser_config_from_kb(task)
+    from rag.svr.chunk_multimodal import configure_multimodal, parse_with_config
+
+    multimodal = configure_multimodal(task, parser_config_for_chunk)
     if task.get("parser_id", "").lower() == "table" and task.get("kb_parser_config"):
         logging.debug(
             "[TASK_EXECUTOR_DEBUG] table parser: merged KB keys into parser_config for chunk; "
@@ -355,6 +358,12 @@ async def build_chunks(task, progress_callback):
         logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
         raise
 
+    if multimodal.get("enabled"):
+        cks = await thread_pool_exec(
+            parse_with_config, cks, task, binary, multimodal,
+            progress_callback, partial(has_canceled, task["id"]),
+        )
+
     # Record raw chunks for comparison
     get_recording_context().record("raw_chunks", cks)
 
@@ -382,7 +391,8 @@ async def build_chunks(task, progress_callback):
         try:
             d = copy.deepcopy(document)
             d.update(chunk)
-            d["id"] = xxhash.xxh64((chunk["content_with_weight"] + str(d["doc_id"])).encode("utf-8", "surrogatepass")).hexdigest()
+            image_fingerprint = d.pop("_multimodal_image_sha256", "")
+            d["id"] = xxhash.xxh64((chunk["content_with_weight"] + str(d["doc_id"]) + image_fingerprint).encode("utf-8", "surrogatepass")).hexdigest()
             d["create_time"] = str(datetime.now()).replace("T", " ")[:19]
             d["create_timestamp_flt"] = datetime.now().timestamp()
 
@@ -694,7 +704,7 @@ async def embedding(docs, mdl, parser_config=None, callback=None):
     tts, cnts = [], []
     for d in docs:
         tts.append(d.get("docnm_kwd", "Title"))
-        c = "\n".join(d.get("question_kwd", []))
+        c = "" if parser_config.get("multimodal", {}).get("enabled") else "\n".join(d.get("question_kwd", []))
         if not c:
             c = d["content_with_weight"]
         c = re.sub(r"</?(table|td|caption|tr|th)( [^<>]{0,12})?>", " ", c)
@@ -712,6 +722,8 @@ async def embedding(docs, mdl, parser_config=None, callback=None):
     @timeout(60)
     def batch_encode(txts):
         nonlocal mdl
+        if parser_config.get("multimodal", {}).get("enabled") and any(truncate(c, mdl.max_length - 10) != c for c in txts):
+            raise ValueError("Multimodal Markdown exceeds embedding context. Use a larger-context embedding model or smaller source chunks; parsed results remain archived.")
         return mdl.encode([truncate(c, mdl.max_length - 10) for c in txts])
 
     cnts_batches = []

@@ -66,6 +66,7 @@ export default function DatasetSettings() {
       language: 'English',
       parser_config: {
         layout_recognize: DocumentType.DeepDOC,
+        multimodal: {},
         chunk_token_num: 512,
         delimiter: `\n`,
         enable_children: false,

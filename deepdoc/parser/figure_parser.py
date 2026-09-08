@@ -100,6 +100,8 @@ def vision_figure_parser_figure_xlsx_wrapper(images, callback=None, **kwargs):
 
 
 def vision_figure_parser_pdf_wrapper(tbls, callback=None, **kwargs):
+    if kwargs.get("parser_config", {}).get("multimodal", {}).get("enabled"):
+        return tbls
     if not tbls:
         return []
     sections = kwargs.get("sections")

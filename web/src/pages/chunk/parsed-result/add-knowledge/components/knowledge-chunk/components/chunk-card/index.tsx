@@ -11,7 +11,7 @@ import type { ChunkDocType, IChunk } from '@/interfaces/database/dataset';
 import { cn } from '@/lib/utils';
 import { CheckedState } from '@radix-ui/react-checkbox';
 import classNames from 'classnames';
-import DOMPurify from 'dompurify';
+import { ChunkMarkdown } from '@/components/chunk-markdown';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChunkTextMode } from '../../constant';
@@ -127,15 +127,12 @@ const ChunkCard = ({
           onClick={handleContentClick}
         >
           <div
-            dangerouslySetInnerHTML={{
-              __html: DOMPurify.sanitize(item.content_with_weight).trim(),
-            }}
             className={classNames(
               // Keep whitespaces?
               'text-wrap break-words whitespace-pre',
               textMode === ChunkTextMode.Ellipse && 'line-clamp-3',
             )}
-          />
+          ><ChunkMarkdown content={item.content_with_weight} /></div>
         </section>
 
         <div>

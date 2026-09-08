@@ -23,6 +23,7 @@ Provides parser factory and document chunking logic:
 """
 
 import logging
+from functools import partial
 from timeit import default_timer as timer
 from typing import Dict, List
 
@@ -87,6 +88,9 @@ async def run_chunking(
     try:
         # Merge table parser config
         parser_config = merge_table_parser_config_from_kb(ctx.raw_task)
+        from rag.svr.chunk_multimodal import configure_multimodal, parse_with_config
+
+        multimodal = configure_multimodal(ctx.raw_task, parser_config)
 
         async with ctx.chunk_limiter:
             cks = await thread_pool_exec(
@@ -100,6 +104,11 @@ async def run_chunking(
                 kb_id=ctx.kb_id,
                 parser_config=parser_config,
                 tenant_id=ctx.tenant_id,
+            )
+        if multimodal.get("enabled"):
+            cks = await thread_pool_exec(
+                parse_with_config, cks, ctx.raw_task, binary, multimodal,
+                ctx.progress_cb, partial(ctx.has_canceled_func, ctx.id),
             )
         logging.info("Chunking({}) {}/{} done".format(timer() - st, ctx.location, ctx.name))
         ctx.recording_context.record("parser_config_after_merge", parser_config)

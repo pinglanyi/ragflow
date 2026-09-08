@@ -1,4 +1,5 @@
 import { ParseType } from '@/constants/knowledge';
+import { multimodalParserSchema } from '@/components/multimodal-parser-options';
 import { t } from 'i18next';
 import { z } from 'zod';
 
@@ -21,6 +22,7 @@ export const formSchema = z
     parser_config: z
       .object({
         layout_recognize: z.string(),
+        multimodal: multimodalParserSchema,
         chunk_token_num: z.number(),
         delimiter: z.string(),
         enable_children: z.boolean(),

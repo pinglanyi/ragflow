@@ -44,6 +44,7 @@ import { ExcelToHtmlFormField } from '../excel-to-html-form-field';
 import { LayoutRecognizeFormField } from '../layout-recognize-form-field';
 import { MaxTokenNumberFormField } from '../max-token-number-from-field';
 import { MinerUOptionsFormField } from '../mineru-options-form-field';
+import { MultimodalParserOptions, multimodalParserSchema } from '../multimodal-parser-options';
 import { ButtonLoading } from '../ui/button';
 import { Input } from '../ui/input';
 import { DynamicPageRange } from './dynamic-page-range';
@@ -107,6 +108,7 @@ export function ChunkMethodDialog({
         .trim(),
       pipeline_id: z.string().optional(),
       parser_config: z.object({
+        multimodal: multimodalParserSchema,
         task_page_size: z.coerce.number().optional(),
         layout_recognize: z.string().optional(),
         chunk_token_num: z.coerce.number().optional(),
@@ -249,6 +251,7 @@ export function ChunkMethodDialog({
         parser_config: fillDefaultParserValue({
           pages: pages.length > 0 ? pages : [{ from: 1, to: 100000 }],
           ...omit(parserConfig, 'pages'),
+          multimodal: parserConfig?.multimodal ?? parserConfig?.ext?.multimodal ?? knowledgeDetails.parser_config?.multimodal ?? knowledgeDetails.parser_config?.ext?.multimodal ?? {},
           image_table_context_window:
             parserConfig?.image_table_context_window ??
             parserConfig?.image_context_size ??
@@ -329,6 +332,7 @@ export function ChunkMethodDialog({
 
             {parseType === ParseType.BuiltIn && (
               <>
+                <MultimodalParserOptions ownerTenantId={knowledgeDetails?.tenant_id} />
                 <div className="space-y-6 border-t-0.5 border-border-button pt-6 empty:hidden">
                   {showOne && (
                     <>

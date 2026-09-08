@@ -159,7 +159,9 @@ def by_mineru(
                 # VLM-generated semantic descriptions (parity with deepdoc's
                 # VisionFigureParser). Best-effort — fall back silently if
                 # no vision model is available.
-                if "vision_model" not in kwargs:
+                if kwargs.get("parser_config", {}).get("multimodal", {}).get("enabled"):
+                    kwargs["vision_model"] = None
+                elif "vision_model" not in kwargs:
                     try:
                         vision_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.VISION)
                         kwargs["vision_model"] = LLMBundle(tenant_id=tenant_id, model_config=vision_model_config, lang=lang)

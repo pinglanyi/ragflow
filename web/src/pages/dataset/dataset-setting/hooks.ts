@@ -37,6 +37,7 @@ export const useFetchKnowledgeConfigurationOnMount = (
     const parser_config = {
       ...form.formState?.defaultValues?.parser_config,
       ...knowledgeDetails.parser_config,
+      multimodal: knowledgeDetails.parser_config?.multimodal ?? knowledgeDetails.parser_config?.ext?.multimodal ?? {},
       raptor: {
         ...form.formState?.defaultValues?.parser_config?.raptor,
         ...knowledgeDetails.parser_config?.raptor,

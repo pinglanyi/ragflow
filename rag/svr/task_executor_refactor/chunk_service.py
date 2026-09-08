@@ -191,7 +191,8 @@ class ChunkService:
             try:
                 d = copy.deepcopy(document)
                 d.update(chunk)
-                d["id"] = xxhash.xxh64((chunk["content_with_weight"] + str(d["doc_id"])).encode("utf-8", "surrogatepass")).hexdigest()
+                image_fingerprint = d.pop("_multimodal_image_sha256", "")
+                d["id"] = xxhash.xxh64((chunk["content_with_weight"] + str(d["doc_id"]) + image_fingerprint).encode("utf-8", "surrogatepass")).hexdigest()
                 d["create_time"] = str(datetime.now()).replace("T", " ")[:19]
                 d["create_timestamp_flt"] = datetime.now().timestamp()
 

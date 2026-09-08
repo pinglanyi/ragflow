@@ -10,7 +10,7 @@ import { Switch } from '@/components/ui/switch';
 import { IChunk } from '@/interfaces/database/dataset';
 import { CheckedState } from '@radix-ui/react-checkbox';
 import classNames from 'classnames';
-import DOMPurify from 'dompurify';
+import { ChunkMarkdown } from '@/components/chunk-markdown';
 import { useEffect, useState } from 'react';
 import { ChunkTextMode } from '../../constant';
 import styles from './index.module.less';
@@ -101,13 +101,10 @@ const ChunkCard = ({
           className={styles.content}
         >
           <div
-            dangerouslySetInnerHTML={{
-              __html: DOMPurify.sanitize(item.content_with_weight),
-            }}
             className={classNames(styles.contentText, {
               [styles.contentEllipsis]: textMode === ChunkTextMode.Ellipse,
             })}
-          ></div>
+          ><ChunkMarkdown content={item.content_with_weight} /></div>
         </section>
         <div>
           <Switch

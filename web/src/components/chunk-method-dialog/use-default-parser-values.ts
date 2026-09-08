@@ -9,6 +9,7 @@ export function useDefaultParserValues() {
   const defaultParserValues = useMemo(() => {
     const defaultParserValues = {
       task_page_size: 12,
+      multimodal: {},
       layout_recognize: ParseDocumentType.DeepDOC,
       chunk_token_num: 512,
       delimiter: '\n',

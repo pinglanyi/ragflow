@@ -1,4 +1,6 @@
 import { useFormContext, useWatch } from 'react-hook-form';
+import { MultimodalParserOptions } from '@/components/multimodal-parser-options';
+import { useKnowledgeBaseContext } from '../contexts/knowledge-base-context';
 
 import { DocumentParserType } from '@/constants/knowledge';
 import { useMemo } from 'react';
@@ -41,6 +43,7 @@ function EmptyComponent() {
 }
 
 export function ChunkMethodForm() {
+  const ownerTenantId = useKnowledgeBaseContext().knowledgeBase?.tenant_id;
   const form = useFormContext();
 
   const finalParserId: DocumentParserType = useWatch({
@@ -58,6 +61,7 @@ export function ChunkMethodForm() {
     <section className="h-full flex flex-col">
       <div className="overflow-auto flex-1 min-h-0">
         <ConfigurationComponent></ConfigurationComponent>
+        <MultimodalParserOptions ownerTenantId={ownerTenantId} />
       </div>
     </section>
   );
