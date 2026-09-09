@@ -125,11 +125,26 @@ export OCR_CUDNN_CONV_ALGO_SEARCH=DEFAULT
 
 修改后重启 task executor，使模型 session 重新创建。CPU 回退可能降低速度；这些回归测试不等于在 RTX PRO 5000 上完成 CUDA/cuDNN 联调。Picture 多模态模式跳过本地 OCR，模型计算仍由所选本地服务或商用 API 执行。
 
-### 本次回归与上线检查
+### 使用 start.sh run 的 CUDA 13 环境
+
+`start.sh run` 与 `start.sh start` 等效，不会替换已经运行的进程。API、worker、可选 Admin 经由 `scripts/start_python.py` 启动：自动查找当前 `.venv` 中的 NVIDIA/Torch 动态库目录，将 cuDNN 放在系统 CUDA 目录之前，在进程启动时生效；同一服务进程中先导入 Torch，再导入 ORT。继承的 OpenFOAM 等路径保留在后方，不改系统配置。前端和 Docker 依赖不使用此 Python 包装入口。
+
+本次服务器验证使用 Torch `2.14.0+cu130`、cuDNN `9.24.0`、ORT `1.27.0`。脚本不自动安装依赖；检测到 CUDA 13 搭配旧版 ORT 会停止启动并提示。仓库依赖仍锁定 ORT `1.23.2`，暂勿在此 CUDA 13 测试环境运行 `uv sync`，以免回退版本。
+
+```bash
+bash start.sh check-runtime
+bash start.sh restart
+bash start.sh logs taskexec
+```
+
+`check-runtime` 只验证库导入，不验证 OCR 准确率或 CUDA 卷积。运行日志开头的 `[runtime]` 行记录 Python、Torch、CUDA、ORT 和实际库搜索路径。重启后请重新解析真实文档，确认不再出现子库加载失败或 `Falling back to ['CPUExecutionProvider']`。`Conv ... Fallback mode` 则是保守 cuDNN 算法的提示，不等于执行器切换到 CPU。脚本此次不修改算法设置和 OCR 析构清理行为。
+
+### 回归命令
 
 ```bash
 python test/unit_test/test_chunk_multimodal_archive.py -v
 python test/unit_test/test_model_discovery_ocr_runtime.py -v
+python test/unit_test/test_start_runtime.py -v
 node --test test/unit_test/model_type_edit.test.cjs
 ```
 

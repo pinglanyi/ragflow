@@ -4,7 +4,7 @@
 # 参考 deepagents/scripts/start_ragflow.sh 改写: 去掉了 DeepAgents 代理,
 # 端口改为从 conf/service_conf.yaml 自动解析, 组件入口适配本仓库代码。
 #
-# 用法: bash start.sh [start|stop|status|restart|logs [name]]
+# 用法: bash start.sh [run|start|stop|status|restart|check-runtime|logs [name]]
 #
 # 启动内容:
 #   1. 依赖服务  (docker compose -f docker/docker-compose-base.yml up -d)
@@ -39,6 +39,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR"
 CONF_FILE="${RAGFLOW_SERVICE_CONF:-$PROJECT_DIR/conf/service_conf.yaml}"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
+PYTHON_BOOTSTRAP="$PROJECT_DIR/scripts/start_python.py"
 WEB_DIR="$PROJECT_DIR/web"
 DOCKER_COMPOSE_DIR="$PROJECT_DIR/docker"
 
@@ -327,7 +328,7 @@ start_server() {
     fi
     echo "[server] 启动 Web Server (端口 $BACKEND_PORT) → 日志 $LOG_SERVER"
     cd "$PROJECT_DIR" || return 1
-    launch_bg "$PID_SERVER" "$LOG_SERVER" "$VENV_PYTHON" api/ragflow_server.py
+    launch_bg "$PID_SERVER" "$LOG_SERVER" "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" api/ragflow_server.py
     sleep 5
     if [ -f "$PID_SERVER" ] && kill -0 "$(cat "$PID_SERVER")" 2>/dev/null; then
         echo "[server] 进程已拉起 PID=$(cat "$PID_SERVER"), 等待端口 $BACKEND_PORT 就绪..."
@@ -353,7 +354,7 @@ start_admin() {
     fi
     echo "[admin] 启动 Admin Server (端口 ${ADMIN_PORT:-9381}) → 日志 $LOG_ADMIN"
     cd "$PROJECT_DIR" || return 1
-    launch_bg "$PID_ADMIN" "$LOG_ADMIN" "$VENV_PYTHON" admin/server/admin_server.py
+    launch_bg "$PID_ADMIN" "$LOG_ADMIN" "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" admin/server/admin_server.py
     sleep 5
     if [ -f "$PID_ADMIN" ] && kill -0 "$(cat "$PID_ADMIN")" 2>/dev/null; then
         echo "[admin] 启动成功 PID=$(cat "$PID_ADMIN")"
@@ -379,7 +380,7 @@ start_taskexec() {
             echo "[taskexec-$type-$worker_id] 启动 Task Executor (类型=$type ID=$worker_id)..."
             cd "$PROJECT_DIR" || return 1
             launch_bg "$pid_file" "$LOG_DIR/taskexec_${type}_${worker_id}.log" \
-                "$VENV_PYTHON" rag/svr/task_executor.py -t "$type" -i "$worker_id"
+                "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" rag/svr/task_executor.py -t "$type" -i "$worker_id"
             sleep 2
             if kill -0 "$(cat "$pid_file")" 2>/dev/null; then
                 echo "[taskexec-$type-$worker_id] 启动成功 PID=$(cat "$pid_file")"
@@ -524,13 +525,14 @@ logs_all() {
 
 # ============================================================================
 case "${1:-start}" in
-    start)
+    start|run)
         echo "===== RAGFlow 一键启动 ====="
+        "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" --check || { echo "[runtime] 环境检查失败，未启动服务" >&2; exit 1; }
         check_and_start_deps || { echo "[deps] 依赖启动失败, 终止"; exit 1; }
-        start_server
-        start_taskexec
-        start_web
-        start_admin
+        start_server || exit 1
+        start_taskexec || exit 1
+        start_web || exit 1
+        start_admin || exit 1
         echo "===== 全部启动完成 ====="
         echo "启动耗时较长时请耐心等待初始化, 或查看日志: bash start.sh logs server"
         ;;
@@ -539,6 +541,9 @@ case "${1:-start}" in
         ;;
     status)
         status_all
+        ;;
+    check-runtime)
+        exec "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" --check
         ;;
     restart)
         stop_all
@@ -549,7 +554,7 @@ case "${1:-start}" in
         logs_all "${2:-all}"
         ;;
     *)
-        echo "用法: bash start.sh [start|stop|status|restart|logs [server|web|taskexec|admin|all]]"
+        echo "用法: bash start.sh [run|start|stop|status|restart|check-runtime|logs [server|web|taskexec|admin|all]]"
         exit 1
         ;;
 esac
