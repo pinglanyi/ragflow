@@ -37,17 +37,17 @@ export const MODEL_FIELD_SCHEMA: AddCustomModelDialogFields[] = [
   {
     name: 'model_types',
     label: 'modelType',
-    type: 'multi-select',
-    required: false,
+    type: 'checkbox-group',
+    required: true,
     defaultValue: [],
     options: [
       { value: 'chat', label: 'modelTypes.chat' },
       { value: 'embedding', label: 'modelTypes.embedding' },
       { value: 'rerank', label: 'modelTypes.rerank' },
       { value: 'tts', label: 'modelTypes.tts' },
-      { value: 'image2text', label: 'modelTypes.image2text' },
+      { value: 'vision', label: 'modelTypes.image2text' },
       { value: 'ocr', label: 'modelTypes.ocr' },
-      { value: 'speech2text', label: 'modelTypes.speech2text' },
+      { value: 'asr', label: 'modelTypes.speech2text' },
     ],
   },
   {
@@ -82,7 +82,7 @@ export const useCustomModelFields = (): AddCustomModelDialogFields[] => {
         label: t(field.label),
         options: field.options?.map((opt) => ({
           value: opt.value,
-          label: t(opt.label),
+          label: field.name === 'model_types' ? `${t(opt.label)} (${opt.value})` : t(opt.label),
         })),
       })),
     [t],

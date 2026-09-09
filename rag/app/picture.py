@@ -20,9 +20,10 @@ import logging
 import os
 import re
 import tempfile
+from functools import lru_cache
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from api.db.services.llm_service import LLMBundle
 from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type, get_first_provider_model_name, resolve_model_config, ensure_paddleocr_from_env
@@ -31,14 +32,18 @@ from common.parser_config_utils import normalize_layout_recognizer
 from common.string_utils import clean_markdown_block
 from deepdoc.vision import OCR
 from rag.nlp import attach_media_context, rag_tokenizer, tokenize
+from rag.svr.chunk_multimodal import with_picture_filename
 
-ocr = OCR()
+@lru_cache(maxsize=1)
+def _get_ocr():
+    return OCR()
 
 # Gemini supported MIME types
 VIDEO_EXTS = [".mp4", ".mov", ".avi", ".flv", ".mpeg", ".mpg", ".webm", ".wmv", ".3gp", ".3gpp", ".mkv"]
 
 
 def chunk(filename, binary, tenant_id, lang, callback=None, **kwargs):
+    callback = callback or (lambda *args, **kwargs: None)
     doc = {
         "docnm_kwd": filename,
         "title_tks": rag_tokenizer.tokenize(re.sub(r"\.[a-zA-Z]+$", "", filename)),
@@ -49,6 +54,8 @@ def chunk(filename, binary, tenant_id, lang, callback=None, **kwargs):
     image_ctx = max(0, int(parser_config.get("image_context_size", 0) or 0))
 
     if any(filename.lower().endswith(ext) for ext in VIDEO_EXTS):
+        if parser_config.get("multimodal", {}).get("enabled"):
+            raise ValueError("Picture multimodal parsing requires an image, not a video; disable it for video parsing.")
         try:
             doc.update(
                 {
@@ -65,7 +72,8 @@ def chunk(filename, binary, tenant_id, lang, callback=None, **kwargs):
         except Exception as e:
             callback(prog=-1, msg=str(e))
     else:
-        img = Image.open(io.BytesIO(binary)).convert("RGB")
+        with Image.open(io.BytesIO(binary)) as source_image:
+            img = ImageOps.exif_transpose(source_image).convert("RGB")
         doc.update(
             {
                 "image": img,
@@ -73,17 +81,24 @@ def chunk(filename, binary, tenant_id, lang, callback=None, **kwargs):
             }
         )
 
+        if parser_config.get("multimodal", {}).get("enabled"):
+            # The executor performs the archived VLM call before embedding.
+            # Do not run OCR or the old short-text-only description path first.
+            doc["_picture_filename"] = filename
+            callback(0.4, "Picture ready for direct multimodal parsing (OCR skipped).")
+            return [doc]
+
         # Try PaddleOCR if configured as layout_recognize
         txt = _try_paddleocr_image(filename, binary, tenant_id, parser_config, callback)
 
         if not txt:
             # Fallback to local deepdoc OCR
-            bxs = ocr(np.array(img))
+            bxs = _get_ocr()(np.array(img))
             txt = "\n".join([t[0] for _, t in bxs if t[0]])
 
         callback(0.4, "Finish OCR: (%s ...)" % txt[:12])
         if (eng and len(txt.split()) > 32) or len(txt) > 32:
-            tokenize(doc, txt, eng, language=lang)
+            tokenize(doc, with_picture_filename(txt, filename), eng, language=lang)
             callback(0.8, "OCR results is too long to use CV LLM.")
             return attach_media_context([doc], 0, image_ctx)
 
@@ -97,7 +112,7 @@ def chunk(filename, binary, tenant_id, lang, callback=None, **kwargs):
                 ans = cv_mdl.describe(img_binary.read())
             callback(0.8, "CV LLM respond: %s ..." % ans[:32])
             txt += "\n" + ans
-            tokenize(doc, txt, eng, language=lang)
+            tokenize(doc, with_picture_filename(txt, filename), eng, language=lang)
             return attach_media_context([doc], 0, image_ctx)
         except Exception as e:
             callback(prog=-1, msg=str(e))

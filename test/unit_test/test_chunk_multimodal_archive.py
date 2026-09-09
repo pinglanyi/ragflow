@@ -23,6 +23,57 @@ def response(content="# Motor\n\n| Model | Power |\n| --- | --- |\n| A | 10 kW |
 
 
 class ArchiveTest(unittest.TestCase):
+    def test_picture_direct_mode_skips_ocr_and_defers_model_call(self):
+        import io
+        import re
+        from PIL import Image, ImageOps
+        from unittest.mock import Mock
+        source = Path(__file__).resolve().parents[2] / "rag/app/picture.py"
+        func = next(n for n in ast.parse(source.read_text(encoding="utf-8")).body if isinstance(n, ast.FunctionDef) and n.name == "chunk")
+        namespace = {"io": io, "re": re, "Image": Image, "ImageOps": ImageOps, "VIDEO_EXTS": [".mp4"],
+                     "rag_tokenizer": types.SimpleNamespace(tokenize=lambda s: s),
+                     "_try_paddleocr_image": Mock(side_effect=AssertionError("OCR must not run")),
+                     "tokenize": lambda doc, text, *a, **kw: doc.update(content_with_weight=text)}
+        exec(compile(ast.Module(body=[func], type_ignores=[]), str(source), "exec"), namespace)
+        png = io.BytesIO()
+        Image.new("RGB", (24, 24)).save(png, format="PNG")
+        result = namespace["chunk"]("CAN接线图.png", png.getvalue(), "tenant", "Chinese", parser_config={"multimodal": {"enabled": True}})
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["_picture_filename"], "CAN接线图.png")
+        self.assertEqual(result[0]["image"].size, (24, 24))
+        rotated = io.BytesIO()
+        img = Image.new("RGB", (20, 30))
+        exif = Image.Exif()
+        exif[274] = 6
+        img.save(rotated, format="JPEG", exif=exif)
+        result = namespace["chunk"]("旋转照片.jpg", rotated.getvalue(), "tenant", "Chinese", parser_config={"multimodal": {"enabled": True}})
+        self.assertEqual(result[0]["image"].size, (30, 20))
+        with self.assertRaisesRegex(ValueError, "video"):
+            namespace["chunk"]("a.mp4", b"video", "tenant", "Chinese", parser_config={"multimodal": {"enabled": True}})
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        self.assertFalse(any(isinstance(n, ast.Assign) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name) and n.value.func.id == "OCR" for n in tree.body))
+
+    def test_picture_filename_is_indexed_and_archived_without_poisoning_cache(self):
+        from PIL import Image
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *a, **kw: chunk.update(content_with_weight=text)
+        calls = []
+        def complete(*args):
+            calls.append(1)
+            return response("# 图片描述\nCAN 模块连接控制器。")
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete", complete):
+            for name in ["CAN接线图.png", "更名后的接线图.png"]:
+                task = {"tenant_id": "tenant", "doc_id": "doc", "name": name, "id": "task"}
+                chunk = {"image": Image.new("RGB", (24, 24)), "_picture_filename": name}
+                result = m.parse_chunks([chunk], task, b"image", {}, self.model, lambda **kw: None)
+                self.assertIn(name, result[0]["content_with_weight"])
+                self.assertIn("CAN 模块", result[0]["content_with_weight"])
+                self.assertNotIn("_picture_filename", result[0])
+        self.assertEqual(len(calls), 1)
+        manifests = [json.loads(p.read_text(encoding="utf-8")) for p in Path(self.temp.name).rglob("runs/*.json")]
+        for manifest in manifests:
+            self.assertIn(manifest["name"], manifest["chunks"][0]["indexed_markdown"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

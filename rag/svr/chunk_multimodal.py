@@ -93,6 +93,13 @@ def screenshot_bytes(image):
     return buffer.getvalue()
 
 
+def with_picture_filename(markdown, filename):
+    """Add trusted source identity after inference, not to the reusable cache."""
+    name = " ".join(str(filename).split())
+    fence = "`" * (max((len(run) for run in re.findall(r"`+", name)), default=0) + 1)
+    return f"图片文件名：{fence} {name} {fence}\n\n{markdown}"
+
+
 def configure_multimodal(task, parser_config):
     def options(config):
         config = config or {}
@@ -225,7 +232,7 @@ def parse_chunks(chunks, task, binary, options, model, progress_callback, cancel
         for index, chunk in enumerate(chunks):
             if cancelled and cancelled():
                 raise RuntimeError("Multimodal parsing cancelled")
-            source = {"file_sha256": manifest["file_sha256"], "positions": chunk.get("position_int", []), "chunk_index": index}
+            source = {"file_sha256": manifest["file_sha256"], "filename": task["name"], "positions": chunk.get("position_int", []), "chunk_index": index}
             png = screenshot_bytes(chunk.get("image"))
             source_key = _hash(png + _json_bytes(source["positions"] or {"unlocated_index": index}))
             if source_key in seen_sources:
@@ -236,11 +243,14 @@ def parse_chunks(chunks, task, binary, options, model, progress_callback, cancel
             # Parent text must not retain the unprocessed OCR content.
             if "mom_with_weight" in chunk:
                 raise ValueError("Disable child chunks when using screenshot multimodal parsing")
+            picture_filename = chunk.pop("_picture_filename", None)
+            if picture_filename is not None:
+                markdown = with_picture_filename(markdown, picture_filename)
             tokenize(chunk, markdown, task.get("language", "").lower() == "english", language=task.get("language") or "Chinese")
             chunk["_multimodal_image_sha256"] = source_key
             parsed_chunks.append(chunk)
             seen_sources[source_key] = reference
-            manifest["chunks"].append({**source, **reference, "screenshot_sha256": _hash(png)})
+            manifest["chunks"].append({**source, **reference, "screenshot_sha256": _hash(png), "indexed_markdown": markdown})
             _write(manifest_path, _json_bytes(manifest))
             progress_callback(msg=f"Multimodal Markdown {index + 1}/{len(chunks)} (archive reused: {reference['cache_hit']})")
         manifest["status"] = "ok"

@@ -1722,6 +1722,7 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取实体和关系
       modelNameRequired: '请输入模型名称',
       modelNameDuplicate: '模型名称已存在',
       modelTypeRequired: '请至少选择一个模型类型',
+      modelTypeSelectionHint: '模型名仅用于初始建议，请勾选实际支持的类型并取消误选项。纯向量模型只选 embedding；图片理解模型选择 vision。',
       modelMaxTokensMessage: '最大 Token 数必须为数字',
       modelMaxTokensMinMessage: '最大 Token 数不能小于 0',
     },

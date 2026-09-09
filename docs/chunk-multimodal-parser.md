@@ -76,7 +76,68 @@ python scripts/multimodal_archive.py import /home/wangzilong/multimodal-results.
 
 API 失败保留错误类型；收到响应后先保存完整响应，再校验。无效结果最多重新看图修正一次，两次都无效则任务失败。成功的 Markdown 与所有旧尝试均保留，`success.json` 只指向当前可复用版本。取消或失败后重新运行可复用前面已完成的截图；缓存命中不调用模型，但仍重新分词与生成向量。
 
-## 验收
+## Picture 图片文件直接解析（2026-09-09）
+
+适用于本仓库 Python task executor 的 Picture 解析方式。开启后直接将图片传给所选多模态模型，不先跑 OCR，也不受原流程“文字超过 32 就不描述图片”的限制。关闭开关则保留默认解析流程。视频不适用该开关，误用时会明确报错。
+
+前端操作：
+
+1. 在模型设置中配置本地 vLLM 或商用 OpenAI 兼容 API；点击模型类型旁的编辑图标，勾选**视觉（vision）**。Embedding 模型只勾选 **embedding**，不要保留误判的 chat。
+2. 在知识库解析设置或单文件解析设置中选择 **Picture**，打开**图片多模态直接解析**，选择模型。
+3. 提示词留空使用内置规则，也可自定义。默认关闭 Qwen 思考模式、最大输出 8192 Token、开启归档复用。复杂大图若出现输出截断，可在模型支持范围内提高上限。
+4. 保存设置，重新解析图片。已有索引不会因修改设置自动重建。
+
+最终检索文本由两部分组成：程序添加的图片文件名，以及模型生成的 Markdown。示例：
+
+```markdown
+图片文件名：` CAN扩展模块接线图.png `
+
+## 图片描述
+图中包含……
+
+## 表格
+| 模块 | 电源 |
+| --- | --- |
+| IA321A | 24 V |
+```
+
+文件名来自上传文件信息，不依赖模型识别或提示词；同一图片改名后复用描述，但重新附上当前文件名。文件名和描述一起分词并参与向量化，图片引用仍走原来的存储/引用链路，不让模型猜 URL。因此无需另行手填“图片描述”元数据；业务分类、设备编号等额外筛选字段仍可按需要维护。
+
+输入图片按 EXIF 纠正旋转方向后转换为 RGB PNG，不做有损缩放。表格要求将合并值复制到实际覆盖的行列，多层表头组合、嵌套表拆平；图示要求描述可见实体、连线和条件。不确定内容应标注，不允许补造。程序校验空响应、输出截断、HTML 表格及 Markdown 表格列数；**不能自动证明每个数值或连线都正确**，关键工业参数仍需抽检。
+
+归档中 `entries/.../attempts/.../result.md` 保存模型本身的输出；`runs/运行ID.json` 的 `chunks[].indexed_markdown` 保存本次实际入库文本（含文件名），同文件名、文档 ID 和归档键一起随原有同步脚本导出。响应无效或 API 失败不会悄悄退回 OCR 冒充多模态成功；失败记录保留，成功缓存不被失败重试覆盖。
+
+### 模型类型修复
+
+类型改为必选复选框，可多选真实具备的能力。新建实例时编辑类型只更新草稿，保存使用该类型；已保存实例更新成功后才显示为已修改；未添加模型可先编辑再添加。重新获取模型列表时，已配置类型优先于按名字猜测的类型。`emb` 分隔词也会被识别为 embedding，但名字仅是初始建议，不是模型能力的验证结果。
+
+### DeepDOC ONNX 显存异常
+
+针对日志中 `BFCArena / p2o.Conv.0` 请求约 `3.8e18` 字节的异常，不能简单判断为普通显存不足。修复包含正确传递 `sess_options`、保守 cuDNN 卷积配置、检查输入张量、串行执行共享 session，以及识别到内存分配类错误后对该 session 切换 CPU 重试。CUDA 非法访问、参数错误等非分配异常不回退，CPU 也失败则继续报错，不返回假 OCR 结果。日志记录模型、输入尺寸和数据大小，便于服务器定位。
+
+Ubuntu worker 启动前可设置：
+
+```bash
+export OCR_DEVICE=auto             # auto / cpu / cuda；排障可用 cpu
+export OCR_GPU_FALLBACK_CPU=1      # GPU 内存分配失败后允许 CPU 接管
+export OCR_CUDNN_CONV_ALGO_SEARCH=DEFAULT
+```
+
+修改后重启 task executor，使模型 session 重新创建。CPU 回退可能降低速度；这些回归测试不等于在 RTX PRO 5000 上完成 CUDA/cuDNN 联调。Picture 多模态模式跳过本地 OCR，模型计算仍由所选本地服务或商用 API 执行。
+
+### 本次回归与上线检查
+
+```bash
+python test/unit_test/test_chunk_multimodal_archive.py -v
+python test/unit_test/test_model_discovery_ocr_runtime.py -v
+node --test test/unit_test/model_type_edit.test.cjs
+```
+
+最后一条使用 `web/node_modules/typescript`，也可通过 `TYPESCRIPT_PATH` 指定 TypeScript 编译器路径。测试加载实际 Hook 逻辑、隔离 React 状态与网络依赖，不替代浏览器交互测试。前端上线前在安装依赖的环境执行 `npm run type-check` 和 `npm run build`。
+
+服务器验收至少包含：纯图、图文混排、复杂表格各一张；通过文件名及内容检索；检查图片引用；同图重解析确认缓存复用；改名后确认新文件名且没有重复模型调用；embedding 类型保存和连接验证。
+
+## 原有 PDF 验收
 
 ```bash
 python test/unit_test/test_chunk_multimodal_archive.py -v

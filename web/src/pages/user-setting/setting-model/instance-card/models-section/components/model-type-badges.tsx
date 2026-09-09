@@ -73,7 +73,7 @@ export function ModelTypeBadges({
       {showEdit && (
         <button
           type="button"
-          className="ml-1 size-5 flex items-center justify-center rounded-md text-text-secondary opacity-0 transition-all hover:bg-bg-card hover:text-text-primary group-hover:opacity-100 focus-visible:opacity-100"
+          className="ml-1 size-5 flex items-center justify-center rounded-md text-text-secondary hover:bg-bg-card hover:text-text-primary"
           onClick={(e) => {
             e.stopPropagation();
             onEdit?.();

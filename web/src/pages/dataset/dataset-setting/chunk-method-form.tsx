@@ -61,7 +61,7 @@ export function ChunkMethodForm() {
     <section className="h-full flex flex-col">
       <div className="overflow-auto flex-1 min-h-0">
         <ConfigurationComponent></ConfigurationComponent>
-        <MultimodalParserOptions ownerTenantId={ownerTenantId} />
+        <MultimodalParserOptions ownerTenantId={ownerTenantId} picture={finalParserId === DocumentParserType.Picture} />
       </div>
     </section>
   );

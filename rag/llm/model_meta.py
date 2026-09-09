@@ -14,6 +14,7 @@
 #  limitations under the License.
 #
 import json
+import re
 import aiohttp
 from abc import ABC
 from urllib.parse import urlparse
@@ -417,9 +418,10 @@ class OpenAIAPICompatible(Base):
 
     @classmethod
     def _infer_model_types(cls, model_name):
+        model_name = model_name.lower()
         if cls._contains_hint(model_name, cls._RERANK_HINTS):
             return [LLMType.RERANK.value]
-        if cls._contains_hint(model_name, cls._EMBEDDING_HINTS):
+        if cls._contains_hint(model_name, cls._EMBEDDING_HINTS) or re.search(r"(?:^|[^a-z0-9])emb(?:$|[^a-z0-9])", model_name):
             return [LLMType.EMBEDDING.value]
         if cls._contains_hint(model_name, cls._ASR_HINTS):
             return [LLMType.ASR.value]
@@ -445,11 +447,15 @@ class OpenAIAPICompatible(Base):
             if not model_name:
                 continue
 
-            model_name_lower = model_name.lower()
+            declared_types = model.get("model_types") or model.get("model_type") or []
+            if isinstance(declared_types, str):
+                declared_types = [declared_types]
+            allowed_types = {kind.value for kind in LLMType}
+            explicit_types = list(dict.fromkeys(t.lower() for t in declared_types if isinstance(t, str) and t.lower() in allowed_types)) if isinstance(declared_types, list) else []
             model_list.append(
                 {
                     "name": model_name,
-                    "model_types": self._infer_model_types(model_name_lower),
+                    "model_types": explicit_types or self._infer_model_types(model_name),
                     "features": [],
                     "max_tokens": (model.get("max_tokens") or model.get("max_completion_tokens") or model.get("context_length") or model.get("max_model_len") or 8192),
                 }

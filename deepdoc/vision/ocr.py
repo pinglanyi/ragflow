@@ -32,6 +32,7 @@ import cv2
 import onnxruntime as ort
 
 from .postprocess import build_post_process
+from .onnx_session import ResilientSession
 
 loaded_models = {}
 
@@ -69,7 +70,10 @@ def create_operators(op_param_list, global_config=None):
 
 def load_model(model_dir, nm, device_id: int | None = None):
     model_file_path = os.path.join(model_dir, nm + ".onnx")
-    model_cached_tag = model_file_path + str(device_id) if device_id is not None else model_file_path
+    device_mode = os.environ.get("OCR_DEVICE", "auto").lower()
+    if device_mode not in {"auto", "cpu", "cuda"}:
+        raise ValueError("OCR_DEVICE must be auto, cpu or cuda")
+    model_cached_tag = (model_file_path, device_id, device_mode)
 
     global loaded_models
     loaded_model = loaded_models.get(model_cached_tag)
@@ -102,7 +106,13 @@ def load_model(model_dir, nm, device_id: int | None = None):
     # https://github.com/microsoft/onnxruntime/issues/9509#issuecomment-951546580
     # Shrink GPU memory after execution
     run_options = ort.RunOptions()
-    if cuda_is_available():
+    def create_cpu_session():
+        return ort.InferenceSession(model_file_path, sess_options=options, providers=["CPUExecutionProvider"]), ort.RunOptions()
+
+    use_cuda = device_mode != "cpu" and "CUDAExecutionProvider" in ort.get_available_providers() and cuda_is_available()
+    if device_mode == "cuda" and not use_cuda:
+        raise RuntimeError("OCR_DEVICE=cuda but ONNX Runtime CUDA provider or CUDA device is unavailable")
+    if use_cuda:
         gpu_mem_limit_mb = int(os.environ.get("OCR_GPU_MEM_LIMIT_MB", "2048"))
         arena_strategy = os.environ.get("OCR_ARENA_EXTEND_STRATEGY", "kNextPowerOfTwo")
         provider_device_id = 0 if device_id is None else device_id
@@ -110,17 +120,20 @@ def load_model(model_dir, nm, device_id: int | None = None):
             "device_id": provider_device_id,  # Use specific GPU
             "gpu_mem_limit": max(gpu_mem_limit_mb, 0) * 1024 * 1024,
             "arena_extend_strategy": arena_strategy,  # gpu memory allocation strategy
+            "cudnn_conv_algo_search": os.environ.get("OCR_CUDNN_CONV_ALGO_SEARCH", "DEFAULT"),
+            "cudnn_conv_use_max_workspace": "0",
         }
-        sess = ort.InferenceSession(model_file_path, options=options, providers=["CUDAExecutionProvider"], provider_options=[cuda_provider_options])
+        sess = ort.InferenceSession(model_file_path, sess_options=options, providers=["CUDAExecutionProvider"], provider_options=[cuda_provider_options])
         # Explicit arena shrinkage for GPU to release VRAM back to the system after each run
         if os.environ.get("OCR_GPUMEM_ARENA_SHRINKAGE") == "1":
             run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", f"gpu:{provider_device_id}")
             logging.info(f"load_model {model_file_path} enabled GPU memory arena shrinkage on device {provider_device_id}")
-        logging.info(f"load_model {model_file_path} uses GPU (device {provider_device_id}, gpu_mem_limit={cuda_provider_options['gpu_mem_limit']}, arena_strategy={arena_strategy})")
+        logging.info("load_model %s ONNX Runtime %s providers=%s CUDA options=%s", model_file_path, ort.__version__, sess.get_providers(), cuda_provider_options)
     else:
-        sess = ort.InferenceSession(model_file_path, options=options, providers=["CPUExecutionProvider"])
-        run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", "cpu")
+        sess, run_options = create_cpu_session()
         logging.info(f"load_model {model_file_path} uses CPU")
+    cpu_fallback = create_cpu_session if use_cuda and os.environ.get("OCR_GPU_FALLBACK_CPU", "1") == "1" else None
+    sess = ResilientSession(sess, cpu_fallback, model_file_path)
     loaded_model = (sess, run_options)
     loaded_models[model_cached_tag] = loaded_model
     return loaded_model
@@ -362,14 +375,7 @@ class TextRecognizer:
 
             input_dict = {}
             input_dict[self.input_tensor.name] = norm_img_batch
-            for i in range(100000):
-                try:
-                    outputs = self.predictor.run(None, input_dict, self.run_options)
-                    break
-                except Exception as e:
-                    if i >= 3:
-                        raise e
-                    time.sleep(5)
+            outputs = self.predictor.run(None, input_dict, self.run_options)
             preds = outputs[0]
             rec_result = self.postprocess_op(preds)
             for rno in range(len(rec_result)):
@@ -471,14 +477,7 @@ class TextDetector:
         img = img.copy()
         input_dict = {}
         input_dict[self.input_tensor.name] = img
-        for i in range(100000):
-            try:
-                outputs = self.predictor.run(None, input_dict, self.run_options)
-                break
-            except Exception as e:
-                if i >= 3:
-                    raise e
-                time.sleep(5)
+        outputs = self.predictor.run(None, input_dict, self.run_options)
 
         post_result = self.postprocess_op({"maps": outputs[0]}, shape_list)
         dt_boxes = post_result[0]["points"]

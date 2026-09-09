@@ -310,12 +310,17 @@ export function useVerifyProvider(
   providerName: string,
   formRef: RefObject<DynamicFormRef>,
   verifyTransform?: VerifyTransform,
+  modelInfoRef?: RefObject<IModelInfo[]>,
 ) {
   const { verifyProviderConnection } = useVerifyProviderConnection();
 
   return useCallback(
     async (params: any) => {
-      const values = { ...(formRef.current?.getValues?.() ?? {}), ...params };
+      const values = {
+        ...(formRef.current?.getValues?.() ?? {}),
+        ...params,
+        ...(modelInfoRef ? { model_info: modelInfoRef.current } : {}),
+      };
       let verifyArgs: {
         api_key: string | object;
         base_url?: string;
@@ -352,7 +357,7 @@ export function useVerifyProvider(
         logs: string;
       };
     },
-    [providerName, formRef, verifyProviderConnection, verifyTransform],
+    [providerName, formRef, verifyProviderConnection, verifyTransform, modelInfoRef],
   );
 }
 

@@ -20,17 +20,19 @@ export const multimodalParserSchema = z.object({
   message: '请选择多模态模型', path: ['model'],
 }).optional();
 
-export function MultimodalParserOptions({ ownerTenantId }: { ownerTenantId?: string }) {
+export function MultimodalParserOptions({ ownerTenantId, picture = false }: { ownerTenantId?: string; picture?: boolean }) {
   const form = useFormContext();
   const enabled = useWatch({ control: form.control, name: 'parser_config.multimodal.enabled' });
   const { data: models } = useFetchAllAddedModels(undefined, ownerTenantId);
   return (
     <div className="space-y-4 py-4">
-      <RAGFlowFormItem name="parser_config.multimodal.enabled" label="Chunk 多模态解析">
+      <RAGFlowFormItem name="parser_config.multimodal.enabled" label={picture ? '图片多模态直接解析' : 'Chunk 多模态解析'}>
         {(field) => <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />}
       </RAGFlowFormItem>
       {enabled && <>
-        <p className="text-sm text-text-secondary">将 Chunk 原图转换为可检索的 Markdown：文字转录、表格摊平、图片详细描述。请使用能生成截图的解析方式（推荐 DeepDOC），并关闭父子切分。支持 OpenAI 兼容的本地 vLLM 或商用 API。</p>
+        <p className="text-sm text-text-secondary">{picture
+          ? '直接将图片交给多模态模型，跳过 OCR。输出包含文件名、文字转录、摊平的 Markdown 表格和详细图片描述，自动参与检索，无需手动填写图片描述元数据。仅适用于图片文件，不适用于视频。'
+          : '将 Chunk 原图转换为可检索的 Markdown：文字转录、表格摊平、图片详细描述。请使用能生成截图的解析方式（推荐 DeepDOC），并关闭父子切分。'}支持 OpenAI 兼容的本地 vLLM 或商用 API；模型类型请勾选视觉（vision）。</p>
         <RAGFlowFormItem name="parser_config.multimodal.model" label="多模态模型">
           {(field) => <TreeSelect {...field} data={buildModelTree(models ?? [], ['vision'])} showSearch defaultExpandAll />}
         </RAGFlowFormItem>
@@ -51,6 +53,7 @@ export function MultimodalParserOptions({ ownerTenantId }: { ownerTenantId?: str
         </RAGFlowFormItem>
         <p className="text-sm text-text-secondary">原图、原始响应与 Markdown 均独立归档。复用按截图内容与模型配置匹配，不依赖 Chunk 数量或顺序。关闭复用会新增解析版本，旧记录仍保留。</p>
       </>}
+      {picture && !enabled && <p className="text-sm text-text-secondary">当前使用默认 OCR / 短文本图片描述流程。开启后可直接理解接线图、流程图和复杂表格；已解析图片需要重新解析才会应用新设置。</p>}
     </div>
   );
 }

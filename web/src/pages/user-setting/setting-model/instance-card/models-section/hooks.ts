@@ -280,13 +280,13 @@ export function useModelsDerived({
     });
   }, [sourceItems, catalogFeatures]);
 
-  // Union of instance models + catalog, keyed by `name`. Catalog entries
-  // win on conflict; instance set listed first so already-added models
-  // stay at the top on the initial render.
+  // Configured types win over catalog guesses; added models stay at the top.
   const models: IProviderModelItem[] = useMemo(() => {
     const byName = new Map<string, IProviderModelItem>();
     instanceItems.forEach((m) => byName.set(m.name, m));
-    catalog.forEach((m) => byName.set(m.name, m));
+    catalog.forEach((m) => {
+      if (!byName.has(m.name)) byName.set(m.name, m);
+    });
     return Array.from(byName.values());
   }, [instanceItems, catalog]);
 
@@ -609,12 +609,18 @@ interface UseModelEditArgs {
   providerName: string;
   instanceName: string;
   setCatalog: Dispatch<SetStateAction<IProviderModelItem[]>>;
+  isDraftInstance: boolean;
+  addedSet: Set<string>;
+  setDraftModels: Dispatch<SetStateAction<IProviderModelItem[]>>;
 }
 
 export function useModelEdit({
   providerName,
   instanceName,
   setCatalog,
+  isDraftInstance,
+  addedSet,
+  setDraftModels,
 }: UseModelEditArgs) {
   const customModelDialogFields = useCustomModelFields();
   const { patchInstanceModel, loading: editLoading } = usePatchInstanceModel();
@@ -648,27 +654,34 @@ export function useModelEdit({
     };
   }, [editingModel]);
 
-  // Persist edits to an existing model. The local `catalog` is patched so
-  // the UI reflects the new values immediately, before the cache
-  // invalidation lands.
+  // Draft and unadded edits are local. Publish saved edits only after success.
   const handleEditSubmit = async (item: IProviderModelItem) => {
     if (!editingModel) return;
     const targetName = editingModel.name;
 
+    if (!item.model_types?.length) return;
+    if (!isDraftInstance && addedSet.has(targetName)) {
+      const result = await patchInstanceModel({
+        provider_name: providerName,
+        instance_name: instanceName,
+        model_name: targetName,
+        max_tokens: item.max_tokens ?? 0,
+        model_type: item.model_types,
+        extra: { is_tools: hasToolFeature(item.features) },
+      });
+      if (result?.code !== 0) return;
+    }
+    if (isDraftInstance) {
+      setDraftModels((prev) =>
+        prev.map((m) => (m.name === targetName ? item : m)),
+      );
+    }
     setCatalog((prev) =>
       prev.some((m) => m.name === targetName)
         ? prev.map((m) => (m.name === targetName ? item : m))
         : prev,
     );
 
-    await patchInstanceModel({
-      provider_name: providerName,
-      instance_name: instanceName,
-      model_name: targetName,
-      max_tokens: item.max_tokens ?? 0,
-      model_type: item.model_types ?? [],
-      extra: { is_tools: hasToolFeature(item.features) },
-    });
     setEditingModel(null);
   };
 

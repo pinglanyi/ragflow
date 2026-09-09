@@ -332,7 +332,7 @@ export function ChunkMethodDialog({
 
             {parseType === ParseType.BuiltIn && (
               <>
-                <MultimodalParserOptions ownerTenantId={knowledgeDetails?.tenant_id} />
+                <MultimodalParserOptions ownerTenantId={knowledgeDetails?.tenant_id} picture={selectedTag === 'picture'} />
                 <div className="space-y-6 border-t-0.5 border-border-button pt-6 empty:hidden">
                   {showOne && (
                     <>

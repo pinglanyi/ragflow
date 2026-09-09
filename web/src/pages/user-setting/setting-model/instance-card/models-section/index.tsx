@@ -193,6 +193,9 @@ export function ModelsSection(props: ModelsSectionProps) {
     providerName,
     instanceName,
     setCatalog,
+    isDraftInstance,
+    addedSet,
+    setDraftModels,
   });
 
   // Add-custom-model dialog open state (local UI state).

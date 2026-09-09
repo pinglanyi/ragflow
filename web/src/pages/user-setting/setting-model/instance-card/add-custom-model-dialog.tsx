@@ -23,6 +23,7 @@ import {
   FormFieldType,
 } from '@/components/dynamic-form';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -44,7 +45,7 @@ export interface AddCustomModelDialogFields {
   /** Display label */
   label: string;
   /** Form field type */
-  type: 'text' | 'number' | 'multi-select' | 'switch-group';
+  type: 'text' | 'number' | 'multi-select' | 'switch-group' | 'checkbox-group';
   /** Options for multi-select / switch-group types */
   options?: { label: string; value: string }[];
   /** Whether the field is required */
@@ -101,17 +102,18 @@ export const AddCustomModelDialog = ({
   const formRef = useRef<DynamicFormRef>(null);
 
   // Translate AddCustomModelDialogFields -> FormFieldConfig for DynamicForm.
-  // The custom `switch-group` type falls back to FormFieldType.Custom with
-  // a render prop that re-implements the bordered switch list.
+  // Array controls use explicit validation and accessible labels.
   const dynamicFields = useMemo<FormFieldConfig[]>(() => {
     return fields.map((field) => {
       const isArrayType =
-        field.type === 'multi-select' || field.type === 'switch-group';
+        field.type === 'multi-select' ||
+        field.type === 'switch-group' ||
+        field.type === 'checkbox-group';
       const defaultValue =
         field.defaultValue ??
         (field.type === 'number' ? 0 : isArrayType ? [] : '');
 
-      if (field.type === 'switch-group') {
+      if (field.type === 'switch-group' || field.type === 'checkbox-group') {
         return {
           name: field.name,
           label: field.label,
@@ -124,8 +126,12 @@ export const AddCustomModelDialog = ({
             : z.array(z.string()).optional(),
           render: (fieldProps) => {
             const currentValues = (fieldProps.value as string[]) ?? [];
+            const Control = field.type === 'checkbox-group' ? Checkbox : Switch;
             return (
               <div className="space-y-2 rounded-md border border-border-button p-3">
+                {field.name === 'model_types' && (
+                  <p className="text-sm text-text-secondary">{t('modelTypeSelectionHint')}</p>
+                )}
                 {field.options?.map((opt) => {
                   const isChecked = currentValues.includes(opt.value);
                   const switchId = `${field.name}-${opt.value}`;
@@ -140,13 +146,13 @@ export const AddCustomModelDialog = ({
                       >
                         {opt.label}
                       </Label>
-                      <Switch
+                      <Control
                         id={switchId}
                         checked={isChecked}
                         disabled={field.disabled}
-                        onCheckedChange={(checked) => {
+                        onCheckedChange={(checked: boolean | 'indeterminate') => {
                           if (field.disabled) return;
-                          const next = checked
+                          const next = checked === true
                             ? [...currentValues, opt.value]
                             : currentValues.filter((v) => v !== opt.value);
                           fieldProps.onChange(next);
