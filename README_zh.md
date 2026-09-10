@@ -57,6 +57,7 @@
 <summary><b>📕 目录</b></summary>
 
 - 💡 [RAGFlow 是什么？](#-RAGFlow-是什么)
+- [Chunk 多模态解析（chunk-mm）](#chunk-多模态解析chunk-mm)
 - 🎮 [快速开始](#-快速开始)
 - 📌 [近期更新](#-近期更新)
 - 🌟 [主要功能](#-主要功能)
@@ -75,6 +76,16 @@
 ## 💡 RAGFlow 是什么？
 
 [RAGFlow](https://ragflow.io/) 是一款领先的开源检索增强生成（[RAG](https://ragflow.io/basics/what-is-rag)）引擎，通过融合前沿的 RAG 技术与 Agent 能力，为大型语言模型提供卓越的上下文层。它提供可适配任意规模企业的端到端 RAG 工作流，凭借融合式[上下文引擎](https://ragflow.io/basics/what-is-agent-context-engine)与预置的 Agent 模板，助力开发者以极致效率与精度将复杂数据转化为高可信、生产级的人工智能系统。
+
+## Chunk 多模态解析（chunk-mm）
+
+本分支支持使用本地 vLLM 或商用多模态 API 解析 Chunk 截图。开启多模态解析后，PDF 的 DeepDOC 路径先完成初次解析和切分，再将 Chunk 截图交给模型；PNG 的 Picture 路径跳过初次 OCR，将整张图片作为一个 Chunk 交给模型。
+
+模型输出 Markdown，包含文字转录、图片详细描述，并按提示词要求复制合并单元格值、摊平嵌套表格。成功结果按“截图内容 + 模型配置”归档复用，不依赖 Chunk 序号或总数；PNG 文件名会加入最终入库文本，方便检索。
+
+![PDF 与 PNG 多模态解析及归档复用流程](docs/images/ragflow-multimodal-pdf-png-flow.png)
+
+注意：PDF 仍依赖初次 DeepDOC OCR 成功；格式校验不等于内容和表格数值准确性验收。配置方法与归档说明见[多模态解析使用文档](docs/chunk-multimodal-parser.md)。
 
 ## 🎮 快速开始
 

@@ -57,6 +57,7 @@
 <summary><b>📕 Table of Contents</b></summary>
 
 - 💡 [What is RAGFlow?](#-what-is-ragflow)
+- [Chunk multimodal parsing (chunk-mm)](#chunk-multimodal-parsing-chunk-mm)
 - 🎮 [Get Started](#-get-started)
 - 📌 [Latest Updates](#-latest-updates)
 - 🌟 [Key Features](#-key-features)
@@ -75,6 +76,16 @@
 ## 💡 What is RAGFlow?
 
 [RAGFlow](https://ragflow.io/) is a leading open-source Retrieval-Augmented Generation ([RAG](https://ragflow.io/basics/what-is-rag)) engine that fuses cutting-edge RAG with Agent capabilities to create a superior context layer for LLMs. It offers a streamlined RAG workflow adaptable to enterprises of any scale. Powered by a converged [context engine](https://ragflow.io/basics/what-is-agent-context-engine) and pre-built agent templates, RAGFlow enables developers to transform complex data into high-fidelity, production-ready AI systems with exceptional efficiency and precision.
+
+## Chunk multimodal parsing (chunk-mm)
+
+This branch supports screenshot-based parsing with a local vLLM endpoint or a commercial multimodal API. With multimodal parsing enabled, PDF files using DeepDOC are first parsed and chunked into screenshots; PNG files using Picture bypass initial OCR and send the whole image as one chunk.
+
+The model produces Markdown with text transcription, detailed image descriptions, and instructions to flatten merged and nested tables. Successful results are archived and reused by screenshot content and model configuration, not by chunk number. PNG filenames are included in the final indexed text.
+
+![PDF and PNG multimodal parsing and archive reuse flow](docs/images/ragflow-multimodal-pdf-png-flow.png)
+
+PDF parsing still depends on the initial DeepDOC OCR stage. Format validation does not guarantee factual or table-cell accuracy. See the [configuration and archive guide](docs/chunk-multimodal-parser.md) for details.
 
 ## 🎮 Get Started
 
