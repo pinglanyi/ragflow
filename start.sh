@@ -4,7 +4,7 @@
 # 参考 deepagents/scripts/start_ragflow.sh 改写: 去掉了 DeepAgents 代理,
 # 端口改为从 conf/service_conf.yaml 自动解析, 组件入口适配本仓库代码。
 #
-# 用法: bash start.sh [run|start|stop|status|restart|check-runtime|logs [name]]
+# 用法: bash start.sh [run|start|stop|status|restart|check-runtime|check-executors|logs [name]]
 #
 # 启动内容:
 #   1. 依赖服务  (docker compose -f docker/docker-compose-base.yml up -d)
@@ -24,6 +24,8 @@
 #                            ragflow 实例 (如 docker 里 root 的 worker 0..n) 冲突)
 #   MAX_CONCURRENT_TASKS=10  每 worker 并发任务数 (导出给子进程)
 #   START_ADMIN=1            额外启动 Admin 服务 (conf 中 admin.http_port=9381)
+#   RAGFLOW_ALLOW_CPU=1      允许 OCR 走 CPU: 关闭 GPU 断言, 只告警不终止
+#   RAGFLOW_REQUIRE_GPU=1    连后端/Admin 也强制要求 GPU
 #   RAGFLOW_SERVICE_CONF=    自定义 service_conf.yaml 路径
 #   HF_ENDPOINT=https://hf-mirror.com   HuggingFace 镜像 (国内服务器必须)
 #   MYSQL_PORT/REDIS_PORT/ES_PORT/MINIO_PORT/BACKEND_PORT  手动覆盖端口
@@ -33,6 +35,11 @@
 #     需要时用: cd docker && docker compose -f docker-compose-base.yml down
 #   * 本脚本按 conf 默认的 elasticsearch 引擎启动依赖; 若改用 DOC_ENGINE=
 #     infinity/opensearch/oceanbase, 请相应调整 REQUIRED_DEPS。
+#   * GPU: 所有 Python 服务经 scripts/start_python.py 启动, 它前置 .venv 的
+#     NVIDIA/cuDNN 库并断言 CUDA 真的可用 (torch 可见 + ORT CUDA EP 可加载)。
+#     断言失败时 start 直接终止, 避免 OCR 静默回退 CPU; 确实要用 CPU 就
+#     RAGFLOW_ALLOW_CPU=1。执行器启动前还会经 scripts/check_executors.py
+#     报告是否有外部实例在抢同一个 Redis 队列 (它们没有 GPU 运行库)。
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +47,7 @@ PROJECT_DIR="$SCRIPT_DIR"
 CONF_FILE="${RAGFLOW_SERVICE_CONF:-$PROJECT_DIR/conf/service_conf.yaml}"
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 PYTHON_BOOTSTRAP="$PROJECT_DIR/scripts/start_python.py"
+EXECUTOR_CHECK="$PROJECT_DIR/scripts/check_executors.py"
 WEB_DIR="$PROJECT_DIR/web"
 DOCKER_COMPOSE_DIR="$PROJECT_DIR/docker"
 
@@ -523,11 +531,19 @@ logs_all() {
     esac
 }
 
+# 检查是否有外部 RAGFlow 实例的执行器在抢同一个 Redis 队列。
+# 外部执行器没有本仓库的 CUDA 运行库, 它抢到的任务 OCR 会静默走 CPU。
+check_executor_conflicts() {
+    [ -f "$EXECUTOR_CHECK" ] || return 0
+    "$VENV_PYTHON" "$EXECUTOR_CHECK" --conf "$CONF_FILE" || true
+}
+
 # ============================================================================
 case "${1:-start}" in
     start|run)
         echo "===== RAGFlow 一键启动 ====="
         "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" --check || { echo "[runtime] 环境检查失败，未启动服务" >&2; exit 1; }
+        check_executor_conflicts
         check_and_start_deps || { echo "[deps] 依赖启动失败, 终止"; exit 1; }
         start_server || exit 1
         start_taskexec || exit 1
@@ -545,6 +561,9 @@ case "${1:-start}" in
     check-runtime)
         exec "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" --check
         ;;
+    check-executors)
+        exec "$VENV_PYTHON" "$EXECUTOR_CHECK" --conf "$CONF_FILE" "${@:2}"
+        ;;
     restart)
         stop_all
         sleep 2
@@ -554,7 +573,7 @@ case "${1:-start}" in
         logs_all "${2:-all}"
         ;;
     *)
-        echo "用法: bash start.sh [run|start|stop|status|restart|check-runtime|logs [server|web|taskexec|admin|all]]"
+        echo "用法: bash start.sh [run|start|stop|status|restart|check-runtime|check-executors [--strict]|logs [server|web|taskexec|admin|all]]"
         exit 1
         ;;
 esac

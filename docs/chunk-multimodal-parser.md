@@ -132,12 +132,17 @@ export OCR_CUDNN_CONV_ALGO_SEARCH=DEFAULT
 本次服务器验证使用 Torch `2.14.0+cu130`、cuDNN `9.24.0`、ORT `1.27.0`。脚本不自动安装依赖；检测到 CUDA 13 搭配旧版 ORT 会停止启动并提示。仓库依赖仍锁定 ORT `1.23.2`，暂勿在此 CUDA 13 测试环境运行 `uv sync`，以免回退版本。
 
 ```bash
-bash start.sh check-runtime
+bash start.sh check-runtime                 # GPU 断言: 不满足即退出 1
+bash start.sh check-executors [--strict]    # 是否有外部执行器抢同一 Redis 队列
 bash start.sh restart
 bash start.sh logs taskexec
 ```
 
-`check-runtime` 只验证库导入，不验证 OCR 准确率或 CUDA 卷积。运行日志开头的 `[runtime]` 行记录 Python、Torch、CUDA、ORT 和实际库搜索路径。重启后请重新解析真实文档，确认不再出现子库加载失败或 `Falling back to ['CPUExecutionProvider']`。`Conv ... Fallback mode` 则是保守 cuDNN 算法的提示，不等于执行器切换到 CPU。脚本此次不修改算法设置和 OCR 析构清理行为。
+`check-runtime` 真实验证 GPU，而不是只看导入：`torch.cuda.is_available()` 必须为真且设备数 ≥ 1，并且 `onnxruntime` 必须能找到、能加载随包发布的 CUDA provider（`libonnxruntime_providers_cuda.so`，含 cuDNN 等子库依赖可解析）。任一不满足就打印可执行建议并退出 1；`CUDA_VISIBLE_DEVICES` 被设成空串也会被点名。任务执行器带着这个断言启动，因此不会再出现"日志写着 GPU、实际静默回退 CPU"。确实要用 CPU 时设 `RAGFLOW_ALLOW_CPU=1`（只告警不终止，结束语会说明当前是 CPU-only），`RAGFLOW_REQUIRE_GPU=1` 则让后端/Admin 也强制要求 GPU。该检查不验证 OCR 准确率或 CUDA 卷积。
+
+`check-executors` 读取 Redis `TASKEXE` 与各执行器心跳，报告不属于本栈命名（`TASK_EXECUTOR_TYPES/COUNT/OFFSET`）的执行器。外部实例（另一份 checkout 或旧部署指向同一 Redis）会抢同一队列，而它们的进程没有本仓库的 CUDA 运行库，抢到的任务 OCR 必然走 CPU。`start` 会自动执行该检查并告警（不终止），`--strict` 时以非零退出。处理方式：停掉那个实例，或让本栈改用独立 Redis DB。
+
+运行日志开头的 `[runtime]` 行记录 Python、Torch、CUDA、ORT、provider 列表、实际设备数与库搜索路径。重启后请重新解析真实文档，确认不再出现子库加载失败或 `Falling back to ['CPUExecutionProvider']`。`Conv ... Fallback mode` 则是保守 cuDNN 算法的提示，不等于执行器切换到 CPU。脚本此次不修改算法设置和 OCR 析构清理行为。
 
 ### 回归命令
 
