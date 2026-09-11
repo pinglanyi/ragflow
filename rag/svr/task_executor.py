@@ -78,6 +78,7 @@ from api.db.services.document_service import DocumentService
 from api.db.services.doc_metadata_service import DocMetadataService
 from api.db.services.llm_service import LLMBundle
 from api.db.services.task_service import TaskService, has_canceled, CANVAS_DEBUG_DOC_ID, GRAPH_RAPTOR_FAKE_DOC_ID
+from api.db.services.multimodal_job_service import guarded_insert
 from api.db.services.file2document_service import File2DocumentService
 from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type, resolve_model_config, get_model_config_by_id
 from common.versions import get_ragflow_version
@@ -1313,10 +1314,12 @@ async def insert_chunks(task_id, task_tenant_id, task_dataset_id, chunks, progre
 
     for b in range(0, len(mothers), settings.DOC_BULK_SIZE):
         ret = await thread_pool_exec(
-            settings.docStoreConn.insert,
+            guarded_insert,
+            task_id,
             mothers[b : b + settings.DOC_BULK_SIZE],
             search.index_name(task_tenant_id),
             task_dataset_id,
+            settings.docStoreConn.insert,
         )
         get_recording_context().save_func_return_value("docStoreConn.insert", ret)
         task_canceled = has_canceled(task_id)
@@ -1326,10 +1329,12 @@ async def insert_chunks(task_id, task_tenant_id, task_dataset_id, chunks, progre
 
     for b in range(0, len(chunks), settings.DOC_BULK_SIZE):
         doc_store_result = await thread_pool_exec(
-            settings.docStoreConn.insert,
+            guarded_insert,
+            task_id,
             chunks[b : b + settings.DOC_BULK_SIZE],
             search.index_name(task_tenant_id),
             task_dataset_id,
+            settings.docStoreConn.insert,
         )
         get_recording_context().save_func_return_value("docStoreConn.insert", doc_store_result)
         task_canceled = has_canceled(task_id)

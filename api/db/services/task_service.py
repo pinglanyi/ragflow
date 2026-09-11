@@ -218,17 +218,28 @@ class TaskService(CommonService):
             return None
         doc = docs[0]
 
+        from api.db.services.multimodal_job_service import MultimodalJobService
+
+        doc = MultimodalJobService.prepare_task(doc)
+        if doc is None:
+            return None
+
         msg = f"\n{datetime.now().strftime('%H:%M:%S')} Task has been received."
         prog = random.random() / 10.0
         if doc["retry_count"] >= 3:
             msg = "\nERROR: Task is abandoned after 3 times attempts."
             prog = -1
 
-        cls.model.update(
+        claim = cls.model.update(
             progress_msg=cls.model.progress_msg + msg,
             progress=prog,
             retry_count=doc["retry_count"] + 1,
-        ).where(cls.model.id == doc["id"]).execute()
+        ).where(cls.model.id == doc["id"])
+        if doc.get("_multimodal_job_id"):
+            # Failure can arrive after prepare_task: do not revive a cancelled sibling.
+            claim = claim.where(cls.model.progress >= 0)
+        if not claim.execute():
+            return None
 
         if docs[0]["retry_count"] >= 3:
             abort_doc_chunking_counter(docs[0]["doc_id"])
@@ -425,11 +436,28 @@ class TaskService(CommonService):
                 (DocumentService.model.id == task.doc_id) & ((DocumentService.model.run.is_null(True)) | (DocumentService.model.run != TaskStatus.CANCEL.value))
             ).execute()
 
+        from api.db.services.multimodal_job_service import MultimodalJobService
+
+        MultimodalJobService.refresh_document(task.doc_id)
+
     @classmethod
     @DB.connection_context()
     def delete_by_doc_ids(cls, doc_ids):
         """Delete task associated with a document."""
-        return cls.model.delete().where(cls.model.doc_id.in_(doc_ids)).execute()
+        return cls.filter_delete([cls.model.doc_id.in_(doc_ids)])
+
+    @classmethod
+    @DB.connection_context()
+    def filter_delete(cls, filters):
+        from contextlib import ExitStack
+        from api.db.services.multimodal_job_service import MultimodalJobService
+
+        rows = list(cls.model.select(cls.model.id, cls.model.doc_id).where(*filters))
+        with ExitStack() as stack:
+            for doc_id in sorted({row.doc_id for row in rows}):
+                stack.enter_context(DB.lock('mm-write-' + doc_id, -1))
+            MultimodalJobService.before_delete([row.id for row in rows])
+            return cls.model.delete().where(*filters).execute()
 
 
 def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
@@ -519,8 +547,9 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     prev_tasks = TaskService.get_tasks(doc["id"])
     ck_num = 0
     if prev_tasks:
-        for task in parse_task_array:
-            ck_num += reuse_prev_task_chunks(task, prev_tasks, chunking_config)
+        if not doc.get("_multimodal_job_id"):
+            for task in parse_task_array:
+                ck_num += reuse_prev_task_chunks(task, prev_tasks, chunking_config)
         TaskService.filter_delete([Task.doc_id == doc["id"]])
         pre_chunk_ids = []
         for pre_task in prev_tasks:
@@ -529,6 +558,14 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
         if pre_chunk_ids:
             settings.docStoreConn.delete({"id": pre_chunk_ids}, search.index_name(chunking_config["tenant_id"]), chunking_config["kb_id"])
     DocumentService.update_by_id(doc["id"], {"chunk_num": ck_num})
+
+    if doc.get("_multimodal_job_id"):
+        from api.db.services.multimodal_job_service import MultimodalJobService
+
+        # Persist exact child IDs before any worker can consume a queue message.
+        MultimodalJobService.bind_tasks(doc["_multimodal_job_id"], [task["id"] for task in parse_task_array])
+        if settings.docStoreConn.index_exist(search.index_name(chunking_config["tenant_id"]), doc["kb_id"]):
+            settings.docStoreConn.delete({"doc_id": doc["id"]}, search.index_name(chunking_config["tenant_id"]), doc["kb_id"])
 
     bulk_insert_into_db(Task, parse_task_array, True)
     DocumentService.begin2parse(doc["id"])
@@ -543,6 +580,9 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     except Exception:
         abort_doc_chunking_counter(doc["id"])
         raise
+
+    if doc.get("_multimodal_job_id"):
+        MultimodalJobService.mark_dispatched(doc["_multimodal_job_id"])
 
 
 def reuse_prev_task_chunks(task: dict, prev_tasks: list[dict], chunking_config: dict):
@@ -625,7 +665,7 @@ def queue_dataflow(tenant_id: str, flow_id: str, task_id: str, doc_id: str = CAN
         begin_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     if doc_id not in [CANVAS_DEBUG_DOC_ID, GRAPH_RAPTOR_FAKE_DOC_ID]:
-        TaskService.model.delete().where(TaskService.model.doc_id == doc_id).execute()
+        TaskService.filter_delete([TaskService.model.doc_id == doc_id])
         DocumentService.begin2parse(doc_id)
     bulk_insert_into_db(model=Task, data_source=[task], replace_on_conflict=True)
 

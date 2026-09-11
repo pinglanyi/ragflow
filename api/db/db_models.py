@@ -984,6 +984,26 @@ class FileCommitItem(DataBaseModel):
 # no code path reads them.
 
 
+class MultimodalJob(DataBaseModel):
+    """One externally visible document parse run, independent of mutable Task rows."""
+
+    id = CharField(max_length=32, primary_key=True)
+    tenant_id = CharField(max_length=32, index=True)
+    dataset_id = CharField(max_length=32, index=True)
+    document_id = CharField(max_length=32, index=True)
+    active_document_id = CharField(max_length=32, null=True, unique=True)
+    status = CharField(max_length=16, default="queued", index=True)
+    config = JSONField(default=dict)
+    task_ids = JSONField(default=list)
+    dispatched = BooleanField(default=False)
+    progress = FloatField(default=0)
+    chunk_count = IntegerField(default=0)
+    message = TextField(default="Queued")
+    error = JSONField(default=dict)
+    created_at = CharField(max_length=40)
+    updated_at = CharField(max_length=40)
+
+
 class Task(DataBaseModel):
     id = CharField(max_length=32, primary_key=True)
     doc_id = CharField(max_length=32, null=False, index=True)

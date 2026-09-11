@@ -335,7 +335,9 @@ class ChunkService:
                 return self._task_context.write_interceptor.intercept("docStoreConn.insert", [])
             return self._task_context.write_interceptor.intercept("docStoreConn.insert")
         else:
-            return await thread_pool_exec(settings.docStoreConn.insert, chunks, index_name, task_dataset_id)
+            from api.db.services.multimodal_job_service import guarded_insert
+
+            return await thread_pool_exec(guarded_insert, self._task_context.id, chunks, index_name, task_dataset_id, settings.docStoreConn.insert)
 
     async def _insert_main_chunks(
         self,
