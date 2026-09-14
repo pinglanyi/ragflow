@@ -87,6 +87,11 @@ The model produces Markdown with text transcription, detailed image descriptions
 
 PDF parsing still depends on the initial DeepDOC OCR stage. Format validation does not guarantee factual or table-cell accuracy. See the [configuration and archive guide](docs/chunk-multimodal-parser.md) for details.
 
+
+## Agentic Search on MLLM Markdown
+
+This branch can read source neighbors and document ranges, match text within a document, and search for unseen evidence while preserving citations. See the [detailed Agentic Search README](README.agentic-search.md) for configuration, tool contracts, examples, limits, and validation.
+
 ## 🎮 Get Started
 
 Try our cloud service at [https://cloud.ragflow.io](https://cloud.ragflow.io).

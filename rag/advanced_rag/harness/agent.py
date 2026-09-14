@@ -16,18 +16,22 @@ import logging
 import re
 from copy import deepcopy
 
-from rag.advanced_rag.harness.types import ClaimTarget, ExecutionStrategy, ToolResult
-from rag.advanced_rag.harness.pipeline import Pipeline
-from rag.advanced_rag.harness.tools.gating import (
-    get_gated_tools,
-    determine_current_phase,
-    SEARCH_PHASES,
-)
-from rag.advanced_rag.harness.tools.registry import _generate_report_schema, _think_schema
 from rag.advanced_rag.harness.prompts.research_agent_prompt import (
     RESEARCH_AGENT_PROMPT,
     RESEARCH_AGENT_TEXT_PROMPT,
 )
+
+from rag.advanced_rag.harness.pipeline import Pipeline
+from rag.advanced_rag.harness.tools.gating import (
+    SEARCH_PHASES,
+    determine_current_phase,
+    get_gated_tools,
+)
+from rag.advanced_rag.harness.tools.registry import (
+    _generate_report_schema,
+    _think_schema,
+)
+from rag.advanced_rag.harness.types import ClaimTarget, ExecutionStrategy, ToolResult
 
 _LOG = logging.getLogger(__name__)
 
@@ -70,7 +74,7 @@ class ResearchToolSession:
                 idx = int(eid)
             except (TypeError, ValueError):
                 continue
-            if idx not in evidence_ids:
+            if idx in self._seen_evidence_ids and idx not in evidence_ids:
                 evidence_ids.append(idx)
         if not evidence_ids and self.evidence_ids:
             evidence_ids = list(self.evidence_ids)
@@ -116,14 +120,20 @@ async def research_agent_loop(
     compilation_map: dict,
 ) -> dict:
     """Inner loop for a single claim — native tool-calling with a text fallback."""
-    phase = determine_current_phase(context)
+    phase = determine_current_phase(context, has_chunks=bool(tools.kbinfos.get("chunks")))
     phase_config = SEARCH_PHASES.get(phase, {})
     gated_defs = get_gated_tools(
         phase=phase,
         available_tools=mode.available_tools,
         compilation_map=compilation_map,
         context=context,
+        has_chunks=bool(tools.kbinfos.get("chunks")),
     )
+    # Native schemas stay bound for the whole model loop. A locate call can
+    # discover an anchor and read it in its next call without rebinding.
+    if phase == "locate":
+        navigation = [n for n in mode.available_tools if n.startswith("inspector_")]
+        gated_defs.extend(pipeline.available_tools(navigation))
 
     # Deep-copy so binding tools never leaks onto the shared chat model.
     agent_mdl = deepcopy(tools.chat_mdl)
@@ -158,6 +168,11 @@ async def _research_native(
         max_cycles=mode.max_agent_cycles,
     )
     history = [{"role": "user", "content": f"Research task: {claim.description}\nBegin."}]
+    initial = _initial_evidence(pipeline)
+    if initial.chunks:
+        history.append({"role": "user", "content": _fmt_tool_result(initial)})
+        session.got_evidence = True
+        session._record_evidence_ids(initial.chunks)
 
     final_text = ""
     try:
@@ -201,7 +216,10 @@ async def _research_text(
         max_cycles=mode.max_agent_cycles,
     )
 
-    history: list[dict] = []
+    initial = _initial_evidence(pipeline)
+    history: list[dict] = [{"role": "user", "content": _fmt_tool_result(initial)}] if initial.chunks else []
+    session = ResearchToolSession(pipeline, phase)
+    session._record_evidence_ids(initial.chunks)
 
     for cycle in range(mode.max_agent_cycles):
         try:
@@ -220,17 +238,17 @@ async def _research_text(
             continue
 
         if tool_call.get("name") == "generate_report":
-            return tool_call.get("arguments", {})
+            return session._normalize_report(tool_call.get("arguments", {}))
 
         if tool_call.get("name") == "think_tool":
             history.append({"role": "user", "content": "[continue]"})
             continue
 
         args = tool_call.get("arguments", {})
-        result = await execute_with_fallback(pipeline, tool_call["name"], phase, **args)
-        history.append({"role": "user", "content": _fmt_tool_result(result)})
+        content = await session.tool_call_async(tool_call["name"], args)
+        history.append({"role": "user", "content": content})
 
-    return await _force_generate_report(history, tools, claim.claim_id)
+    return session._normalize_report(await _force_generate_report(history, tools, claim.claim_id))
 
 
 def _parse_tool_call(text: str) -> dict | None:
@@ -270,7 +288,7 @@ async def execute_with_fallback(
     """Execute tool; if empty, fall back along phase priority."""
     result = await pipeline.execute(tool_name, **kwargs)
 
-    if result.chunks or result.error:
+    if result.chunks or result.error or tool_name.startswith("inspector_") or any(k in kwargs for k in ("doc_scope", "kb_ids", "exclude_ids")):
         return result
 
     phase_config = SEARCH_PHASES.get(phase, {})
@@ -335,6 +353,12 @@ def _fmt_tool_list(defs: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _initial_evidence(pipeline: Pipeline) -> ToolResult:
+    """Expose existing source IDs and global citation indices to this agent."""
+    chunks = [{**chunk, "evidence_index": idx} for idx, chunk in enumerate(pipeline.tools.kbinfos.get("chunks", [])[:100])]
+    return ToolResult(chunks=chunks, metadata={})
+
+
 def _fmt_tool_result(result: ToolResult) -> str:
     if result.error:
         return f"[tool error] {result.error}"
@@ -344,7 +368,21 @@ def _fmt_tool_result(result: ToolResult) -> str:
     answer = (result.metadata or {}).get("answer") if isinstance(result.metadata, dict) else ""
     if answer:
         parts.append(f"Answer: {answer}")
-    parts.extend(c.get("content_with_weight", c.get("text", ""))[:300] for c in result.chunks[:3])
+    metadata = {k: v for k, v in (result.metadata or {}).items() if k not in ("aggs", "answer") and v}
+    if metadata:
+        parts.append("Navigation: " + json.dumps(metadata, ensure_ascii=False))
+    visible = result.chunks[:100]
+    per_chunk = 24000 // max(1, len(visible))
+    for chunk in visible:
+        identity = {k: chunk.get(k) for k in ("evidence_index", "chunk_id", "doc_id", "chunk_order", "positions", "image_id") if chunk.get(k) is not None}
+        identity["chunk_id"] = chunk.get("chunk_id") or chunk.get("id")
+        content = chunk.get("content_with_weight", chunk.get("text", ""))
+        excerpt = content[:per_chunk]
+        parts.append(json.dumps(identity, ensure_ascii=False) + "\n" + excerpt)
+        if len(excerpt) < len(content):
+            parts.append("[content truncated by tool response budget]")
+    if len(visible) < len(result.chunks):
+        parts.append("[additional chunks omitted by tool response budget]")
     if not parts:
         return "[no results found]"
     return "\n\n".join(parts)

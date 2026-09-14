@@ -30,12 +30,13 @@ model (no tool schema is bound onto it) and its ``async_chat*`` calls take
 the fast non-tool-calling path.
 """
 
-from copy import deepcopy
 import logging
 import re
+from copy import deepcopy
 from typing import Any, List
 
 import json_repair
+from api.db.db_models import Document, Knowledgebase
 from api.db.services.doc_metadata_service import DocMetadataService
 from api.db.services.document_service import DocumentService
 from api.db.services.knowledgebase_service import KnowledgebaseService
@@ -55,9 +56,7 @@ from rag.prompts.generator import (
     multi_queries_gen,
     sufficiency_select,
 )
-from api.db.db_models import Document, Knowledgebase
 from rag.utils.tavily_conn import Tavily
-
 
 # Tokens held back from the model's context when fitting retrieved evidence
 # into the sufficiency / follow-up prompts. The evidence sits in the MIDDLE of
@@ -487,6 +486,81 @@ class RAGTools:
             return []
         qs = res.get("questions") or []
         return [q for q in qs if isinstance(q, dict) and (q.get("question") or "").strip()]
+
+    async def iter_document_chunks(self, doc_id: str):
+        """Read authorized indexed Markdown in source order, at most 10,000 rows.
+
+        Ordinals count enabled, noncompiled chunks. Re-parsing invalidates them;
+        missing coordinates or repeated IDs fail instead of inventing adjacency.
+        Scan before yielding: backend array sorting is not page/top/left order.
+        """
+        import math
+
+        if not isinstance(doc_id, str) or not doc_id or not self.kb_ids:
+            raise ValueError("A document in the bound knowledge bases is required")
+        resolved = await thread_pool_exec(self._resolve_doc_tenant, doc_id)
+        if not resolved or resolved[0] not in self.kb_ids or resolved[1] not in self.tenant_ids:
+            raise ValueError("Document is outside the authorized knowledge bases/tenants")
+        kb_id, tenant_id = resolved
+        seen = set()
+        ordered = []
+        for offset in range(0, 10000, 128):
+            limit = min(128, 10000 - offset)
+            rows = await thread_pool_exec(
+                settings.retriever.chunk_list,
+                doc_id,
+                tenant_id,
+                [kb_id],
+                offset=offset,
+                max_count=offset + limit,
+                fields=[
+                    "content_with_weight",
+                    "docnm_kwd",
+                    "doc_id",
+                    "kb_id",
+                    "img_id",
+                    "position_int",
+                    "page_num_int",
+                    "top_int",
+                    "available_int",
+                    "compile_kwd",
+                    "raptor_kwd",
+                    "toc_kwd",
+                    "knowledge_graph_kwd",
+                ],
+                sort_by_position=True,
+                retrieve_all=False,
+            )
+            for row in rows:
+                stored_kbs = row.get("kb_id", kb_id)
+                stored_kbs = [stored_kbs] if isinstance(stored_kbs, str) else stored_kbs
+                if row.get("doc_id") != doc_id or set(stored_kbs or []) != {kb_id}:
+                    raise ValueError("Storage returned a chunk outside the document scope")
+                if str(row.get("available_int", 1)) == "0" or any(row.get(field) for field in ("compile_kwd", "raptor_kwd", "toc_kwd", "knowledge_graph_kwd")):
+                    continue
+                chunk_id = row.get("id") or row.get("chunk_id")
+                if not chunk_id or chunk_id in seen:
+                    raise ValueError("Missing or repeated chunk ID; retry after indexing completes")
+                seen.add(chunk_id)
+                positions = row.get("position_int")
+                if not positions:
+                    raise ValueError("Document lacks source coordinates for ordered navigation")
+                try:
+                    coordinates = [(float(p[0]), float(p[3]), float(p[1])) for p in positions if len(p) == 5]
+                except (TypeError, ValueError, IndexError) as exc:
+                    raise ValueError("Invalid source coordinates for ordered navigation") from exc
+                if len(coordinates) != len(positions) or not all(math.isfinite(v) for coordinate in coordinates for v in coordinate):
+                    raise ValueError("Invalid source coordinates for ordered navigation")
+                chunk = dict(row)
+                chunk.update(chunk_id=chunk_id, doc_id=doc_id, kb_id=kb_id, positions=positions, image_id=row.get("img_id", ""))
+                ordered.append(((*min(coordinates), str(chunk_id)), chunk))
+            if len(rows) < limit:
+                break
+        else:
+            raise ValueError("Document scan reached the 10000-row limit; completeness is unknown")
+        for ordinal, (_, chunk) in enumerate(sorted(ordered, key=lambda item: item[0])):
+            chunk["chunk_order"] = ordinal
+            yield chunk
 
     async def fetch_full_document(self, doc_id: str) -> dict[str, list]:
         """Fetch a whole document's chunks in reading order (raw kbinfos)."""

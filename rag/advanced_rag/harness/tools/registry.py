@@ -12,6 +12,7 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
 
 
 def register_tool(name: str, schema: dict, fn: callable, requires_compilation: bool = False, compilation_type: str | tuple[str, ...] | None = None, processing_time: str = "fast") -> None:
+    schema["function"]["name"] = name
     TOOL_REGISTRY[name] = {
         "name": name,
         "function_schema": schema,
@@ -45,6 +46,16 @@ def _search_schema(name: str, desc: str) -> dict:
                 "properties": {
                     "query": {"type": "string", "description": "the original user's question."},
                     "keywords": {"type": "string", "description": "the keywords used for searching split by space or ','."},
+                    **(
+                        {
+                            "kb_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of bound KB IDs"},
+                            "doc_scope": {"type": "array", "items": {"type": "string"}, "description": "Optional document IDs from prior results; empty means no documents"},
+                            "top_n": {"type": "integer", "minimum": 1, "maximum": 100, "default": 12},
+                            "exclude_ids": {"type": "array", "items": {"type": "string"}, "description": "Previously seen chunk_id values to exclude; bounded post-retrieval filtering"},
+                        }
+                        if name == "hybrid_search"
+                        else {}
+                    ),
                 },
                 "required": ["query"],
             },
@@ -70,7 +81,7 @@ def _navigate_schema(name: str, desc: str) -> dict:
     }
 
 
-def _inspector_schema(name: str, desc: str, props: dict = None) -> dict:
+def _inspector_schema(name: str, desc: str, props: dict | None = None, required: list[str] | None = None) -> dict:
     schema = {
         "type": "function",
         "function": {
@@ -82,7 +93,7 @@ def _inspector_schema(name: str, desc: str, props: dict = None) -> dict:
                 or {
                     "chunk_id": {"type": "string", "description": "chunk ID"},
                 },
-                "required": list((props or {"chunk_id": {}}).keys()),
+                "required": required if required is not None else list((props or {"chunk_id": {}}).keys()),
             },
         },
     }
@@ -124,7 +135,7 @@ def _generate_report_schema() -> dict:
                     "evidence_ids": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "Referenced chunk IDs.",
+                        "description": "Global integer evidence_index values shown in tool results. Do not use string chunk_id or local row numbers.",
                     },
                     "gaps": {
                         "type": "array",

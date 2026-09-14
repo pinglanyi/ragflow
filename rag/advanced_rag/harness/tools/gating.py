@@ -1,8 +1,7 @@
 """Tool selection gating: phase-based filtering and fallback chain."""
 
-from rag.advanced_rag.harness.types import OrchestratorContext
 from rag.advanced_rag.harness.tools.registry import TOOL_REGISTRY
-
+from rag.advanced_rag.harness.types import OrchestratorContext
 
 # Search phase definitions
 
@@ -28,9 +27,11 @@ SEARCH_PHASES = {
             "graph_explore",
             "inspector_open_context",
             "inspector_request_adjacent",
+            "inspector_read_document",
+            "inspector_grep_within",
         ],
-        "max_returned": 4,
-        "tool_hint": "Prefer retrieval tools to gather detailed information within the located region.",
+        "max_returned": 7,
+        "tool_hint": "Use source chunk_id and doc_id to read adjacent or ranged Markdown. Exclude seen chunk IDs in hybrid_search to seek new evidence. Empty document reads are valid; do not invent missing content.",
     },
     "verify": {
         "goal": "Verify consistency across multiple sources.",
@@ -41,7 +42,7 @@ SEARCH_PHASES = {
             "hybrid_search",
             "web_search",
         ],
-        "max_returned": 4,
+        "max_returned": 7,
         "tool_hint": "Prefer inspector tools to compare existing evidence before searching for new content.",
     },
     "cross_domain": {
@@ -70,9 +71,9 @@ def compilation_available(tool_name: str, compilation_map: dict) -> bool:
     return any(bool(comp_types & set(comps)) for comps in compilation_map.values())
 
 
-def tool_fits_context(tool_name: str, context: OrchestratorContext) -> bool:
+def tool_fits_context(tool_name: str, context: OrchestratorContext, has_chunks: bool | None = None) -> bool:
     """Check if a tool is sensible given current search context."""
-    if tool_name.startswith("inspector_") and not context.has_any_chunks():
+    if tool_name.startswith("inspector_") and not (context.has_any_chunks() if has_chunks is None else has_chunks):
         return False
     if tool_name == "catalog_navigate" and not context.current_claim:
         return False
@@ -90,6 +91,7 @@ def get_gated_tools(
     available_tools: list[str],
     compilation_map: dict[str, set[str]],
     context: OrchestratorContext,
+    has_chunks: bool | None = None,
 ) -> list[dict]:
     """Filter, sort, and gate tools by phase priority and context."""
     phase_config = SEARCH_PHASES.get(phase)
@@ -102,7 +104,7 @@ def get_gated_tools(
             continue
         if not compilation_available(tool_name, compilation_map):
             continue
-        if not tool_fits_context(tool_name, context):
+        if not tool_fits_context(tool_name, context, has_chunks):
             continue
         sorted_tools.append(tool_name)
 
@@ -118,9 +120,9 @@ def _default_defs(tool_names: list[str]) -> list[dict]:
     return [TOOL_REGISTRY[n]["function_schema"] for n in tool_names if n in TOOL_REGISTRY]
 
 
-def determine_current_phase(context: OrchestratorContext) -> str:
+def determine_current_phase(context: OrchestratorContext, has_chunks: bool | None = None) -> str:
     """Determine the current search phase based on context."""
-    if not context.has_any_chunks():
+    if not (context.has_any_chunks() if has_chunks is None else has_chunks):
         return "locate"
     if context.verdict and context.verdict.has_conflicts:
         return "verify"

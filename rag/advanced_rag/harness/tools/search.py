@@ -1,8 +1,9 @@
 """Search tools: hybrid, vector, BM25, web, structured."""
 
+import hashlib
 import logging
 import re
-import hashlib
+
 from common import settings
 
 _LOG = logging.getLogger(__name__)
@@ -179,10 +180,37 @@ def _normalize(kbinfos: dict, tenant_ids: list[str] | str | None) -> dict:
     return kbinfos
 
 
-async def hybrid_search(tools, query: str, kb_ids: list[str] | None = None, top_n: int = 12, doc_scope: list[str] | None = None, keywords: str = "") -> dict:
-    if not tools.kb_ids and not kb_ids:
+async def hybrid_search(
+    tools,
+    query: str,
+    kb_ids: list[str] | None = None,
+    top_n: int = 12,
+    doc_scope: list[str] | None = None,
+    keywords: str = "",
+    exclude_ids: list[str] | None = None,
+) -> dict:
+    """Search scoped passages, optionally skipping previously returned chunk IDs.
+
+    Exclusions apply after child-to-parent normalization, not in the backend.
+    Unseen search inspects at most four pages of at most 100 returned candidates;
+    the backend's internal candidate/reranking work is governed by retrieval().
+    """
+    target_ids = tools.kb_ids if kb_ids is None else kb_ids
+    if not set(target_ids or ()).issubset(set(tools.kb_ids or ())):
+        return {"chunks": [], "doc_aggs": [], "error": "kb_ids exceed the authorized knowledge bases"}
+    if not target_ids or top_n <= 0 or doc_scope == []:
         return {"chunks": [], "doc_aggs": []}
-    target_ids = kb_ids or tools.kb_ids
+    if doc_scope is not None:
+        from common.misc_utils import thread_pool_exec
+
+        known = await thread_pool_exec(tools._filter_known_doc_ids, doc_scope)
+        if set(doc_scope) != set(known):
+            return {"chunks": [], "doc_aggs": [], "error": "doc_scope contains unknown or unauthorized documents"}
+        if set(target_ids) != set(tools.kb_ids):
+            for doc_id in dict.fromkeys(doc_scope):
+                owner = await thread_pool_exec(tools._resolve_doc_tenant, doc_id)
+                if not owner or owner[0] not in target_ids:
+                    return {"chunks": [], "doc_aggs": [], "error": "doc_scope exceeds the requested knowledge bases"}
     _LOG.info(f'[Hybrid search] Searching the knowledge base for "{query}" (keywords: {keywords})')
 
     # Query expansion: append the formalized-question keywords + close synonyms
@@ -194,6 +222,9 @@ async def hybrid_search(tools, query: str, kb_ids: list[str] | None = None, top_
     # the ES round-trip, child fetch and narrowing.
     cache = getattr(tools, "search_cache", None)
     cache_key = _search_cache_key(effective_query, target_ids, top_n, doc_scope)
+    excluded = set(exclude_ids or ())
+    if excluded:
+        cache_key += (tuple(sorted(excluded)),)
     if cache is not None and cache_key in cache:
         cached = cache[cache_key]
         _LOG.info(f"[Hybrid search] Already searched this — reusing the {len(cached.get('chunks', []))} passage(s) found earlier.")
@@ -202,24 +233,67 @@ async def hybrid_search(tools, query: str, kb_ids: list[str] | None = None, top_
     embd_mdl = tools.embed_mdl
     vector_weight = 0.3 if embd_mdl else 0
 
-    kbinfos = await settings.retriever.retrieval(
-        effective_query,
-        embd_mdl,
-        tools.tenant_ids,
-        target_ids,
-        1,
-        top_n,
-        0.2,
-        vector_similarity_weight=vector_weight,
-        aggs=True,
-        highlight=False,
-        doc_ids=doc_scope,
-    )
-    kbinfos = _normalize(kbinfos, tools.tenant_ids)
-    if keywords:
-        length = len(kbinfos["chunks"])
-        kbinfos["chunks"] = _narrow_by_keywords(kbinfos.get("chunks", []), keywords)
-        _LOG.info(f"[Hybrid search] Kept {len(kbinfos['chunks'])} of {length} passage(s) that actually mention the keywords.")
+    page_size = min(max(2 * top_n, 24), 100) if excluded else top_n
+    max_pages = 4 if excluded else 1
+    candidates_examined = 0
+    found = []
+    seen = set(excluded)
+    for page in range(1, max_pages + 1):
+        batch = await settings.retriever.retrieval(
+            effective_query,
+            embd_mdl,
+            tools.tenant_ids,
+            target_ids,
+            page,
+            page_size,
+            0.2,
+            vector_similarity_weight=vector_weight,
+            aggs=True,
+            highlight=False,
+            doc_ids=doc_scope,
+        )
+        if excluded:
+            batch = dict(batch or {"chunks": [], "doc_aggs": []})
+            batch["chunks"] = batch.get("chunks", [])[:page_size]
+        raw_count = len((batch or {}).get("chunks", []))
+        candidates_examined += raw_count
+        batch = _normalize(batch, tools.tenant_ids)
+        if excluded:
+            batch["chunks"] = [ck for ck in batch.get("chunks", []) if ck.get("chunk_id") not in seen]
+        if keywords:
+            batch["chunks"] = _narrow_by_keywords(batch.get("chunks", []), keywords)
+        if not excluded:
+            kbinfos = batch
+            break
+        if page == 1:
+            kbinfos = dict(batch)
+        for ck in batch.get("chunks", []):
+            chunk_id = ck.get("chunk_id")
+            if chunk_id and chunk_id not in seen:
+                seen.add(chunk_id)
+                found.append(ck)
+                if len(found) >= top_n:
+                    break
+        # A reranked short/empty page does not imply that later backend
+        # candidate blocks are empty. Exhaust only the explicit call budget.
+        if len(found) >= top_n:
+            break
+    if excluded:
+        kbinfos["chunks"] = found
+        documents = {}
+        for ck in found:
+            doc_id = ck.get("doc_id")
+            if doc_id:
+                document = documents.setdefault(doc_id, {"doc_id": doc_id, "doc_name": ck.get("docnm_kwd", ""), "count": 0})
+                document["count"] += 1
+        kbinfos["doc_aggs"] = list(documents.values())
+        kbinfos["search_metadata"] = {
+            "exclusion_mode": "post_normalization",
+            "candidate_budget": page_size * max_pages,
+            "candidates_examined": candidates_examined,
+            "retrieval_calls": page,
+            "budget_exhausted": page == max_pages and len(found) < top_n,
+        }
     if cache is not None:
         cache[cache_key] = kbinfos
     return kbinfos

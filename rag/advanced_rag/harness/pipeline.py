@@ -1,11 +1,11 @@
 """Pipeline — unified tool execution dispatcher."""
 
-import time
 import logging
+import time
 from typing import Any
 
-from rag.advanced_rag.harness.types import ToolResult
 from rag.advanced_rag.harness.tools.registry import TOOL_REGISTRY
+from rag.advanced_rag.harness.types import ToolResult
 
 _LOG = logging.getLogger(__name__)
 
@@ -38,12 +38,13 @@ class Pipeline:
         try:
             raw = await fn(self.tools, **kwargs)
             elapsed = time.time() - start
-            self.trace.append({"tool": tool_name, "args": kwargs, "elapsed": elapsed, "success": True})
             result = self._normalize(raw)
+            self.trace.append({"tool": tool_name, "args": kwargs, "elapsed": elapsed, "success": not bool(result.error), "error": result.error})
             # Feed the shared citation pool: agent searches go through the
             # pipeline, so without this their evidence never reaches kbinfos and
             # the final answer has nothing to cite.
-            self._merge_into_kbinfos(result)
+            if not result.error:
+                self._merge_into_kbinfos(result)
             return result
         except Exception as e:
             elapsed = time.time() - start
@@ -80,12 +81,20 @@ class Pipeline:
         if not result or not result.chunks:
             return
         kb = self.tools.kbinfos
-        seen = {c.get("chunk_id") or c.get("id") or id(c) for c in kb.get("chunks", [])}
+        seen = {c.get("chunk_id") or c.get("id") or id(c): idx for idx, c in enumerate(kb.get("chunks", []))}
         for c in result.chunks:
             k = c.get("chunk_id") or c.get("id") or id(c)
             if k in seen:
+                c["evidence_index"] = seen[k]
+                # A source read restores full Markdown after keyword narrowing.
+                # Keep the global citation index stable for previous reports.
+                if "chunk_order" in c:
+                    existing = kb["chunks"][seen[k]]
+                    existing.update(c)
+                    existing.pop("highlight", None)
                 continue
-            seen.add(k)
+            c["evidence_index"] = len(kb.setdefault("chunks", []))
+            seen[k] = c["evidence_index"]
             kb.setdefault("chunks", []).append(c)
         aggs = result.metadata.get("aggs") if isinstance(result.metadata, dict) else None
         if aggs:
@@ -103,7 +112,8 @@ class Pipeline:
         if isinstance(raw, dict):
             return ToolResult(
                 chunks=raw.get("chunks", []),
-                metadata={"aggs": raw.get("doc_aggs", []), "answer": raw.get("answer", "")},
+                metadata={**raw.get("metadata", {}), "aggs": raw.get("doc_aggs", []), "answer": raw.get("answer", ""), "search_metadata": raw.get("search_metadata", {})},
+                error=raw.get("error"),
             )
         if isinstance(raw, list):
             return ToolResult(chunks=raw, metadata={})

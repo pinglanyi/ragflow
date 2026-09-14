@@ -87,6 +87,11 @@
 
 注意：PDF 仍依赖初次 DeepDOC OCR 成功；格式校验不等于内容和表格数值准确性验收。配置方法与归档说明见[多模态解析使用文档](docs/chunk-multimodal-parser.md)。
 
+
+## 基于 MLLM 正文的 Agentic Search
+
+支持原文相邻块与范围阅读、文档内匹配、排除已读块继续搜索，并保留图片位置和引用编号。详细的启用配置、工具参数、调用示例、性能限制、测试和故障排查见 [Agentic Search README](README.agentic-search.md)。
+
 ## 🎮 快速开始
 
 请登录网址 [https://cloud.ragflow.io](https://cloud.ragflow.io) 体验云服务。
