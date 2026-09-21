@@ -180,7 +180,7 @@ def normalize_agentic_search_result(
 
 
 async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: str | None = None) -> dict:
-    from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type, resolve_model_config
+    from api.db.joint_services.tenant_model_service import resolve_model_config
     from api.db.services.conversation_service import ConversationService, structure_answer
     from api.db.services.dialog_service import DialogService, rag_agent
     from api.db.services.knowledgebase_service import KnowledgebaseService, validate_dataset_embedding_models
@@ -227,11 +227,14 @@ async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: s
             dialog_model = requested_model
             model = requested_model
         else:
-            default_config = await thread_pool_exec(get_tenant_default_model_by_type, tenant_id, LLMType.CHAT)
-            dialog_model = ""
-            model_name = default_config.get("llm_name", "")
-            factory = default_config.get("llm_factory", "")
-            model = f"{model_name}@{factory}" if factory else model_name
+            from api.db.services.user_service import TenantService
+
+            found, tenant = await thread_pool_exec(TenantService.get_by_id, tenant_id)
+            model = tenant.llm_id if found and tenant else ""
+            if not model:
+                raise ValueError("No default chat model configured")
+            await thread_pool_exec(resolve_model_config, tenant_id=tenant_id, model_type=LLMType.CHAT, model_ref=model)
+            dialog_model = model
         dialog = build_stateless_dialog(
             tenant_id=tenant_id,
             dataset_ids=dataset_ids,

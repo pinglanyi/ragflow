@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 BASE_URL="http://127.0.0.1:9380"
 CHAT_ID=""
-DATASET_ID="982c06185fc011f1a9d2a33ecabf0a06"
-MODEL="deepseek-v4-flash@parser@Tongyi-Qianwen"
+DATASET_IDS=()
+MODEL=""
 REASONING=3
 TOP_N=8
 SIMILARITY_THRESHOLD=0.2
@@ -19,8 +19,8 @@ usage() {
 Usage: test_agentic_search.sh --api-key KEY --query TEXT [options]
   --base-url URL       RAGFlow URL (default http://127.0.0.1:9380)
   --chat-id ID         Optional Chat Assistant ID for stateful mode
-  --dataset-id ID      Dataset ID
-  --model REF          Model reference
+  --dataset-id ID      Dataset ID; repeat for multiple datasets
+  --model REF          Optional model reference; tenant default when omitted
   --reasoning 1..4     Agentic reasoning level (default 3)
   --top-n N            Retrieval result count (default 8)
   --threshold FLOAT    Similarity threshold (default 0.2)
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
     --query) QUERY="$2"; shift 2 ;;
     --base-url) BASE_URL="${2%/}"; shift 2 ;;
     --chat-id) CHAT_ID="$2"; shift 2 ;;
-    --dataset-id) DATASET_ID="$2"; shift 2 ;;
+    --dataset-id) DATASET_IDS+=("$2"); shift 2 ;;
     --model) MODEL="$2"; shift 2 ;;
     --reasoning) REASONING="$2"; shift 2 ;;
     --top-n) TOP_N="$2"; shift 2 ;;
@@ -51,6 +51,10 @@ done
 
 [[ -n "$API_KEY" ]] || { echo "Missing --api-key or RAGFLOW_API_KEY" >&2; exit 2; }
 [[ -n "$QUERY" ]] || { echo "Missing --query" >&2; exit 2; }
+if [[ -z "$CHAT_ID" && "${#DATASET_IDS[@]}" -eq 0 ]]; then
+  echo "At least one --dataset-id is required when --chat-id is not provided" >&2
+  exit 2
+fi
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
@@ -65,11 +69,18 @@ log_event() {
     '{timestamp:$timestamp,event:$event}+ $payload' >> "$LOG_PATH"
 }
 
+if [[ "${#DATASET_IDS[@]}" -gt 0 ]]; then
+  DATASET_IDS_JSON="$(printf '%s\n' "${DATASET_IDS[@]}" | jq -R . | jq -s .)"
+else
+  DATASET_IDS_JSON='[]'
+fi
 BODY="$(jq -cn \
-  --arg query "$QUERY" --arg chat "$CHAT_ID" --arg dataset "$DATASET_ID" \
+  --arg query "$QUERY" --arg chat "$CHAT_ID" --argjson datasets "$DATASET_IDS_JSON" \
   --arg model "$MODEL" --arg session "$SESSION_ID" \
   --argjson reasoning "$REASONING" --argjson top_n "$TOP_N" --argjson threshold "$SIMILARITY_THRESHOLD" \
-  '{query:$query,dataset_ids:[$dataset],model:$model,reasoning:$reasoning,top_n:$top_n,similarity_threshold:$threshold}
+  '{query:$query,reasoning:$reasoning,top_n:$top_n,similarity_threshold:$threshold}
+   + (if ($datasets | length) == 0 then {} else {dataset_ids:$datasets} end)
+   + (if $model == "" then {} else {model:$model} end)
    + (if $chat == "" then {} else {chat_id:$chat} end)
    + (if $session == "" then {} else {session_id:$session} end)')"
 URI="$BASE_URL/api/v1/agentic-search"

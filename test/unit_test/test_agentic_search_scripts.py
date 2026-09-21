@@ -42,5 +42,27 @@ def test_scripts_default_to_stateless_calls_and_keep_chat_id_optional():
     assert test_chat_id not in bash
     assert '[string]$ChatId = ""' in powershell
     assert "if ($ChatId) { $body.chat_id = $ChatId }" in powershell
+    assert '[string]$Model = ""' in powershell
+    assert "if ($Model) { $body.model = $Model }" in powershell
     assert 'CHAT_ID=""' in bash
+    assert 'MODEL=""' in bash
     assert 'if $chat == "" then {} else {chat_id:$chat} end' in bash
+    assert 'if $model == "" then {} else {model:$model} end' in bash
+
+
+def test_bash_script_accepts_repeated_dataset_ids():
+    bash = (ROOT / "scripts" / "test_agentic_search.sh").read_text(encoding="utf-8")
+    assert "DATASET_IDS=()" in bash
+    assert 'DATASET_IDS+=("$2")' in bash
+    assert "--argjson datasets" in bash
+    assert "dataset_ids:$datasets" in bash
+
+
+def test_scripts_require_datasets_only_for_stateless_mode():
+    powershell = (ROOT / "scripts" / "test_agentic_search.ps1").read_text(encoding="utf-8")
+    bash = (ROOT / "scripts" / "test_agentic_search.sh").read_text(encoding="utf-8")
+    assert '[string[]]$DatasetIds = @()' in powershell
+    assert "if (-not $ChatId -and $DatasetIds.Count -eq 0)" in powershell
+    assert "if ($DatasetIds.Count -gt 0) { $body.dataset_ids = @($DatasetIds) }" in powershell
+    assert 'if [[ -z "$CHAT_ID" && "${#DATASET_IDS[@]}" -eq 0 ]]' in bash
+    assert 'if ($datasets | length) == 0 then {} else {dataset_ids:$datasets} end' in bash

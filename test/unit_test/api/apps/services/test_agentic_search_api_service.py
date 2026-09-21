@@ -262,6 +262,12 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
         captured["default_model_calls"] += 1
         return {"llm_name": "default-model", "llm_factory": "Provider"}
 
+    class TenantService:
+        @staticmethod
+        def get_by_id(_tenant_id):
+            captured["default_model_calls"] += 1
+            return True, SimpleNamespace(llm_id="default-model@instance-a@Provider")
+
     async def rag_agent(dialog, messages, _stream, **kwargs):
         captured["dialog"] = dialog
         captured["messages"] = messages
@@ -292,6 +298,9 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
     model_module.resolve_model_config = lambda **_kwargs: {}
     model_module.get_tenant_default_model_by_type = get_tenant_default_model_by_type
     monkeypatch.setitem(sys.modules, model_module.__name__, model_module)
+    user_service_module = ModuleType("api.db.services.user_service")
+    user_service_module.TenantService = TenantService
+    monkeypatch.setitem(sys.modules, user_service_module.__name__, user_service_module)
     conversation_module = ModuleType("api.db.services.conversation_service")
     conversation_module.ConversationService = ConversationService
     conversation_module.structure_answer = structure_answer
@@ -323,9 +332,9 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
     assert captured["default_model_calls"] == 1
     assert captured["persistence_calls"] == 0
     assert captured["dialog"].kb_ids == ["kb-1"]
-    assert captured["dialog"].llm_id == ""
+    assert captured["dialog"].llm_id == "default-model@instance-a@Provider"
     assert captured["session_id"] is None
     assert result["chat_id"] is None
     assert result["session_id"] is None
-    assert result["model"] == "default-model@Provider"
+    assert result["model"] == "default-model@instance-a@Provider"
     assert result["reference_count"] == 1

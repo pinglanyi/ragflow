@@ -4,8 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Query,
     [string]$BaseUrl = "http://127.0.0.1:9380",
     [string]$ChatId = "",
-    [string[]]$DatasetIds = @("982c06185fc011f1a9d2a33ecabf0a06"),
-    [string]$Model = "deepseek-v4-flash@parser@Tongyi-Qianwen",
+    [string[]]$DatasetIds = @(),
+    [string]$Model = "",
     [ValidateRange(1, 4)][int]$Reasoning = 3,
     [int]$TopN = 8,
     [double]$SimilarityThreshold = 0.2,
@@ -16,6 +16,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $BaseUrl = $BaseUrl.TrimEnd('/')
+if (-not $ChatId -and $DatasetIds.Count -eq 0) {
+    throw "At least one DatasetIds value is required when ChatId is not provided."
+}
 if (-not $LogPath) {
     $LogPath = Join-Path (Join-Path $PSScriptRoot "..\logs") ("agentic-search-{0}.jsonl" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 }
@@ -39,13 +42,13 @@ function Write-Event {
 $uri = "$BaseUrl/api/v1/agentic-search"
 $body = @{
     query = $Query
-    dataset_ids = @($DatasetIds)
-    model = $Model
     reasoning = $Reasoning
     top_n = $TopN
     similarity_threshold = $SimilarityThreshold
 }
+if ($DatasetIds.Count -gt 0) { $body.dataset_ids = @($DatasetIds) }
 if ($ChatId) { $body.chat_id = $ChatId }
+if ($Model) { $body.model = $Model }
 if ($SessionId) { $body.session_id = $SessionId }
 
 $headers = @{ Authorization = "Bearer $ApiKey"; "Content-Type" = "application/json" }

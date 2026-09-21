@@ -294,6 +294,7 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
 ```powershell
 .\scripts\test_agentic_search.ps1 `
   -ApiKey $env:RAGFLOW_API_KEY `
+  -DatasetIds @("982c06185fc011f1a9d2a33ecabf0a06") `
   -Query "请检索产品库并给出机械手功能说明和引用。"
 ```
 
@@ -301,10 +302,11 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
 export RAGFLOW_API_KEY='<RAGFlow API Key>'
 ./scripts/test_agentic_search.sh \
   --api-key "$RAGFLOW_API_KEY" \
+  --dataset-id '982c06185fc011f1a9d2a33ecabf0a06' \
   --query '请检索产品库并给出机械手功能说明和引用。'
 ```
 
-脚本把每次请求、响应、耗时和错误写入 JSONL 日志，日志不记录完整 API key。Bash 版本依赖 `curl` 和 `jq`。
+脚本把每次请求、响应、耗时和错误写入 JSONL 日志，日志不记录完整 API key。Bash 版本依赖 `curl` 和 `jq`，可重复传 `--dataset-id` 搜索多个 embedding 兼容的知识库。两个脚本省略模型参数时都使用租户默认问答模型。
 
 ### 进程内调用
 
