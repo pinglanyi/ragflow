@@ -127,14 +127,22 @@ def _narrow_by_keywords(chunks: list[dict], keywords: str) -> list[dict]:
     kwds = [k.strip().lower() for k in (keywords or "").split(",") if k.strip()]
     if not kwds or not chunks:
         return chunks
-    if len(kwds) < 3:
-        kwds = [k.strip().lower() for k in (keywords or "").split(" ") if k.strip()]
-        _kwds = []
-        for i in range(len(kwds) - 1):
-            _kwds.append(kwds[i] + " " + kwds[i + 1])
-        kwds = _kwds
+    fallback_terms = []
+    if "," not in keywords:
+        terms = keywords.lower().split()
+        if len(terms) > 1:
+            kwds = [terms[i] + " " + terms[i + 1] for i in range(len(terms) - 1)]
+            fallback_terms = terms
+        else:
+            kwds = terms
 
     scored = [(ck, _narrow_content(ck.get("content_with_weight") or ck.get("content") or "", kwds)) for ck in chunks]
+    if fallback_terms and not any(nc is not None for _, nc in scored):
+        # Research agents often emit space-separated labels. Exact adjacent
+        # pairs are useful for precision, but must not erase every candidate
+        # when the document uses different spacing or word order.
+        kwds = fallback_terms
+        scored = [(ck, _narrow_content(ck.get("content_with_weight") or ck.get("content") or "", kwds)) for ck in chunks]
     out: list[dict] = []
     dedup: set[str] = set()
     for ck, nc in scored:

@@ -34,7 +34,7 @@ curl -sS "$RAGFLOW_BASE_URL/api/v1/agentic-search" \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" \
   -H 'Content-Type: application/json' \
   --data "$(jq -cn \
-    --arg query '查询产品的机械手功能并给出引用' \
+    --arg query 'E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。' \
     '{query:$query,reasoning:3}')" | jq .
 ```
 
@@ -140,6 +140,8 @@ flowchart LR
 
 有排除 ID 时，在父子归一化后的结果上去重并排除，最多调用 4 页。单页大小为 `min(max(2 * top_n, 24), 100)`，因此最多检查 400 条返回候选。少于期望结果可能是没有更多匹配，也可能是候选预算耗尽，应检查返回的 `search_metadata`。
 
+研究代理给出空格分隔关键词时，检索结果先按相邻短语裁剪；如果整批候选都没有短语命中，再按各关键词分别匹配，防止将已经召回的 CAN2、E502 等证据全部筛空。逗号分隔关键词仍按独立词匹配；两级筛选都无命中时才返回空结果。该回退只作用于当前已授权知识库和已取回候选，不扩大检索范围。
+
 排除集合纳入请求缓存键；不同文档范围、KB 范围和数量不会混用同一缓存。该缓存不是持久缓存，也不能作为索引快照。
 
 ### 文档阅读工具
@@ -184,7 +186,7 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" \
   -H 'Content-Type: application/json' \
   --data '{
-    "query":"产品支持哪些机械手功能？请给出引用。"
+    "query":"E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。"
   }' | jq .
 ```
 
@@ -195,7 +197,7 @@ curl -N 'http://127.0.0.1:9380/api/v1/agentic-search/stream' \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
-  --data '{"query":"产品支持哪些机械手功能？请给出引用。","reasoning":3}'
+  --data '{"query":"E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。","reasoning":3}'
 ```
 
 每条 SSE 消息以空行结束；`event` 为类型，`data` 为 JSON。典型顺序如下，进度和答案片段可以各出现多次：
@@ -387,17 +389,135 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
 ```powershell
 .\scripts\test_agentic_search.ps1 `
   -ApiKey $env:RAGFLOW_API_KEY `
-  -Query "请检索产品库并给出机械手功能说明和引用。"
+  -DatasetIds '982c06185fc011f1ae03d7c376fa307f' `
+  -Query 'E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。'
 ```
 
 ```bash
 export RAGFLOW_API_KEY='<RAGFlow API Key>'
 ./scripts/test_agentic_search.sh \
   --api-key "$RAGFLOW_API_KEY" \
-  --query '请检索产品库并给出机械手功能说明和引用。'
+  --dataset-id '982c06185fc011f1ae03d7c376fa307f' \
+  --query 'E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。'
 ```
 
 脚本把每次请求、响应、耗时和错误写入 JSONL 日志，日志不记录完整 API key。Bash 版本依赖 `curl` 和 `jq`。默认省略知识库参数，触发自动路由；手动覆盖分别使用 PowerShell 的 `-DatasetIds 'id1,id2'` 或 Bash 的单个 `--dataset-id 'id1,id2'`。两个脚本省略模型参数时都使用租户默认问答模型。
+
+### 部署后完整验收：中文问题、两种接口
+
+下面命令在部署本分支代码的 9380 服务器上执行，依赖 Bash、`curl` 和 `jq`。示例知识库 ID 是本次测试环境的“产品库”；换环境时先替换成已完成解析、自己有权访问的知识库 ID。API key 只通过环境变量传递，不写入日志。`reasoning=3` 会运行 Agentic Research。
+
+本次在 9380 上使用以下三个**中文问题**实测，均返回了非空回答和引用；保留资料中的英文型号/面板标签，是为了准确指向对应产品，不要求回答使用英文：
+
+1. `E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。`
+2. `E501B 8-CH MOLD TEMP CONTROL 有什么功能？请根据手册给出引用。`
+3. `E506 7-CH TEMP COLLECTION 是几路温度采集模块？请根据手册给出引用。`
+
+先准备环境变量和请求体。交互输入 API key 可避免将密钥留在 shell 历史中：
+
+```bash
+set -o pipefail
+export RAGFLOW_BASE_URL='http://127.0.0.1:9380'
+export DATASET_ID='982c06185fc011f1ae03d7c376fa307f'
+read -r -s -p 'RAGFlow API key: ' RAGFLOW_API_KEY; echo
+export RAGFLOW_API_KEY
+mkdir -p logs
+
+QUERY='E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。'
+BODY=$(jq -nc --arg query "$QUERY" --arg dataset "$DATASET_ID" \
+  '{query:$query,dataset_ids:$dataset,reasoning:3,top_n:8,similarity_threshold:0.1}')
+printf '%s\n' "$BODY" > logs/agentic-request-e502.json
+```
+
+非流式接口：HTTP 响应是 `{code,message,data}`；`code=0` 且 `data.reference_count>0` 才算本例通过。完整响应保存到 `logs/agentic-nonstream-e502.json`，可查看答案及每条引用的文档名和分块 ID：
+
+```bash
+curl -sS --max-time 300 -X POST "$RAGFLOW_BASE_URL/api/v1/agentic-search" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data-binary "$BODY" \
+  | tee logs/agentic-nonstream-e502.json \
+  | jq -e '{code,answer:.data.answer,reference_count:.data.reference_count,selected_datasets:.data.selected_datasets}'
+
+jq -e '.code == 0 and .data.reference_count > 0' logs/agentic-nonstream-e502.json
+jq -r '.data.references[] | [.document_name,.chunk_id] | @tsv' logs/agentic-nonstream-e502.json
+```
+
+流式接口：`curl -N` 逐条接收 SSE，完整事件保存在 `logs/agentic-stream-e502.sse`。应先看到 `start`、`selection`，随后有 `progress` 和 `delta`，最后必须出现 `final`，且不能出现 `error`。HTTP 200 及出现 `delta` 均不等于完成；以 `final.reference_count>0` 为本例通过条件。
+
+```bash
+curl -sS -N --max-time 300 -X POST "$RAGFLOW_BASE_URL/api/v1/agentic-search/stream" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -H 'Accept: text/event-stream' \
+  --data-binary "$BODY" \
+  | tee logs/agentic-stream-e502.sse
+
+grep '^event:' logs/agentic-stream-e502.sse
+if grep -q '^event: error' logs/agentic-stream-e502.sse; then echo '流式调用失败' >&2; exit 1; fi
+if ! grep -q '^event: final$' logs/agentic-stream-e502.sse; then echo '缺少最终结果' >&2; exit 1; fi
+awk '$0 == "event: final" { getline; sub(/^data: /, ""); print }' \
+  logs/agentic-stream-e502.sse \
+  | jq -e 'select(.reference_count > 0) | {answer,reference_count,selected_datasets}'
+```
+
+将上面的 `QUERY` 改成第 2、3 个中文问题并重新生成 `BODY`，即可分别复测 E501B 与 E506；保存结果时同时更换日志文件名，避免覆盖。也可直接用已有一键脚本跑非流式接口，例如：
+
+```bash
+./scripts/test_agentic_search.sh \
+  --base-url "$RAGFLOW_BASE_URL" \
+  --api-key "$RAGFLOW_API_KEY" \
+  --dataset-id "$DATASET_ID" \
+  --reasoning 3 --top-n 8 --threshold 0.1 \
+  --query 'E501B 8-CH MOLD TEMP CONTROL 有什么功能？请根据手册给出引用。' \
+  --log logs/agentic-e501b.jsonl
+```
+
+测试自动选库时，删去请求体中的 `dataset_ids`，其余参数不变。E502 中文问题在本次环境中自动选中了“文件库”，并返回 12 条引用；自动路由的具体选库会随知识库名称、描述、权限和模型结果变化，始终以响应的 `selected_datasets` 为准：
+
+```bash
+QUERY='E502 10-CH TEMP COLLECTION 是什么模块？请根据产品手册回答并给出引用。'
+AUTO_BODY=$(jq -nc --arg query "$QUERY" '{query:$query,reasoning:3}')
+curl -sS --max-time 300 -X POST "$RAGFLOW_BASE_URL/api/v1/agentic-search" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data-binary "$AUTO_BODY" \
+  | jq -e '{code,answer:.data.answer,reference_count:.data.reference_count,dataset_selection_mode:.data.dataset_selection_mode,selected_datasets:.data.selected_datasets}'
+```
+
+关键词筛选修复的回归问题使用原先会返回 0 引用的中文问法。部署**包含该修复的新提交**后，分别替换 `QUERY` 并重建 `BODY`，调用两种接口核对引用；如果仍为 0，保存响应和 `request_id`，并与 `POST /api/v1/retrieval` 对同一知识库的结果对比：
+
+```bash
+QUERY='根据《CAN扩展模块接线及接地规范》，CAN2扩展模块应如何接线和接地？请引用原文。'
+BODY=$(jq -nc --arg query "$QUERY" --arg dataset "$DATASET_ID" \
+  '{query:$query,dataset_ids:$dataset,reasoning:3,top_n:8,similarity_threshold:0.1}')
+
+curl -sS --max-time 300 -X POST "$RAGFLOW_BASE_URL/api/v1/agentic-search" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data-binary "$BODY" \
+  | tee logs/agentic-can-regression.json \
+  | jq '{code,request_id:.data.request_id,answer:.data.answer,reference_count:.data.reference_count}'
+
+QUERY='E502温度采集模块有什么功能？请引用产品手册。'
+BODY=$(jq -nc --arg query "$QUERY" --arg dataset "$DATASET_ID" \
+  '{query:$query,dataset_ids:$dataset,reasoning:3,top_n:8,similarity_threshold:0.1}')
+curl -sS --max-time 300 -X POST "$RAGFLOW_BASE_URL/api/v1/agentic-search" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  --data-binary "$BODY" \
+  | tee logs/agentic-e502-broad-regression.json \
+  | jq '{code,request_id:.data.request_id,answer:.data.answer,reference_count:.data.reference_count}'
+
+curl -sS -N --max-time 300 -X POST "$RAGFLOW_BASE_URL/api/v1/agentic-search/stream" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -H 'Accept: text/event-stream' \
+  --data-binary "$BODY" \
+  | tee logs/agentic-e502-broad-regression.sse
+```
+
+最后一条流式命令使用当前的 E502 问题；测试 CAN 的流式版本时，把 `QUERY` 设回 CAN 问题、重新生成 `BODY` 再执行，并使用不同的日志文件名。修复前的线上进度显示两类问题的 BM25 检索各返回 12 个候选，但关键词裁剪保留 0 个；本地用修复后的裁剪函数重放同类候选，CAN 保留 5/12，E502 保留 12/12。完整端到端效果仍以新后端部署后的响应为准。
 
 ### 进程内调用
 
@@ -502,9 +622,10 @@ async def inspect_manual(tools, question):
 
 ```bash
 python -m unittest discover -s test/agentic_search -v
+python -m pytest -q test/agentic_search/test_keyword_narrowing.py
 ```
 
-项目完整后端要求 Python 3.13+。这组独立测试只使用标准库及被测源代码，可在 Python 3.12 运行；不能由此推断完整后端支持 3.12。
+项目完整后端要求 Python 3.13+。独立测试通过替身加载被测源代码，可在 Python 3.12 运行；第二条命令需要安装 `pytest`。不能由此推断完整后端支持 3.12。
 
 测试覆盖跨页读取、真实数组 KB 字段、RAPTOR 过滤、未召回邻居、非法范围、排除补充/缓存/预算、模型工具名、阶段门控、错误透传、引用池全文恢复和模型可见信息。为避免启动数据库与下载模型，部分测试通过 AST 加载实际函数，外部检索和应用初始化使用替身。
 
@@ -517,7 +638,7 @@ python -m unittest discover -s test/agentic_search -v
 5. 检查限定文档/排除已读 ID、无命中、未授权 ID 和重建中的文档。
 6. 对相同问题集记录正确率、引用正确率、补充证据命中率、工具调用数、p50/p95 延迟及 token 成本。
 
-本次提交前的结果以执行日志为准。组件测试不覆盖真实 ES/Infinity 排序、线上并发、模型工具决策和端到端准确率；未经在线验收，不声明这些指标改善。
+E502、E501B、E506 三个中文问题已在 9380 的流式接口返回答案与引用；E502 中文问题也通过非流式接口。关键词回退修复仍需在部署包含新提交的后端后，用上面的两个宽泛问题复测。组件测试不覆盖真实 ES/Infinity 排序、线上并发和端到端准确率；这些结果不能外推为所有问题的正确率。
 
 ## 故障排查
 
