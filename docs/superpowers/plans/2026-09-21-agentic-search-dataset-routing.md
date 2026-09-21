@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-21-agentic-search-dataset-routing-design.md`
 
+**Deployment sequence:** The user subsequently requested code, local tests, commit, and push first. The 9380 smoke tests in Task 5 Steps 2–3 run after the user deploys the pushed branch; they are not a pre-push gate.
+
 ## Global Constraints
 
 - `dataset_ids` is one optional comma-separated string; JSON arrays are rejected.
