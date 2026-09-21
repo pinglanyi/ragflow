@@ -187,6 +187,7 @@ def test_execute_agentic_search_uses_request_scoped_dialog_copy(monkeypatch):
 
     model_module = ModuleType("api.db.joint_services.tenant_model_service")
     model_module.resolve_model_config = lambda **_kwargs: {}
+    model_module.get_tenant_default_model_by_type = lambda *_args, **_kwargs: {}
     monkeypatch.setitem(sys.modules, model_module.__name__, model_module)
     conversation_module = ModuleType("api.db.services.conversation_service")
     conversation_module.ConversationService = ConversationService
@@ -228,4 +229,103 @@ def test_execute_agentic_search_uses_request_scoped_dialog_copy(monkeypatch):
     assert captured["dialog"].kb_ids == ["request-kb"]
     assert captured["dialog"].llm_id == "request-model"
     assert result["answer"] == "done"
+    assert result["reference_count"] == 1
+
+
+def test_execute_stateless_search_uses_default_model_without_persistence(monkeypatch):
+    captured = {"default_model_calls": 0, "persistence_calls": 0}
+
+    class DialogService:
+        @staticmethod
+        def query(**_kwargs):
+            raise AssertionError("stateless search must not query a chat assistant")
+
+    class ConversationService:
+        @staticmethod
+        def save(**_kwargs):
+            captured["persistence_calls"] += 1
+
+        @staticmethod
+        def update_by_id(*_args):
+            captured["persistence_calls"] += 1
+
+    class KnowledgebaseService:
+        @staticmethod
+        def accessible(**_kwargs):
+            return True
+
+        @staticmethod
+        def query(**_kwargs):
+            return [SimpleNamespace(chunk_num=1, embd_id="embedding-1")]
+
+    def get_tenant_default_model_by_type(_tenant_id, _model_type):
+        captured["default_model_calls"] += 1
+        return {"llm_name": "default-model", "llm_factory": "Provider"}
+
+    async def rag_agent(dialog, messages, _stream, **kwargs):
+        captured["dialog"] = dialog
+        captured["messages"] = messages
+        captured["session_id"] = kwargs.get("session_id")
+        yield {
+            "answer": "stateless answer",
+            "reference": {"chunks": [{"id": "chunk-1", "kb_id": "kb-1", "docnm_kwd": "manual.pdf"}]},
+        }
+
+    def structure_answer(_conversation, answer, _message_id, session_id):
+        return {**answer, "session_id": session_id}
+
+    async def thread_pool_exec(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    modules = {
+        "api": ModuleType("api"),
+        "api.db": ModuleType("api.db"),
+        "api.db.joint_services": ModuleType("api.db.joint_services"),
+        "api.db.services": ModuleType("api.db.services"),
+        "common": ModuleType("common"),
+    }
+    for name, value in modules.items():
+        value.__path__ = []
+        monkeypatch.setitem(sys.modules, name, value)
+
+    model_module = ModuleType("api.db.joint_services.tenant_model_service")
+    model_module.resolve_model_config = lambda **_kwargs: {}
+    model_module.get_tenant_default_model_by_type = get_tenant_default_model_by_type
+    monkeypatch.setitem(sys.modules, model_module.__name__, model_module)
+    conversation_module = ModuleType("api.db.services.conversation_service")
+    conversation_module.ConversationService = ConversationService
+    conversation_module.structure_answer = structure_answer
+    monkeypatch.setitem(sys.modules, conversation_module.__name__, conversation_module)
+    dialog_module = ModuleType("api.db.services.dialog_service")
+    dialog_module.DialogService = DialogService
+    dialog_module.rag_agent = rag_agent
+    monkeypatch.setitem(sys.modules, dialog_module.__name__, dialog_module)
+    kb_module = ModuleType("api.db.services.knowledgebase_service")
+    kb_module.KnowledgebaseService = KnowledgebaseService
+    kb_module.validate_dataset_embedding_models = lambda _kbs: None
+    monkeypatch.setitem(sys.modules, kb_module.__name__, kb_module)
+    constants_module = ModuleType("common.constants")
+    constants_module.LLMType = SimpleNamespace(CHAT="chat")
+    constants_module.StatusEnum = SimpleNamespace(VALID=SimpleNamespace(value="1"))
+    monkeypatch.setitem(sys.modules, constants_module.__name__, constants_module)
+    misc_module = ModuleType("common.misc_utils")
+    misc_module.get_uuid = lambda: "generated-id"
+    misc_module.thread_pool_exec = thread_pool_exec
+    monkeypatch.setitem(sys.modules, misc_module.__name__, misc_module)
+
+    result = asyncio.run(
+        MODULE.execute_agentic_search(
+            tenant_id="tenant-1",
+            options={"query": "question", "dataset_ids": ["kb-1"], "reasoning": 3},
+        )
+    )
+
+    assert captured["default_model_calls"] == 1
+    assert captured["persistence_calls"] == 0
+    assert captured["dialog"].kb_ids == ["kb-1"]
+    assert captured["dialog"].llm_id == ""
+    assert captured["session_id"] is None
+    assert result["chat_id"] is None
+    assert result["session_id"] is None
+    assert result["model"] == "default-model@Provider"
     assert result["reference_count"] == 1

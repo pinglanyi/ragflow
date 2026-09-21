@@ -116,6 +116,16 @@ def build_stateless_dialog(*, tenant_id: str, dataset_ids: list[str], model: str
     )
 
 
+def build_stateless_conversation(*, tenant_id: str):
+    return SimpleNamespace(
+        id=None,
+        dialog_id=None,
+        user_id=tenant_id,
+        message=[],
+        reference=[],
+    )
+
+
 def apply_dialog_overrides(dialog, options: dict):
     copied = deepcopy(dialog)
     if "dataset_ids" in options:
@@ -148,7 +158,7 @@ def normalize_agentic_search_result(
     result: dict,
     *,
     request_id: str,
-    chat_id: str,
+    chat_id: str | None,
     model: str,
     reasoning: int,
     elapsed_ms: int,
@@ -170,7 +180,7 @@ def normalize_agentic_search_result(
 
 
 async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: str | None = None) -> dict:
-    from api.db.joint_services.tenant_model_service import resolve_model_config
+    from api.db.joint_services.tenant_model_service import get_tenant_default_model_by_type, resolve_model_config
     from api.db.services.conversation_service import ConversationService, structure_answer
     from api.db.services.dialog_service import DialogService, rag_agent
     from api.db.services.knowledgebase_service import KnowledgebaseService, validate_dataset_embedding_models
@@ -179,13 +189,15 @@ async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: s
 
     started = time.monotonic()
     request_id = request_id or str(uuid.uuid4())
-    chat_id = options["chat_id"]
+    chat_id = options.get("chat_id")
     logging.info("agentic_search request_id=%s chat_id=%s start", request_id, chat_id)
 
-    dialogs = await thread_pool_exec(DialogService.query, id=chat_id, tenant_id=tenant_id, status=StatusEnum.VALID.value)
-    if not dialogs:
-        raise PermissionError("Chat not found or not authorized")
-    source_dialog = dialogs[0]
+    source_dialog = None
+    if chat_id:
+        dialogs = await thread_pool_exec(DialogService.query, id=chat_id, tenant_id=tenant_id, status=StatusEnum.VALID.value)
+        if not dialogs:
+            raise PermissionError("Chat not found or not authorized")
+        source_dialog = dialogs[0]
 
     dataset_ids = options.get("dataset_ids")
     if dataset_ids is not None:
@@ -202,31 +214,53 @@ async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: s
         if embedding_error:
             raise ValueError(embedding_error)
 
-    model = options.get("model") or source_dialog.llm_id
-    if not model:
-        raise ValueError("No chat model configured")
-    await thread_pool_exec(resolve_model_config, tenant_id=tenant_id, model_type=LLMType.CHAT, model_ref=model)
-    dialog = apply_dialog_overrides(source_dialog, options)
-
-    session_id = options.get("session_id") or ""
-    if session_id:
-        found, conversation = await thread_pool_exec(ConversationService.get_by_id, session_id)
-        if not found or conversation.dialog_id != chat_id or (conversation.user_id and conversation.user_id != tenant_id):
-            raise PermissionError("Session not found or not authorized")
+    requested_model = options.get("model")
+    if chat_id:
+        model = requested_model or source_dialog.llm_id
+        if not model:
+            raise ValueError("No chat model configured")
+        await thread_pool_exec(resolve_model_config, tenant_id=tenant_id, model_type=LLMType.CHAT, model_ref=model)
+        dialog = apply_dialog_overrides(source_dialog, options)
     else:
-        session_id = get_uuid()
-        conversation_data = {
-            "id": session_id,
-            "dialog_id": chat_id,
-            "name": "Agentic Search",
-            "message": [{"role": "assistant", "content": dialog.prompt_config.get("prologue", "")}],
-            "user_id": tenant_id,
-            "reference": [],
-        }
-        await thread_pool_exec(ConversationService.save, **conversation_data)
-        found, conversation = await thread_pool_exec(ConversationService.get_by_id, session_id)
-        if not found:
-            raise RuntimeError("Failed to create Agentic Search session")
+        if requested_model:
+            await thread_pool_exec(resolve_model_config, tenant_id=tenant_id, model_type=LLMType.CHAT, model_ref=requested_model)
+            dialog_model = requested_model
+            model = requested_model
+        else:
+            default_config = await thread_pool_exec(get_tenant_default_model_by_type, tenant_id, LLMType.CHAT)
+            dialog_model = ""
+            model_name = default_config.get("llm_name", "")
+            factory = default_config.get("llm_factory", "")
+            model = f"{model_name}@{factory}" if factory else model_name
+        dialog = build_stateless_dialog(
+            tenant_id=tenant_id,
+            dataset_ids=dataset_ids,
+            model=dialog_model,
+            options=options,
+        )
+
+    session_id = options.get("session_id") or None
+    if chat_id:
+        if session_id:
+            found, conversation = await thread_pool_exec(ConversationService.get_by_id, session_id)
+            if not found or conversation.dialog_id != chat_id or (conversation.user_id and conversation.user_id != tenant_id):
+                raise PermissionError("Session not found or not authorized")
+        else:
+            session_id = get_uuid()
+            conversation_data = {
+                "id": session_id,
+                "dialog_id": chat_id,
+                "name": "Agentic Search",
+                "message": [{"role": "assistant", "content": dialog.prompt_config.get("prologue", "")}],
+                "user_id": tenant_id,
+                "reference": [],
+            }
+            await thread_pool_exec(ConversationService.save, **conversation_data)
+            found, conversation = await thread_pool_exec(ConversationService.get_by_id, session_id)
+            if not found:
+                raise RuntimeError("Failed to create Agentic Search session")
+    else:
+        conversation = build_stateless_conversation(tenant_id=tenant_id)
 
     message_id = get_uuid()
     user_message = {"role": "user", "content": options["query"], "id": message_id}
@@ -253,7 +287,8 @@ async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: s
     if not final or not final.get("answer"):
         raise RuntimeError("Agentic Search returned an empty answer")
 
-    await thread_pool_exec(ConversationService.update_by_id, conversation.id, conversation.to_dict())
+    if chat_id:
+        await thread_pool_exec(ConversationService.update_by_id, conversation.id, conversation.to_dict())
     elapsed_ms = round((time.monotonic() - started) * 1000)
     logging.info(
         "agentic_search request_id=%s chat_id=%s session_id=%s elapsed_ms=%s references=%s success",
