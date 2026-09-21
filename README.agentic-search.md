@@ -6,6 +6,7 @@
 
 ## 目录
 
+- [DeepAgent 无状态快速开始](#deepagent-无状态快速开始)
 - [解决什么问题](#解决什么问题)
 - [数据链路与代码位置](#数据链路与代码位置)
 - [准备和启用](#准备和启用)
@@ -16,6 +17,32 @@
 - [测试与真实服务验收](#测试与真实服务验收)
 - [故障排查](#故障排查)
 - [部署与回退](#部署与回退)
+
+## DeepAgent 无状态快速开始
+
+DeepAgent 调用 Agentic Search **不需要 `chat_id`**。部署侧只需配置 RAGFlow 地址、RAGFlow API key 和允许检索的知识库 ID：
+
+```bash
+export RAGFLOW_BASE_URL='http://127.0.0.1:9380'
+export RAGFLOW_API_KEY='<RAGFlow API Key>'
+export RAGFLOW_DATASET_ID='<Dataset ID>'
+```
+
+最小调用：
+
+```bash
+curl -sS "$RAGFLOW_BASE_URL/api/v1/agentic-search" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data "$(jq -cn \
+    --arg query '查询产品的机械手功能并给出引用' \
+    --arg dataset_id "$RAGFLOW_DATASET_ID" \
+    '{query:$query,dataset_ids:[$dataset_id],reasoning:3}')" | jq .
+```
+
+无状态模式不会创建 Chat Assistant 或 Conversation，不会返回可续问的会话；`data.chat_id` 和 `data.session_id` 都是 `null`。每次请求相互独立，DeepAgent 直接读取 `data.answer` 和 `data.references`。如果请求不传 `model`，后端使用该 API key 所属租户的默认问答模型。
+
+服务端必须先部署本分支并重启 9380 后端。知识库必须已完成解析且包含可检索分块；API key 必须有权访问请求中的每个 `dataset_id`。
 
 ## 解决什么问题
 
