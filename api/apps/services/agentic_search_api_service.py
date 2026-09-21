@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from copy import deepcopy
+from types import SimpleNamespace
 
 
 _ALLOWED_FIELDS = {
@@ -29,6 +30,20 @@ _ALLOWED_FIELDS = {
     "reasoning",
     "top_n",
     "similarity_threshold",
+}
+
+_STATELESS_PROMPT_CONFIG = {
+    "system": (
+        "You are an intelligent assistant. Answer the question based on the supplied knowledge base.\n"
+        "Answers need to consider the available evidence and cite relevant sources.\n"
+        "Here is the knowledge base:\n{knowledge}\nThe above is the knowledge base."
+    ),
+    "prologue": "",
+    "parameters": [{"key": "knowledge", "optional": False}],
+    "empty_response": "Sorry! No relevant content was found in the knowledge base!",
+    "quote": True,
+    "tts": False,
+    "refine_multiturn": False,
 }
 
 
@@ -43,13 +58,8 @@ def validate_agentic_search_request(payload: dict) -> dict:
     query = payload.get("query")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("query is required")
-    chat_id = payload.get("chat_id")
-    if not isinstance(chat_id, str) or not chat_id.strip():
-        raise ValueError("chat_id is required")
-
     options = dict(payload)
     options["query"] = query.strip()
-    options["chat_id"] = chat_id.strip()
     options["reasoning"] = payload.get("reasoning", 3)
     if not isinstance(options["reasoning"], int) or isinstance(options["reasoning"], bool) or not 1 <= options["reasoning"] <= 4:
         raise ValueError("reasoning must be an integer from 1 to 4")
@@ -73,7 +83,37 @@ def validate_agentic_search_request(payload: dict) -> dict:
             if not isinstance(options[name], str):
                 raise ValueError(f"{name} must be a string")
             options[name] = options[name].strip()
+
+    chat_id = payload.get("chat_id")
+    if chat_id is not None and not isinstance(chat_id, str):
+        raise ValueError("chat_id must be a string")
+    if isinstance(chat_id, str) and chat_id.strip():
+        options["chat_id"] = chat_id.strip()
+    else:
+        options.pop("chat_id", None)
+
+    if not options.get("chat_id") and not options.get("dataset_ids"):
+        raise ValueError("chat_id or a non-empty dataset_ids list is required")
+    if not options.get("chat_id") and options.get("session_id"):
+        raise ValueError("session_id requires chat_id")
     return options
+
+
+def build_stateless_dialog(*, tenant_id: str, dataset_ids: list[str], model: str, options: dict):
+    return SimpleNamespace(
+        tenant_id=tenant_id,
+        llm_id=model,
+        tenant_llm_id=None,
+        llm_setting={},
+        prompt_config=deepcopy(_STATELESS_PROMPT_CONFIG),
+        kb_ids=list(dataset_ids),
+        top_n=options.get("top_n", 6),
+        top_k=1024,
+        rerank_id="",
+        similarity_threshold=options.get("similarity_threshold", 0.1),
+        vector_similarity_weight=0.3,
+        meta_data_filter=None,
+    )
 
 
 def apply_dialog_overrides(dialog, options: dict):

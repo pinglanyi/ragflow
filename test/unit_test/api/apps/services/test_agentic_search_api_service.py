@@ -16,11 +16,35 @@ normalize_agentic_search_result = MODULE.normalize_agentic_search_result
 validate_agentic_search_request = MODULE.validate_agentic_search_request
 
 
-def test_validate_requires_query_and_chat_id():
+def test_validate_requires_query_and_search_scope():
     with pytest.raises(ValueError, match="query"):
         validate_agentic_search_request({"chat_id": "chat-1"})
-    with pytest.raises(ValueError, match="chat_id"):
+    with pytest.raises(ValueError, match="chat_id.*dataset_ids"):
         validate_agentic_search_request({"query": "hello"})
+
+
+def test_validate_accepts_stateless_dataset_scope_and_rejects_session():
+    result = validate_agentic_search_request({"query": "hello", "dataset_ids": [" kb-1 ", "kb-1"]})
+    assert result["dataset_ids"] == ["kb-1"]
+    assert result.get("chat_id") is None
+
+    with pytest.raises(ValueError, match="session_id.*chat_id"):
+        validate_agentic_search_request({"query": "hello", "dataset_ids": ["kb-1"], "session_id": "session-1"})
+
+
+def test_build_stateless_dialog_uses_knowledge_prompt_and_overrides():
+    dialog = MODULE.build_stateless_dialog(
+        tenant_id="tenant-1",
+        dataset_ids=["kb-1"],
+        model="model-1",
+        options={"top_n": 4, "similarity_threshold": 0.35},
+    )
+    assert dialog.tenant_id == "tenant-1"
+    assert dialog.kb_ids == ["kb-1"]
+    assert dialog.llm_id == "model-1"
+    assert dialog.top_n == 4
+    assert dialog.similarity_threshold == 0.35
+    assert "{knowledge}" in dialog.prompt_config["system"]
 
 
 def test_validate_rejects_unknown_fields_and_invalid_reasoning():
