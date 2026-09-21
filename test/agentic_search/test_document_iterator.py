@@ -87,6 +87,20 @@ class IteratorTests(unittest.TestCase):
         ]
         self.assertEqual([c["chunk_id"] for c in self.collect()], ["upper", "lower"])
 
+    def test_chunk_order_int_takes_precedence_over_page_geometry(self):
+        self.rows = [
+            {"id": "physical-first", "doc_id": "doc", "chunk_order_int": 1, "position_int": [[1, 0, 1, 0, 1]]},
+            {"id": "logical-first", "doc_id": "doc", "chunk_order_int": 0, "position_int": [[2, 0, 1, 0, 1]]},
+        ]
+        self.assertEqual([c["chunk_id"] for c in self.collect()], ["logical-first", "physical-first"])
+
+    def test_chunk_order_without_page_coordinates_is_navigable(self):
+        self.rows = [
+            {"id": "second", "doc_id": "doc", "chunk_order_int": 1},
+            {"id": "first", "doc_id": "doc", "chunk_order_int": 0},
+        ]
+        self.assertEqual([c["chunk_id"] for c in self.collect()], ["first", "second"])
+
     def test_raptor_summary_is_not_a_source_chunk(self):
         self.rows[0]["raptor_kwd"] = "raptor"
         self.rows[0].pop("position_int")

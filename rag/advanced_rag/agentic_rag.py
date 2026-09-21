@@ -490,9 +490,9 @@ class RAGTools:
     async def iter_document_chunks(self, doc_id: str):
         """Read authorized indexed Markdown in source order, at most 10,000 rows.
 
-        Ordinals count enabled, noncompiled chunks. Re-parsing invalidates them;
-        missing coordinates or repeated IDs fail instead of inventing adjacency.
-        Scan before yielding: backend array sorting is not page/top/left order.
+        Prefer unique chunk_order_int from the ingestion pipeline. Older indexed
+        documents fall back to page/top/left coordinates. Ordinals count enabled,
+        noncompiled chunks; re-parsing invalidates them.
         """
         import math
 
@@ -520,6 +520,7 @@ class RAGTools:
                     "kb_id",
                     "img_id",
                     "position_int",
+                    "chunk_order_int",
                     "page_num_int",
                     "top_int",
                     "available_int",
@@ -542,23 +543,33 @@ class RAGTools:
                 if not chunk_id or chunk_id in seen:
                     raise ValueError("Missing or repeated chunk ID; retry after indexing completes")
                 seen.add(chunk_id)
-                positions = row.get("position_int")
-                if not positions:
-                    raise ValueError("Document lacks source coordinates for ordered navigation")
-                try:
-                    coordinates = [(float(p[0]), float(p[3]), float(p[1])) for p in positions if len(p) == 5]
-                except (TypeError, ValueError, IndexError) as exc:
-                    raise ValueError("Invalid source coordinates for ordered navigation") from exc
-                if len(coordinates) != len(positions) or not all(math.isfinite(v) for coordinate in coordinates for v in coordinate):
-                    raise ValueError("Invalid source coordinates for ordered navigation")
+                positions = row.get("position_int") or []
+                coordinates = None
+                if positions:
+                    try:
+                        coordinates = [(float(p[0]), float(p[3]), float(p[1])) for p in positions if len(p) == 5]
+                    except (TypeError, ValueError, IndexError):
+                        coordinates = None
+                    if coordinates is not None and (len(coordinates) != len(positions) or not all(math.isfinite(v) for coordinate in coordinates for v in coordinate)):
+                        coordinates = None
+                logical_order = row.get("chunk_order_int")
+                if isinstance(logical_order, bool) or not isinstance(logical_order, int) or logical_order < 0:
+                    logical_order = None
                 chunk = dict(row)
                 chunk.update(chunk_id=chunk_id, doc_id=doc_id, kb_id=kb_id, positions=positions, image_id=row.get("img_id", ""))
-                ordered.append(((*min(coordinates), str(chunk_id)), chunk))
+                ordered.append((logical_order, min(coordinates) if coordinates else None, chunk))
             if len(rows) < limit:
                 break
         else:
             raise ValueError("Document scan reached the 10000-row limit; completeness is unknown")
-        for ordinal, (_, chunk) in enumerate(sorted(ordered, key=lambda item: item[0])):
+        logical_orders = [item[0] for item in ordered]
+        if len(logical_orders) == len(set(logical_orders)) and all(order is not None for order in logical_orders):
+            ordered.sort(key=lambda item: (item[0], str(item[2]["chunk_id"])))
+        elif all(item[1] is not None for item in ordered):
+            ordered.sort(key=lambda item: (*item[1], str(item[2]["chunk_id"])))
+        else:
+            raise ValueError("Document lacks unique logical order and valid source coordinates")
+        for ordinal, (_, _, chunk) in enumerate(ordered):
             chunk["chunk_order"] = ordinal
             yield chunk
 

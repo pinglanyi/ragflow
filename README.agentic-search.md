@@ -2,6 +2,55 @@
 
 本功能让 RAGFlow 在初次检索之后，继续读取原文相邻块、查找文档内关键词、按范围阅读，并排除已经看过的片段寻找补充证据。它直接使用 `chunk-mm` 多模态解析入库的 Markdown，复用现有知识库、检索引擎和引用系统。
 
+## 七个原生工具 API（9380）
+
+除整轮研究 API 外，9380 现在提供七个独立调用入口：
+`POST /api/v1/agentic-search/tools/{search|open|navigate|read|grep|ingest|delete}`。
+均使用 `Authorization: Bearer <RAGFlow API key>` 和 JSON 请求体，成功响应为
+`{"code":0,"data":{...}}`。五个只读工具默认可用；`ingest` 和 `delete`
+只有部署端设置 `RAGFLOW_AGENTIC_SEARCH_WRITE_TOOLS_ENABLED=true` 才会执行。
+
+| 工具 | JSON 请求体 | `data` |
+|---|---|---|
+| `search` | `query` 必填；`top_k` 默认 5；`exclude_ids` 可选 chunk ID 数组；`dataset_ids` 可选逗号分隔字符串 | `chunks`、`selected_datasets`、`dataset_selection_mode`、`search_metadata` |
+| `open` | `chunk_id` 必填；`window` 默认 2 | 锚块及每侧最多 `window` 个相邻块 |
+| `navigate` | `source_id`、`start_offset`、`end_offset`、`direction` (`next`/`previous`) 必填；`top_k` 默认 1 | 同文档前/后相邻块 |
+| `read` | `source_id` 必填；`start_offset`、`end_offset` 可为空；`top_k` 默认 20 | 指定闭区间内的原文块 |
+| `grep` | `source_id`、`pattern` 必填；`mode` 为 `phrase`（默认）或 `term`；`top_k` 默认 5 | 文档内字面匹配的完整块 |
+| `ingest` | `uri`、`dataset_id` 必填 | `documents`、`document_count`；解析异步排队 |
+| `delete` | `source_id` 必填 | `deleted`、`source_id`、`dataset_id`；只删一份有权修改的文档 |
+
+只读 `chunks` 中的 `id` 可直接传给 `open` 或后续 `search.exclude_ids`；
+`source_id` 是 RAGFlow 文档 ID。`start_offset`/`end_offset` 是文档内从 0 开始的
+**可见逻辑 chunk 序号**，不是字符位置或 PDF 页码。后端优先使用完整且唯一的
+`chunk_order_int` 确定逻辑顺序；旧文档缺少该字段时回退到页/顶部/左侧坐标。
+没有可靠顺序的文档会拒绝导航。`metadata.positions` 保留原始页面坐标。
+
+检索默认依据知识库描述自动选库。显式范围写成一个字符串
+`"dataset_ids":"id1,id2"`，每个 ID 都需在 API key 的访问权限内。
+文档导航每次重新校验文档所属知识库；`ingest`/`delete` 只允许修改调用者拥有的库。
+`ingest` 的本地路径必须位于部署端设置的 `RAGFLOW_AGENTIC_SEARCH_INGEST_ROOT`
+下；HTTP(S) 地址的主机必须列在逗号分隔的
+`RAGFLOW_AGENTIC_SEARCH_ALLOWED_URL_HOSTS` 中。未设置允许列表就不能从对应来源导入。
+单文件上限 20 MiB，本地目录最多 100 个文件；导入返回的是排队状态，需等待解析完成再搜索。
+
+```bash
+export RAGFLOW_API_KEY='<RAGFlow API key>'
+curl -sS http://127.0.0.1:9380/api/v1/agentic-search/tools/search \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"query":"CAN 扩展模块接线和接地有什么要求？","top_k":5}' | jq .
+
+# 把上一步 data.chunks[0].id 替换为实际 chunk ID
+curl -sS http://127.0.0.1:9380/api/v1/agentic-search/tools/open \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"chunk_id":"<chunk-id>","window":2}' | jq .
+```
+
+DeepAgent 侧默认注册 `search/open/navigate/read/grep` 五个工具，保留原有
+`agentic_search` 整轮问答工具。只有同时设置 DeepAgent 的
+`AGENTIC_SEARCH_ENABLE_WRITE_TOOLS=true` 和本后端的写入开关，Agent 才能使用
+`ingest/delete`。
+
 实现位于 `chunk-mm` 分支，开发基线为 `9db1d92`。这是对 RAGFlow 原生 Agentic RAG harness 的增强：采用了检索与文档阅读交替进行的方案，没有引入 Mistral SDK、Mistral API、Vespa 或新的服务依赖。与 Mistral Agentic Search 的联系是设计思路，不是官方适配器或功能完全等价的实现。
 
 ## 目录

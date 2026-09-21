@@ -4,7 +4,7 @@
 
 ## 语义与接口
 
-新路由统一为 `POST /api/v1/agentic-search/tools/{tool}`，沿用 Bearer API key。成功返回 RAGFlow `{code:0,data:{...}}`。五个只读工具的 `data.chunks` 统一使用 `id`、`content`、`score`、`source_id`、`start_offset`、`end_offset`、`metadata`；`source_id` 为 RAGFlow `document_id`，offset 是过滤辅助记录后从 0 开始的可见 chunk 序号，`end_offset` 与 `start_offset` 相等。返回 `coordinate:"visible_chunk_ordinal"`，不冒充 Mistral 的字符偏移。
+新路由统一为 `POST /api/v1/agentic-search/tools/{tool}`，沿用 Bearer API key。成功返回 RAGFlow `{code:0,data:{...}}`。五个只读工具的 `data.chunks` 统一使用 `id`、`content`、`score`、`source_id`、`start_offset`、`end_offset`、`metadata`；`source_id` 为 RAGFlow `document_id`，offset 是过滤辅助记录后从 0 开始的可见 chunk 序号，`end_offset` 与 `start_offset` 相等。优先使用完整且唯一的 `chunk_order_int` 排序；旧文档缺少该字段时回退页面几何坐标。返回 `coordinate:"visible_chunk_ordinal"`，不冒充 Mistral 的字符偏移。
 
 - `search(query, top_k=5, exclude_ids=[], dataset_ids="")`：显式知识库 ID 用逗号分隔；空值根据知识库描述自动选库。沿用已授权 RAGFlow 混合检索和排除已见块的有界候选机制。
 - `open(chunk_id, window=2)`：解析锚块所属授权文档，返回前后各 `window` 个块及锚块。
