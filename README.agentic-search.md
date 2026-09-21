@@ -143,6 +143,27 @@ Authorization: Bearer <RAGFLOW_API_KEY>
 Content-Type: application/json
 ```
 
+调用前需要准备：
+
+1. 部署并重启包含本分支代码的 9380 后端。
+2. 在 RAGFlow 中创建 Chat Assistant，并绑定已经完成解析的知识库。
+3. 创建 RAGFlow API key。调用时使用 `Authorization: Bearer <API key>`，不要把问答模型供应商的 key 传给此接口。
+4. 从 RAGFlow 获取 Chat Assistant 的 `chat_id`。如果不传 `dataset_ids` 和 `model`，接口直接使用该 Chat Assistant 保存的配置。
+
+最小请求只需要 `query` 和 `chat_id`：
+
+```bash
+curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "query":"产品支持哪些机械手功能？请给出引用。",
+    "chat_id":"1c9dc6468a2511f1b194b520b0860b27"
+  }' | jq .
+```
+
+需要明确覆盖知识库、模型和研究强度时使用完整请求：
+
 ```json
 {
   "query": "请比较经典系列和卓越系列面板的机械手功能，并给出引用。",
@@ -184,18 +205,89 @@ Content-Type: application/json
 
 参数、权限或资源状态问题通过 RAGFlow 既有 `{code,message}` 信封返回；执行异常还会在 `data.request_id` 返回跟踪 ID。
 
-直接使用 curl：
+成功响应示例：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "request_id": "1a6db3c6-xxxx-xxxx-xxxx-05c83dbca541",
+    "chat_id": "1c9dc6468a2511f1b194b520b0860b27",
+    "session_id": "f77d72b0xxxxxxxxxxxxxxxxxxxxxxxx",
+    "answer": "根据产品资料……[ID:0]",
+    "references": [
+      {
+        "chunk_id": "chunk-id",
+        "dataset_id": "982c06185fc011f1a9d2a33ecabf0a06",
+        "document_id": "document-id",
+        "document_name": "产品手册.pdf",
+        "content": "引用的 Markdown 正文",
+        "similarity": 0.82,
+        "positions": [[1, 120, 680, 90, 220]],
+        "image_id": "",
+        "url": null
+      }
+    ],
+    "reference_count": 1,
+    "model": "deepseek-v4-flash@parser@Tongyi-Qianwen",
+    "reasoning": 3,
+    "elapsed_ms": 15324
+  }
+}
+```
+
+Python 异步调用示例，适合 DeepAgent 或后续 MCP 服务：
+
+```python
+import os
+
+import httpx
+
+
+async def agentic_search(query: str, session_id: str | None = None) -> dict:
+    payload = {
+        "query": query,
+        "chat_id": "1c9dc6468a2511f1b194b520b0860b27",
+        "dataset_ids": ["982c06185fc011f1a9d2a33ecabf0a06"],
+        "model": "deepseek-v4-flash@parser@Tongyi-Qianwen",
+        "reasoning": 3,
+        "top_n": 8,
+        "similarity_threshold": 0.2,
+    }
+    if session_id:
+        payload["session_id"] = session_id
+
+    headers = {"Authorization": f"Bearer {os.environ['RAGFLOW_API_KEY']}"}
+    async with httpx.AsyncClient(timeout=300) as client:
+        response = await client.post(
+            "http://127.0.0.1:9380/api/v1/agentic-search",
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        envelope = response.json()
+
+    if envelope.get("code") != 0:
+        raise RuntimeError(envelope.get("message", "Agentic Search failed"))
+    return envelope["data"]
+```
+
+首次调用保存返回的 `data.session_id`；续问时把它放回请求：
 
 ```bash
 curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" \
   -H 'Content-Type: application/json' \
   --data '{
-    "query":"请检索产品库并给出机械手功能说明和引用。",
+    "query":"刚才提到的第二项功能有哪些限制？",
     "chat_id":"1c9dc6468a2511f1b194b520b0860b27",
+    "session_id":"上一次响应中的 session_id",
     "reasoning":3
   }' | jq .
 ```
+
+每次调用都同时检查 HTTP 状态码和 JSON 中的 `code`。`code=0` 才表示成功；排查服务端执行错误时，使用响应中的 `request_id` 搜索 9380 后端日志。默认超时建议不少于 300 秒，因为 `reasoning=3/4` 可能执行多轮检索和文档阅读。
 
 未来封装 MCP tool 时，可以原样采用请求字段作为 input schema，把整个 `data` 对象作为结构化结果；MCP 进程只保存 RAGFlow API key 和 9380 地址，不需要接触问答模型供应商密钥。
 
