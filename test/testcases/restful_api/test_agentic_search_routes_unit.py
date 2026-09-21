@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import inspect
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -54,7 +55,29 @@ def _load_route(monkeypatch, payload, execute_result=None):
     execute.calls = []
     service.validate_agentic_search_request = validate
     service.execute_agentic_search = execute
+
+    async def stream(**kwargs):
+        stream.calls.append(kwargs)
+        yield {"event": "selection", "data": {"request_id": kwargs["request_id"], "selected_datasets": [{"id": "kb-1"}]}}
+        yield {"event": "progress", "data": {"request_id": kwargs["request_id"], "text": "searching"}}
+        yield {"event": "delta", "data": {"request_id": kwargs["request_id"], "text": "answer"}}
+        yield {"event": "final", "data": {"request_id": kwargs["request_id"], "answer": "answer", "references": []}}
+
+    stream.calls = []
+    service.stream_agentic_search = stream
     monkeypatch.setitem(sys.modules, "api.apps.services.agentic_search_api_service", service)
+
+    quart = ModuleType("quart")
+
+    class Response:
+        def __init__(self, iterable, mimetype):
+            self.response = iterable
+            self.mimetype = mimetype
+            self.headers = {}
+            self.timeout = 60
+
+    quart.Response = Response
+    monkeypatch.setitem(sys.modules, "quart", quart)
 
     utils = ModuleType("api.utils.api_utils")
     utils.get_request_json = lambda: _AwaitableValue(payload)
@@ -105,3 +128,44 @@ def test_route_returns_request_id_when_execution_fails(monkeypatch):
     assert response["code"] == 100
     assert response["data"]["request_id"]
     assert "model unavailable" in response["message"]
+
+
+def test_stream_route_emits_sse_events_and_final_references(monkeypatch):
+    payload = {"query": "hello"}
+    module, manager, _execute = _load_route(monkeypatch, payload)
+
+    async def collect():
+        response = await module.agentic_search_stream()
+        chunks = [chunk async for chunk in response.response]
+        return response, chunks
+
+    response, chunks = asyncio.run(collect())
+    assert ("/agentic-search/stream", {"methods": ["POST"]}) in manager.routes
+    assert response.mimetype == "text/event-stream"
+    assert response.headers["Cache-Control"] == "no-cache"
+    assert response.headers["X-Accel-Buffering"] == "no"
+    assert response.timeout is None
+    assert [chunk.split("\n", 1)[0] for chunk in chunks] == [
+        "event: start", "event: selection", "event: progress", "event: delta", "event: final",
+    ]
+    assert all(chunk.endswith("\n\n") for chunk in chunks)
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["answer"] == "answer"
+
+
+def test_stream_route_emits_error_after_stream_starts(monkeypatch):
+    module, _manager, _execute = _load_route(monkeypatch, {"query": "hello"})
+
+    async def fail(**_kwargs):
+        raise RuntimeError("provider secret")
+        yield  # pragma: no cover
+
+    module.stream_agentic_search = fail
+
+    async def collect():
+        response = await module.agentic_search_stream()
+        return [chunk async for chunk in response.response]
+
+    chunks = asyncio.run(collect())
+    assert chunks[0].startswith("event: start\n")
+    assert chunks[-1].startswith("event: error\n")
+    assert "provider secret" not in chunks[-1]

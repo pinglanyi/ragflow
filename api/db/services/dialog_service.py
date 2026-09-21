@@ -1529,7 +1529,7 @@ def _extract_visible_answer(text: str) -> str:
     return f"<think>{thought}</think>{answer}"
 
 
-async def _stream_with_think_delta(stream_iter, min_tokens: int = 16):
+async def _stream_with_think_delta(stream_iter, min_tokens: int = 16, delta_only: bool = False):
     state = _ThinkStreamState()
 
     def _emit_text(section: str, text: str):
@@ -1561,7 +1561,10 @@ async def _stream_with_think_delta(stream_iter, min_tokens: int = 16):
     async for chunk in stream_iter:
         if not chunk:
             continue
-        if chunk.startswith(state.last_model_full):
+        if delta_only:
+            new_part = chunk
+            state.last_model_full += chunk
+        elif chunk.startswith(state.last_model_full):
             new_part = chunk[len(state.last_model_full) :]
             state.last_model_full = chunk
         else:
@@ -1919,6 +1922,18 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
 
         return {"answer": think + answer, "reference": refs, "prompt": "", "created_at": time.time()}
 
+    if kwargs.get("force_rag") and not stream:
+        # The standalone search endpoint must run retrieval even when the chat
+        # model elects not to call a bound tool.
+        from rag.advanced_rag.agentic_rag_graph import run_agentic_rag
+
+        answer = "".join([part async for part in run_agentic_rag(rag_tools, messages, gen_conf=dialog.llm_setting)])
+        answer = _extract_visible_answer(answer)
+        result = await decorate_answer(answer)
+        result["audio_binary"] = None
+        yield result
+        return
+
     # The agentic-search graph composes the final cited answer itself, so we
     # stream its tokens straight to the client instead of relaying a tool
     # result through a second outer-LLM pass.
@@ -1948,8 +1963,13 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
 
         async def _drive_stream():
             try:
-                stream_iter = chat_mdl.async_chat_streamly_delta(rag_tools.sys_prompt(), messages, gen_conf)
-                async for kind, value, state in _stream_with_think_delta(stream_iter):
+                if kwargs.get("force_rag"):
+                    from rag.advanced_rag.agentic_rag_graph import run_agentic_rag
+
+                    stream_iter = run_agentic_rag(rag_tools, messages, gen_conf=gen_conf)
+                else:
+                    stream_iter = chat_mdl.async_chat_streamly_delta(rag_tools.sys_prompt(), messages, gen_conf)
+                async for kind, value, state in _stream_with_think_delta(stream_iter, delta_only=bool(kwargs.get("force_rag"))):
                     event_queue.put_nowait(("stream", kind, value, state))
             except Exception:
                 logging.exception("rag_agent: agentic stream failed")

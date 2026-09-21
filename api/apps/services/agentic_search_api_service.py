@@ -292,7 +292,7 @@ async def validate_explicit_dataset_scope(*, dataset_ids: list[str], user_id: st
     return trace
 
 
-async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: str | None = None) -> dict:
+async def _agentic_search_events(*, tenant_id: str, options: dict, request_id: str | None, stream: bool):
     from api.db.joint_services.tenant_model_service import resolve_model_config
     from api.db.services.conversation_service import ConversationService, structure_answer
     from api.db.services.dialog_service import DialogService, rag_agent
@@ -402,8 +402,29 @@ async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: s
     conversation.reference = [item for item in conversation.reference if item]
     conversation.reference.append({"chunks": [], "doc_aggs": []})
 
+    yield {
+        "event": "selection",
+        "data": {
+            "request_id": request_id,
+            "dataset_selection_mode": selection_mode,
+            "selected_datasets": selected_datasets,
+            "model": model,
+        },
+    }
+
     final = None
-    async for answer in rag_agent(dialog, messages, False, session_id=session_id, reasoning=options["reasoning"]):
+    thinking = False
+    async for answer in rag_agent(dialog, messages, stream, session_id=session_id, reasoning=options["reasoning"], force_rag=True):
+        if not answer.get("final", True):
+            if answer.get("start_to_think"):
+                thinking = True
+                continue
+            if answer.get("end_to_think"):
+                thinking = False
+                continue
+            if answer.get("answer"):
+                yield {"event": "progress" if thinking else "delta", "data": {"request_id": request_id, "text": answer["answer"]}}
+            continue
         final = structure_answer(conversation, answer, message_id, session_id)
         break
     if not final or not final.get("answer"):
@@ -420,7 +441,7 @@ async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: s
         elapsed_ms,
         len((final.get("reference") or {}).get("chunks", [])),
     )
-    return normalize_agentic_search_result(
+    yield {"event": "final", "data": normalize_agentic_search_result(
         final,
         request_id=request_id,
         chat_id=chat_id,
@@ -429,4 +450,16 @@ async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: s
         elapsed_ms=elapsed_ms,
         dataset_selection_mode=selection_mode,
         selected_datasets=selected_datasets,
-    )
+    )}
+
+
+async def execute_agentic_search(*, tenant_id: str, options: dict, request_id: str | None = None) -> dict:
+    async for event in _agentic_search_events(tenant_id=tenant_id, options=options, request_id=request_id, stream=False):
+        if event["event"] == "final":
+            return event["data"]
+    raise RuntimeError("Agentic Search returned no final result")
+
+
+async def stream_agentic_search(*, tenant_id: str, options: dict, request_id: str | None = None):
+    async for event in _agentic_search_events(tenant_id=tenant_id, options=options, request_id=request_id, stream=True):
+        yield event

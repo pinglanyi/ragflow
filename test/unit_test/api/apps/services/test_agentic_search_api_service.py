@@ -280,7 +280,8 @@ def test_execute_agentic_search_uses_request_scoped_dialog_copy(monkeypatch, man
         def query(**_kwargs):
             return [SimpleNamespace(chunk_num=1)]
 
-    async def rag_agent(dialog, messages, _stream, **_kwargs):
+    async def rag_agent(dialog, messages, _stream, **kwargs):
+        assert kwargs.get("force_rag") is True
         captured["dialog"] = dialog
         captured["messages"] = messages
         yield {
@@ -360,7 +361,8 @@ def test_execute_agentic_search_uses_request_scoped_dialog_copy(monkeypatch, man
 
 
 @pytest.mark.parametrize("auto", [False, True])
-def test_execute_stateless_search_uses_default_model_without_persistence(monkeypatch, auto):
+@pytest.mark.parametrize("streaming", [False, True])
+def test_execute_stateless_search_uses_default_model_without_persistence(monkeypatch, auto, streaming):
     captured = {"default_model_calls": 0, "persistence_calls": 0}
 
     class DialogService:
@@ -397,12 +399,20 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
             return True, SimpleNamespace(llm_id="default-model@instance-a@Provider")
 
     async def rag_agent(dialog, messages, _stream, **kwargs):
+        assert kwargs.get("force_rag") is True
         captured["dialog"] = dialog
         captured["messages"] = messages
         captured["session_id"] = kwargs.get("session_id")
+        if _stream:
+            yield {"answer": "searching", "reference": {}, "final": False, "start_to_think": True}
+            yield {"answer": "found evidence", "reference": {}, "final": False}
+            yield {"answer": "", "reference": {}, "final": False, "end_to_think": True}
+            yield {"answer": "stateless ", "reference": {}, "final": False}
+            yield {"answer": "answer", "reference": {}, "final": False}
         yield {
             "answer": "stateless answer",
             "reference": {"chunks": [{"id": "chunk-1", "kb_id": "kb-1", "docnm_kwd": "manual.pdf"}]},
+            "final": True,
         }
 
     def structure_answer(_conversation, answer, _message_id, session_id):
@@ -461,12 +471,19 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
     monkeypatch.setattr(MODULE, "load_routable_datasets", load_catalog)
     monkeypatch.setattr(MODULE, "select_datasets", route)
 
-    result = asyncio.run(
-        MODULE.execute_agentic_search(
-            tenant_id="tenant-1",
-            options={"query": "question", **({} if auto else {"dataset_ids": ["kb-1"]}), "reasoning": 3},
-        )
-    )
+    options = {"query": "question", **({} if auto else {"dataset_ids": ["kb-1"]}), "reasoning": 3}
+    if streaming:
+        async def collect():
+            return [event async for event in MODULE.stream_agentic_search(tenant_id="tenant-1", options=options)]
+
+        events = asyncio.run(collect())
+        assert [event["event"] for event in events] == ["selection", "progress", "delta", "delta", "final"]
+        assert events[0]["data"]["dataset_selection_mode"] == ("auto" if auto else "manual")
+        assert events[1]["data"]["text"] == "found evidence"
+        assert "".join(event["data"]["text"] for event in events if event["event"] == "delta") == "stateless answer"
+        result = events[-1]["data"]
+    else:
+        result = asyncio.run(MODULE.execute_agentic_search(tenant_id="tenant-1", options=options))
 
     assert captured["default_model_calls"] == 1
     assert captured["persistence_calls"] == 0

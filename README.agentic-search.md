@@ -168,6 +168,8 @@ Authorization: Bearer <RAGFLOW_API_KEY>
 Content-Type: application/json
 ```
 
+需要逐步显示检索过程时，使用相同请求体调用 `POST /api/v1/agentic-search/stream`。前者一次返回 JSON；后者返回 `text/event-stream`，适合 DeepAgent 的进度展示。两个端点执行相同的选库和 Agentic Search 检索图，最终结果的字段也相同。
+
 调用前需要准备：
 
 1. 部署并重启包含本分支代码的 9380 后端。
@@ -184,6 +186,69 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
   --data '{
     "query":"产品支持哪些机械手功能？请给出引用。"
   }' | jq .
+```
+
+流式请求使用 `curl -N` 关闭客户端缓冲；服务器也设置了禁用代理缓冲的响应头：
+
+```bash
+curl -N 'http://127.0.0.1:9380/api/v1/agentic-search/stream' \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  --data '{"query":"产品支持哪些机械手功能？请给出引用。","reasoning":3}'
+```
+
+每条 SSE 消息以空行结束；`event` 为类型，`data` 为 JSON。典型顺序如下，进度和答案片段可以各出现多次：
+
+```text
+event: start
+data: {"request_id":"..."}
+
+event: selection
+data: {"request_id":"...","dataset_selection_mode":"auto","selected_datasets":[...],"model":"..."}
+
+event: progress
+data: {"request_id":"...","text":"[Hybrid search] ..."}
+
+event: delta
+data: {"request_id":"...","text":"根据产品资料..."}
+
+event: final
+data: {"request_id":"...","answer":"根据产品资料...[ID:0]","references":[...],"reference_count":1,...}
+```
+
+`start` 表示连接已建立；`selection` 在选库与权限校验完成后发出；`progress` 为研究图的检索/阅读过程文本；`delta` 是回答增量，按顺序拼接即可展示临时答案。`final` 是唯一权威结果，应以其中的 `answer` 和 `references` 替换临时展示内容。执行期间若出现错误，服务器发送 `event: error`，包含 `request_id` 和 `message`，随后结束连接，不会再发送 `final`。请求 JSON 无效时仍返回普通 JSON 参数错误，调用方应先检查 HTTP 状态及 `Content-Type`。`start` 后的执行错误可能对应 HTTP 200，必须以 `final` 或 `error` 判断是否完成。
+
+Python/DeepAgent 流式消费示例：
+
+```python
+import json
+import os
+
+import httpx
+
+
+async def stream_agentic_search(query: str):
+    headers = {"Authorization": f"Bearer {os.environ['RAGFLOW_API_KEY']}"}
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream(
+            "POST",
+            "http://127.0.0.1:9380/api/v1/agentic-search/stream",
+            headers=headers,
+            json={"query": query, "reasoning": 3},
+        ) as response:
+            response.raise_for_status()
+            if "text/event-stream" not in response.headers.get("content-type", ""):
+                raise RuntimeError((await response.aread()).decode("utf-8", errors="replace"))
+            event = None
+            async for line in response.aiter_lines():
+                if line.startswith("event: "):
+                    event = line[7:]
+                elif line.startswith("data: "):
+                    data = json.loads(line[6:])
+                    if event == "error":
+                        raise RuntimeError(data["message"])
+                    yield event, data
 ```
 
 需要明确覆盖知识库、模型和研究强度时使用完整请求：
