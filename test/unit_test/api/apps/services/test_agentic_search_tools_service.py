@@ -154,6 +154,34 @@ def test_execute_write_tool_denied_before_side_effects(monkeypatch):
         asyncio.run(MODULE.execute_tool("delete", {"source_id": "doc"}, user_id="user"))
 
 
+def test_authorized_tools_include_indexed_field_mapped_dataset(monkeypatch):
+    captured = {}
+    kb = SimpleNamespace(id="kb", tenant_id="tenant", parser_config={"field_map": {"model": "model"}})
+    kb_module = ModuleType("api.db.services.knowledgebase_service")
+    kb_module.KnowledgebaseService = SimpleNamespace(
+        accessible=lambda **kwargs: True,
+        get_by_ids=lambda ids: [kb],
+    )
+    kb_module.validate_dataset_embedding_models = lambda kbs: None
+    misc_module = ModuleType("common.misc_utils")
+
+    async def thread_pool_exec(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    misc_module.thread_pool_exec = thread_pool_exec
+    rag_module = ModuleType("rag.advanced_rag.agentic_rag")
+
+    def rag_tools(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(kb_ids=kwargs["kb_ids"])
+
+    rag_module.RAGTools = rag_tools
+    for module in (kb_module, misc_module, rag_module):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    asyncio.run(MODULE._authorized_tools("user", ["kb"]))
+    assert captured["include_field_mapped_kbs"] is True
+
+
 def test_delete_checks_owner_and_removes_only_one_document(monkeypatch):
     deleted = []
     document_module = ModuleType("api.db.services.document_service")

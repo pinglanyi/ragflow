@@ -80,6 +80,7 @@ class RAGTools:
         user_defined_prompts: dict | None = None,
         do_refer: bool | None = True,
         thinking_mode: str = "medium",
+        include_field_mapped_kbs: bool = False,
     ):
         self.tenant_ids = tenant_ids
         self.chat_mdl = deepcopy(chat_mdl)
@@ -94,7 +95,7 @@ class RAGTools:
             if kb.parser_config and "field_map" in kb.parser_config:
                 self.field_map.update(kb.parser_config["field_map"])
                 self.sql_kbs.append(kb)
-            else:
+            if include_field_mapped_kbs or not (kb.parser_config and "field_map" in kb.parser_config):
                 self.kbs.append(kb)
                 self.kb_ids.append(kb.id)
 

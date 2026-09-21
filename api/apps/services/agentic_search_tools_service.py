@@ -238,6 +238,7 @@ async def _authorized_tools(user_id: str, dataset_ids: list[str], *, embedding: 
     tools = RAGTools(
         tenant_ids=list(dict.fromkeys(kb.tenant_id for kb in kbs)),
         chat_mdl=None, embed_mdl=embd_mdl, kb_ids=dataset_ids,
+        include_field_mapped_kbs=True,
     )
     if set(tools.kb_ids) != set(dataset_ids):
         raise ValueError("Agentic Search tools require indexed text datasets")
