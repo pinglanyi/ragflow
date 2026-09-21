@@ -146,11 +146,11 @@ Content-Type: application/json
 调用前需要准备：
 
 1. 部署并重启包含本分支代码的 9380 后端。
-2. 在 RAGFlow 中创建 Chat Assistant，并绑定已经完成解析的知识库。
+2. 准备已经完成解析的知识库并取得其 `dataset_id`；无需创建 Chat Assistant。
 3. 创建 RAGFlow API key。调用时使用 `Authorization: Bearer <API key>`，不要把问答模型供应商的 key 传给此接口。
-4. 从 RAGFlow 获取 Chat Assistant 的 `chat_id`。如果不传 `dataset_ids` 和 `model`，接口直接使用该 Chat Assistant 保存的配置。
+4. `model` 可以省略，此时使用该 API key 所属租户的默认问答模型。
 
-最小请求只需要 `query` 和 `chat_id`：
+无状态最小请求只需要 `query` 和 `dataset_ids`：
 
 ```bash
 curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
@@ -158,7 +158,7 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
   -H 'Content-Type: application/json' \
   --data '{
     "query":"产品支持哪些机械手功能？请给出引用。",
-    "chat_id":"1c9dc6468a2511f1b194b520b0860b27"
+    "dataset_ids":["982c06185fc011f1a9d2a33ecabf0a06"]
   }' | jq .
 ```
 
@@ -167,7 +167,6 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
 ```json
 {
   "query": "请比较经典系列和卓越系列面板的机械手功能，并给出引用。",
-  "chat_id": "1c9dc6468a2511f1b194b520b0860b27",
   "dataset_ids": ["982c06185fc011f1a9d2a33ecabf0a06"],
   "model": "deepseek-v4-flash@parser@Tongyi-Qianwen",
   "reasoning": 3,
@@ -181,22 +180,22 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
 | 字段 | 类型 | 必填 | 默认/约束 | 说明 |
 |---|---|---|---|---|
 | `query` | string | 是 | 去除首尾空白后非空 | 用户问题，也是 Agent 的研究目标 |
-| `chat_id` | string | 是 | 必须属于当前 API key 对应租户 | 复用其 prompt、知识库和默认问答模型 |
-| `session_id` | string | 否 | 省略时创建新会话 | 继续对话时必须属于同一个 Chat Assistant 和用户 |
-| `dataset_ids` | string[] | 否 | 省略时使用 Chat Assistant 已绑定知识库 | 本次请求的知识库覆盖；逐个校验访问权、分块和 embedding 一致性 |
-| `model` | string | 否 | 省略时使用 Chat Assistant 模型 | RAGFlow 模型引用，例如 `模型@实例@供应商`；必须已在当前租户注册 |
+| `dataset_ids` | string[] | 条件必填 | 无 `chat_id` 时至少一个 | 检索知识库；逐个校验访问权、分块和 embedding 一致性 |
+| `model` | string | 否 | 省略时使用租户默认模型 | RAGFlow 模型引用，例如 `模型@实例@供应商`；必须已在当前租户注册 |
+| `chat_id` | string | 否 | 无状态调用不传 | 可选兼容模式：复用已有 Chat Assistant 的 prompt、知识库和模型配置 |
+| `session_id` | string | 否 | 只能与 `chat_id` 同时使用 | 继续已有 Chat Assistant 会话；无状态模式不支持 |
 | `reasoning` | integer | 否 | `1..4`，默认 `3` | `3`/`4` 才启用 Agentic Research 和文档导航 |
 | `top_n` | integer | 否 | 正整数 | 本次请求的检索数量覆盖 |
 | `similarity_threshold` | number | 否 | `0..1` | 本次请求的相似度阈值覆盖 |
 
-`dataset_ids`、`model`、`top_n` 和 `similarity_threshold` 只应用在深拷贝的对话对象，不写回 Chat Assistant。未知字段直接返回参数错误。
+无 `chat_id` 时，后端构造临时 Dialog 和临时会话对象，不创建或修改 Chat Assistant、Conversation 数据。带 `chat_id` 时，`dataset_ids`、`model`、`top_n` 和 `similarity_threshold` 仍只应用在深拷贝的对话对象，不写回 Chat Assistant。未知字段直接返回参数错误。
 
 返回的 `data` 字段：
 
 | 字段 | 说明 |
 |---|---|
 | `request_id` | 单次 API 调用标识；成功和执行异常响应都可用于查日志 |
-| `chat_id` / `session_id` | 使用的 Chat Assistant 和持久会话 ID |
+| `chat_id` / `session_id` | 无状态模式为 `null`；兼容模式返回使用的 Chat Assistant 和会话 ID |
 | `answer` | Agent 研究后的最终回答 |
 | `references` | 扁平引用数组；每项包含 chunk、知识库、文档、正文、相似度、位置、图片和 URL 信息 |
 | `reference_count` | `references` 数量 |
@@ -213,8 +212,8 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
   "message": "success",
   "data": {
     "request_id": "1a6db3c6-xxxx-xxxx-xxxx-05c83dbca541",
-    "chat_id": "1c9dc6468a2511f1b194b520b0860b27",
-    "session_id": "f77d72b0xxxxxxxxxxxxxxxxxxxxxxxx",
+    "chat_id": null,
+    "session_id": null,
     "answer": "根据产品资料……[ID:0]",
     "references": [
       {
@@ -245,18 +244,15 @@ import os
 import httpx
 
 
-async def agentic_search(query: str, session_id: str | None = None) -> dict:
+async def agentic_search(query: str) -> dict:
     payload = {
         "query": query,
-        "chat_id": "1c9dc6468a2511f1b194b520b0860b27",
         "dataset_ids": ["982c06185fc011f1a9d2a33ecabf0a06"],
         "model": "deepseek-v4-flash@parser@Tongyi-Qianwen",
         "reasoning": 3,
         "top_n": 8,
         "similarity_threshold": 0.2,
     }
-    if session_id:
-        payload["session_id"] = session_id
 
     headers = {"Authorization": f"Bearer {os.environ['RAGFLOW_API_KEY']}"}
     async with httpx.AsyncClient(timeout=300) as client:
@@ -273,7 +269,9 @@ async def agentic_search(query: str, session_id: str | None = None) -> dict:
     return envelope["data"]
 ```
 
-首次调用保存返回的 `data.session_id`；续问时把它放回请求：
+DeepAgent 或 MCP tool 直接把用户问题映射到 `query`，把允许搜索的知识库映射到 `dataset_ids`。每次调用独立执行，不需要维护 `chat_id` 或 `session_id`。
+
+只有确实需要 RAGFlow 持久会话时，才使用可选兼容模式，同时传 `chat_id` 和后续请求的 `session_id`：
 
 ```bash
 curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
@@ -281,7 +279,7 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
   -H 'Content-Type: application/json' \
   --data '{
     "query":"刚才提到的第二项功能有哪些限制？",
-    "chat_id":"1c9dc6468a2511f1b194b520b0860b27",
+    "chat_id":"<CHAT_ID>",
     "session_id":"上一次响应中的 session_id",
     "reasoning":3
   }' | jq .
@@ -289,7 +287,7 @@ curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
 
 每次调用都同时检查 HTTP 状态码和 JSON 中的 `code`。`code=0` 才表示成功；排查服务端执行错误时，使用响应中的 `request_id` 搜索 9380 后端日志。默认超时建议不少于 300 秒，因为 `reasoning=3/4` 可能执行多轮检索和文档阅读。
 
-未来封装 MCP tool 时，可以原样采用请求字段作为 input schema，把整个 `data` 对象作为结构化结果；MCP 进程只保存 RAGFlow API key 和 9380 地址，不需要接触问答模型供应商密钥。
+未来封装 MCP tool 时，可以把 `query`、`dataset_ids`、`model`、`reasoning`、`top_n` 和 `similarity_threshold` 作为 input schema，把整个 `data` 对象作为结构化结果；MCP 进程只保存 RAGFlow API key、9380 地址和允许访问的知识库 ID，不需要 Chat Assistant ID，也不需要接触问答模型供应商密钥。
 
 一键测试：
 

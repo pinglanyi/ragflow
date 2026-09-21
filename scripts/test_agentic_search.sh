@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 BASE_URL="http://127.0.0.1:9380"
-CHAT_ID="1c9dc6468a2511f1b194b520b0860b27"
+CHAT_ID=""
 DATASET_ID="982c06185fc011f1a9d2a33ecabf0a06"
 MODEL="deepseek-v4-flash@parser@Tongyi-Qianwen"
 REASONING=3
@@ -18,7 +18,7 @@ usage() {
   cat <<'EOF'
 Usage: test_agentic_search.sh --api-key KEY --query TEXT [options]
   --base-url URL       RAGFlow URL (default http://127.0.0.1:9380)
-  --chat-id ID         Chat Assistant ID
+  --chat-id ID         Optional Chat Assistant ID for stateful mode
   --dataset-id ID      Dataset ID
   --model REF          Model reference
   --reasoning 1..4     Agentic reasoning level (default 3)
@@ -69,7 +69,8 @@ BODY="$(jq -cn \
   --arg query "$QUERY" --arg chat "$CHAT_ID" --arg dataset "$DATASET_ID" \
   --arg model "$MODEL" --arg session "$SESSION_ID" \
   --argjson reasoning "$REASONING" --argjson top_n "$TOP_N" --argjson threshold "$SIMILARITY_THRESHOLD" \
-  '{query:$query,chat_id:$chat,dataset_ids:[$dataset],model:$model,reasoning:$reasoning,top_n:$top_n,similarity_threshold:$threshold}
+  '{query:$query,dataset_ids:[$dataset],model:$model,reasoning:$reasoning,top_n:$top_n,similarity_threshold:$threshold}
+   + (if $chat == "" then {} else {chat_id:$chat} end)
    + (if $session == "" then {} else {session_id:$session} end)')"
 URI="$BASE_URL/api/v1/agentic-search"
 log_event request "$(jq -cn --arg method POST --arg uri "$URI" --arg authorization 'Bearer <REDACTED_API_KEY>' --argjson body "$BODY" '{method:$method,uri:$uri,authorization:$authorization,body:$body}')"
