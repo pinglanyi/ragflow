@@ -61,8 +61,11 @@ flowchart LR
 | [config.py](rag/advanced_rag/harness/config.py)、[gating.py](rag/advanced_rag/harness/tools/gating.py) | 思考模式及阶段可用工具 |
 | [pipeline.py](rag/advanced_rag/harness/pipeline.py) | 调度、错误归一化、trace 和引用池更新 |
 | [agent.py](rag/advanced_rag/harness/agent.py) | 模型工具调用、结果展示和引用编号处理 |
+| [agentic_search_api_service.py](api/apps/services/agentic_search_api_service.py) | 校验 API 参数、授权知识库/会话、创建请求级对话副本并调用 `rag_agent` |
+| [agentic_search_api.py](api/apps/restful_apis/agentic_search_api.py) | 9380 上的 Bearer 鉴权和 `/api/v1/agentic-search` 路由 |
+| [PowerShell 测试脚本](scripts/test_agentic_search.ps1)、[Bash 测试脚本](scripts/test_agentic_search.sh) | 参数化在线调用及 JSONL 输入输出日志 |
 
-导航读取现有 `content_with_weight`，不重新调用视觉模型，不重新计算 embedding，也不读取截图归档作为另一个检索库。数据库字段和公共 HTTP API 均未新增。
+导航读取现有 `content_with_weight`，不重新调用视觉模型，不重新计算 embedding，也不读取截图归档作为另一个检索库。数据库字段未新增；9380 后端提供独立的 Agentic Search HTTP API。
 
 ## 准备和启用
 
@@ -92,7 +95,7 @@ flowchart LR
 | `3` | `high` | Agent 研究，允许文档导航 |
 | `4` | `ultra` | 更深入的研究编排，允许文档导航 |
 
-这些是现有对话链路的参数映射，不是新增端点。无效或未传入模式值可能回到 `medium`；不要把仅打开“推理”开关等同于明确选择 `high`。
+这些是现有对话链路的参数映射；新增端点复用同一映射并默认传 `3`。其他旧接口无效或未传入模式值时可能回到 `medium`；不要把仅打开“推理”开关等同于明确选择 `high`。
 
 嵌入后端代码时，可在构造 `RAGTools` 时传入 `thinking_mode="high"` 或 `"ultra"`。门控以实际引用池判断是否已有证据，并向模型提供初始证据的 ID 与内容。由于原生工具定义在一次模型调用期间固定，locate 阶段也绑定导航工具，允许模型先搜索再读取；执行导航时仍须提供真实 ID。explore 阶段支持范围读取和相邻阅读，verify 阶段优先比较与匹配。模型不保证每轮都调用工具。
 
@@ -129,6 +132,91 @@ flowchart LR
 `pattern` 为非空、最长 1000 字符的字符串。`phrase` 做忽略大小写的字面子串匹配；`term` 要求同一块中包含全部空白分隔词。不支持正则、跨块短语、语义匹配或中文分词，匹配结果也不等于严格的语言学“完整词”匹配。
 
 ## 调用示例
+
+### 9380 HTTP API
+
+外部进程和 MCP 工具使用以下端点，不需要修改 Chat Assistant 的持久配置：
+
+```http
+POST /api/v1/agentic-search
+Authorization: Bearer <RAGFLOW_API_KEY>
+Content-Type: application/json
+```
+
+```json
+{
+  "query": "请比较经典系列和卓越系列面板的机械手功能，并给出引用。",
+  "chat_id": "1c9dc6468a2511f1b194b520b0860b27",
+  "dataset_ids": ["982c06185fc011f1a9d2a33ecabf0a06"],
+  "model": "deepseek-v4-flash@parser@Tongyi-Qianwen",
+  "reasoning": 3,
+  "top_n": 8,
+  "similarity_threshold": 0.2
+}
+```
+
+请求参数：
+
+| 字段 | 类型 | 必填 | 默认/约束 | 说明 |
+|---|---|---|---|---|
+| `query` | string | 是 | 去除首尾空白后非空 | 用户问题，也是 Agent 的研究目标 |
+| `chat_id` | string | 是 | 必须属于当前 API key 对应租户 | 复用其 prompt、知识库和默认问答模型 |
+| `session_id` | string | 否 | 省略时创建新会话 | 继续对话时必须属于同一个 Chat Assistant 和用户 |
+| `dataset_ids` | string[] | 否 | 省略时使用 Chat Assistant 已绑定知识库 | 本次请求的知识库覆盖；逐个校验访问权、分块和 embedding 一致性 |
+| `model` | string | 否 | 省略时使用 Chat Assistant 模型 | RAGFlow 模型引用，例如 `模型@实例@供应商`；必须已在当前租户注册 |
+| `reasoning` | integer | 否 | `1..4`，默认 `3` | `3`/`4` 才启用 Agentic Research 和文档导航 |
+| `top_n` | integer | 否 | 正整数 | 本次请求的检索数量覆盖 |
+| `similarity_threshold` | number | 否 | `0..1` | 本次请求的相似度阈值覆盖 |
+
+`dataset_ids`、`model`、`top_n` 和 `similarity_threshold` 只应用在深拷贝的对话对象，不写回 Chat Assistant。未知字段直接返回参数错误。
+
+返回的 `data` 字段：
+
+| 字段 | 说明 |
+|---|---|
+| `request_id` | 单次 API 调用标识；成功和执行异常响应都可用于查日志 |
+| `chat_id` / `session_id` | 使用的 Chat Assistant 和持久会话 ID |
+| `answer` | Agent 研究后的最终回答 |
+| `references` | 扁平引用数组；每项包含 chunk、知识库、文档、正文、相似度、位置、图片和 URL 信息 |
+| `reference_count` | `references` 数量 |
+| `model` / `reasoning` | 本次实际选择的模型引用与研究等级 |
+| `elapsed_ms` | 服务端执行耗时，单位毫秒 |
+
+参数、权限或资源状态问题通过 RAGFlow 既有 `{code,message}` 信封返回；执行异常还会在 `data.request_id` 返回跟踪 ID。
+
+直接使用 curl：
+
+```bash
+curl -sS 'http://127.0.0.1:9380/api/v1/agentic-search' \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "query":"请检索产品库并给出机械手功能说明和引用。",
+    "chat_id":"1c9dc6468a2511f1b194b520b0860b27",
+    "reasoning":3
+  }' | jq .
+```
+
+未来封装 MCP tool 时，可以原样采用请求字段作为 input schema，把整个 `data` 对象作为结构化结果；MCP 进程只保存 RAGFlow API key 和 9380 地址，不需要接触问答模型供应商密钥。
+
+一键测试：
+
+```powershell
+.\scripts\test_agentic_search.ps1 `
+  -ApiKey $env:RAGFLOW_API_KEY `
+  -Query "请检索产品库并给出机械手功能说明和引用。"
+```
+
+```bash
+export RAGFLOW_API_KEY='<RAGFlow API Key>'
+./scripts/test_agentic_search.sh \
+  --api-key "$RAGFLOW_API_KEY" \
+  --query '请检索产品库并给出机械手功能说明和引用。'
+```
+
+脚本把每次请求、响应、耗时和错误写入 JSONL 日志，日志不记录完整 API key。Bash 版本依赖 `curl` 和 `jq`。
+
+### 进程内调用
 
 下面示例嵌入已有后端异步流程，参数 `tools` 必须是已建立租户、知识库和模型上下文的真实 `RAGTools`。工具是进程内函数，不是同名 HTTP API。
 
