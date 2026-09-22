@@ -53,6 +53,72 @@ DeepAgent 侧默认注册 `search/open/navigate/read/grep` 五个工具，保留
 `AGENTIC_SEARCH_ENABLE_WRITE_TOOLS=true` 和本后端的写入开关，Agent 才能使用
 `ingest/delete`。
 
+## 文件名检索 API（独立于 chunk 检索）
+
+`POST /api/v1/agentic-search/tools/retrieval-doc-name` 使用同一个 RAGFlow Bearer
+API key，但直接检索文档表的**文件名**和文档级 `metafield` 描述，不调用 chunk 检索、embedding 或研究代理。
+一份文件最多返回一次；即使文件还没有解析出 chunk，也可以按文件名找到。适合先定位
+文件，再由调用方使用 `metafield.datasetid` 和 `metafield.location` 生成 MinIO URL；
+这个 API 本身不生成 URL，也不返回文件正文。
+
+| 请求字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `query` | string，必填 | — | 非空文件名或描述片段，最多 255 字符；不区分大小写的包含匹配。 |
+| `top_k` | integer，1–20 | 5 | 最多返回多少份文件。`topkey` 是兼容别名，两者不能同时传。 |
+| `dataset_names` | string | `""` | 可选的逗号分隔知识库名称或 ID，允许混用；空值搜索当前 key 可访问的全部有效知识库。 |
+| `dataset_ids` | string | `""` | 旧字段兼容；不能和 `dataset_names` 同时传。 |
+
+可以在文档 `metafield` 中写 `description`，也识别 `描述`、`file_description`。
+例如文件名只有“产品说明.pdf”，而 `description` 为“E502 温度采集模块接线说明”，
+输入 `E502` 仍能召回该文件。候选顺序为文件名完全匹配、文件名前缀匹配、描述命中、
+文件名其他包含匹配；同一类按文件名和文档 ID 稳定排序。ES 使用文档 metadata
+索引过滤描述；建议描述简洁（ES 默认动态 `.keyword` 映射只索引不超过 256 字符的完整值，
+更长的描述可能无法通过索引召回）。Infinity 对描述子串检索会回退扫描文档级 metadata，
+大范围搜索可能较慢。这里的 `metafield` 对应 RAGFlow 文档的 `meta_fields`，
+文件名和描述是两个独立召回源，不依赖文件解析后的 chunk。
+知识库名称做精确匹配，重名、未知或无权访问的指定范围会报错。
+成功时 HTTP 外层仍是 `{"code":0,"data":{...}}`：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "query": "E502",
+    "count": 1,
+    "searched_dataset_count": 1,
+    "documents": [
+      {
+        "file_name": "E502产品手册.pdf",
+        "matched_by": ["file_name", "description"],
+        "metafield": {
+          "datasetid": "<dataset-id>",
+          "docid": "<doc-id>",
+          "location": "E502产品手册.pdf",
+          "dataset_id": "<dataset-id>",
+          "doc_id": "<doc-id>",
+          "dataset_name": "产品库",
+          "description": "E502 温度采集模块接线说明"
+        }
+      }
+    ],
+    "request_id": "<request-id>"
+  }
+}
+```
+
+`metafield` 合并文档原有 `meta_fields`；`datasetid`、`docid`、`location` 及
+带下划线的兼容键来自 RAGFlow 文档记录，不能被用户自定义 metadata 覆盖。
+没有自定义 metadata 时仍返回这些基础字段。`matched_by` 标明文件名或描述的命中来源；
+零命中为 `code=0`、`documents=[]`、
+`count=0`。注意 `location` 是 RAGFlow 保存的存储位置，不能单独当作公开 URL。
+
+```bash
+export RAGFLOW_API_KEY='<RAGFlow API key>'
+curl -sS http://127.0.0.1:9380/api/v1/agentic-search/tools/retrieval-doc-name \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"query":"E502","topkey":5,"dataset_names":"产品库"}' | jq .
+```
+
 实现位于 `chunk-mm` 分支，开发基线为 `9db1d92`。这是对 RAGFlow 原生 Agentic RAG harness 的增强：采用了检索与文档阅读交替进行的方案，没有引入 Mistral SDK、Mistral API、Vespa 或新的服务依赖。与 Mistral Agentic Search 的联系是设计思路，不是官方适配器或功能完全等价的实现。
 
 ## 目录

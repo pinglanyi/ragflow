@@ -1,4 +1,4 @@
-"""Authenticated HTTP facade for the seven Mistral-style search tools."""
+"""Authenticated HTTP facade for search tools and document-name retrieval."""
 
 import logging
 import uuid
@@ -12,11 +12,16 @@ from common.constants import RetCode
 @manager.route("/agentic-search/tools/<tool_name>", methods=["POST"])  # noqa: F821
 @login_required
 async def agentic_search_tool(tool_name):
-    """Call one search, navigation, ingestion, or deletion tool."""
+    """Call a chunk tool or the independent document-name retrieval API."""
     request_id = str(uuid.uuid4())
     try:
         payload = await get_request_json()
-        data = await execute_tool(tool_name, payload, user_id=current_user.id)
+        if tool_name == "retrieval-doc-name":
+            from api.apps.services.agentic_search_document_service import retrieve_documents_by_name
+
+            data = await retrieve_documents_by_name(payload, user_id=current_user.id)
+        else:
+            data = await execute_tool(tool_name, payload, user_id=current_user.id)
         return get_json_result(data={**data, "request_id": request_id})
     except (ValueError, PermissionError) as error:
         return get_data_error_result(message=str(error))

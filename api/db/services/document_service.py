@@ -43,6 +43,53 @@ class DocumentService(CommonService):
     model = Document
 
     @classmethod
+    @DB.connection_context()
+    def search_by_name(cls, kb_ids: list[str], query: str, top_k: int) -> list[dict]:
+        """Return globally ranked file-name matches from authorized datasets.
+
+        The caller must supply already authorized knowledge-base IDs. This
+        queries document records only; chunk indexing and parse status do not
+        affect whether a file can be found.
+        """
+        if not kb_ids or top_k <= 0:
+            return []
+        lower_name = fn.LOWER(cls.model.name)
+        needle = query.lower()
+        match_rank = Case(None, [
+            (lower_name == needle, 0),
+            (lower_name.startswith(needle), 1),
+        ], 2)
+        rows = (
+            cls.model.select(cls.model.id, cls.model.kb_id, cls.model.name, cls.model.location)
+            .where(
+                cls.model.kb_id.in_(kb_ids),
+                cls.model.status == StatusEnum.VALID.value,
+                lower_name.contains(needle),
+            )
+            .order_by(match_rank.asc(), lower_name.asc(), cls.model.id.asc())
+            .limit(top_k)
+            .dicts()
+        )
+        return list(rows)
+
+    @classmethod
+    @DB.connection_context()
+    def get_name_retrieval_documents(cls, kb_ids: list[str], doc_ids: list[str]) -> list[dict]:
+        """Resolve metadata hits back to valid documents within the caller's scope."""
+        if not kb_ids or not doc_ids:
+            return []
+        rows = (
+            cls.model.select(cls.model.id, cls.model.kb_id, cls.model.name, cls.model.location)
+            .where(
+                cls.model.kb_id.in_(kb_ids),
+                cls.model.id.in_(doc_ids),
+                cls.model.status == StatusEnum.VALID.value,
+            )
+            .dicts()
+        )
+        return list(rows)
+
+    @classmethod
     def get_cls_model_fields(cls):
         return [
             cls.model.id,
