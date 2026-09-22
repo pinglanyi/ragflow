@@ -52,7 +52,8 @@ def test_tool_route_uses_authenticated_user_and_tool_name(monkeypatch):
 
 def test_document_name_route_uses_authenticated_user(monkeypatch):
     root = Path(__file__).resolve().parents[3]
-    manager = SimpleNamespace(route=lambda path, **kwargs: lambda fn: fn)
+    routes = []
+    manager = SimpleNamespace(route=lambda path, **kwargs: lambda fn: routes.append((path, kwargs)) or fn)
     apps = ModuleType("api.apps")
     apps.current_user = SimpleNamespace(id="user-1")
     apps.login_required = lambda fn: fn
@@ -82,12 +83,13 @@ def test_document_name_route_uses_authenticated_user(monkeypatch):
     constants.RetCode = SimpleNamespace(EXCEPTION_ERROR=100)
     monkeypatch.setitem(sys.modules, "common.constants", constants)
 
-    path = root / "api/apps/restful_apis/agentic_search_tools_api.py"
+    path = root / "api/apps/restful_apis/document_retrieval_api.py"
     spec = importlib.util.spec_from_file_location("agentic_search_document_route_under_test", path)
     module = importlib.util.module_from_spec(spec)
     module.manager = manager
     spec.loader.exec_module(module)
-    response = asyncio.run(inspect.unwrap(module.agentic_search_tool)("retrieval-doc-name"))
+    response = asyncio.run(inspect.unwrap(module.retrieval_doc_name)())
+    assert ("/retrieval-doc-name", {"methods": ["POST"]}) in routes
     assert calls == [({"query": "E502"}, "user-1")]
     assert response["data"]["documents"] == []
     assert response["data"]["request_id"]

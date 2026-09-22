@@ -55,7 +55,7 @@ DeepAgent 侧默认注册 `search/open/navigate/read/grep` 五个工具，保留
 
 ## 文件名检索 API（独立于 chunk 检索）
 
-`POST /api/v1/agentic-search/tools/retrieval-doc-name` 使用同一个 RAGFlow Bearer
+`POST /api/v1/retrieval-doc-name` 与 `POST /api/v1/retrieval` 同级，使用同一个 RAGFlow Bearer
 API key，但直接检索文档表的**文件名**和文档级 `metafield` 描述，不调用 chunk 检索、embedding 或研究代理。
 一份文件最多返回一次；即使文件还没有解析出 chunk，也可以按文件名找到。适合先定位
 文件，再由调用方使用 `metafield.datasetid` 和 `metafield.location` 生成 MinIO URL；
@@ -114,7 +114,7 @@ API key，但直接检索文档表的**文件名**和文档级 `metafield` 描�
 
 ```bash
 export RAGFLOW_API_KEY='<RAGFlow API key>'
-curl -sS http://127.0.0.1:9380/api/v1/agentic-search/tools/retrieval-doc-name \
+curl -sS http://127.0.0.1:9380/api/v1/retrieval-doc-name \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" -H 'Content-Type: application/json' \
   -d '{"query":"E502","topkey":5,"dataset_names":"产品库"}' | jq .
 ```
