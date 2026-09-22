@@ -92,6 +92,11 @@ PDF parsing still depends on the initial DeepDOC OCR stage. Format validation do
 
 This branch can read source neighbors and document ranges, match text within a document, and search for unseen evidence while preserving citations. See the [detailed Agentic Search README](README.agentic-search.md) for configuration, tool contracts, examples, limits, and validation.
 
+For file-level candidates, `POST /api/v1/retrieval-doc-name` sits alongside the chunk endpoint
+`POST /api/v1/retrieval`. It matches file names or document `meta_fields` descriptions and returns
+the file name plus `metafield` (including `datasetid`, `docid`, and `location`). See the
+[document candidate retrieval API](README.agentic-search.md#文件候选检索-api与-chunk-retrieval-同级) for the request and response contract.
+
 ## 🎮 Get Started
 
 Try our cloud service at [https://cloud.ragflow.io](https://cloud.ragflow.io).

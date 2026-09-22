@@ -92,6 +92,11 @@
 
 支持原文相邻块与范围阅读、文档内匹配、排除已读块继续搜索，并保留图片位置和引用编号。详细的启用配置、工具参数、调用示例、性能限制、测试和故障排查见 [Agentic Search README](README.agentic-search.md)。
 
+文件级候选检索使用独立的 `POST /api/v1/retrieval-doc-name`，与 chunk 检索接口
+`POST /api/v1/retrieval` 同级。它按文件名或文档 `meta_fields` 中的描述找文件，
+返回文件名和包含 `datasetid`、`docid`、`location` 的 `metafield`；
+入参、出参及示例见 [文件候选检索 API](README.agentic-search.md#文件候选检索-api与-chunk-retrieval-同级)。
+
 ## 🎮 快速开始
 
 请登录网址 [https://cloud.ragflow.io](https://cloud.ragflow.io) 体验云服务。
