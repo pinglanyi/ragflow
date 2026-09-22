@@ -27,10 +27,52 @@ def test_search_defaults_and_comma_separated_dataset_ids():
     assert request == {"query": "CAN 接线", "top_k": 5, "exclude_ids": ["x"], "dataset_ids": ["a", "b"]}
 
 
+def test_search_accepts_comma_separated_dataset_names_or_ids():
+    request = MODULE.validate_tool_request("search", {
+        "query": "E502", "dataset_names": " 产品库,982c06185fc011f1ae03d7c376fa307f,产品库 "
+    })
+    assert request["dataset_ids"] == ["产品库", "982c06185fc011f1ae03d7c376fa307f"]
+    with pytest.raises(ValueError, match="both"):
+        MODULE.validate_tool_request("search", {"query": "E502", "dataset_names": "产品库", "dataset_ids": "kb"})
+
+
+def test_search_resolves_visible_names_and_ids_without_scope_widening(monkeypatch):
+    catalog = [
+        {"id": "kb-product", "name": "产品库"},
+        {"id": "kb-file", "name": "文件库"},
+    ]
+    async def accessible(user_id):
+        return catalog
+    async def validate(*, dataset_ids, user_id):
+        assert dataset_ids == ["kb-product", "kb-file"]
+        return [{"id": item, "name": next(row["name"] for row in catalog if row["id"] == item)} for item in dataset_ids]
+    api_module = ModuleType("api.apps.services.agentic_search_api_service")
+    api_module.validate_explicit_dataset_scope = validate
+    monkeypatch.setitem(sys.modules, api_module.__name__, api_module)
+    monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
+    ids, mode, selected = asyncio.run(MODULE._search_scope("user", "E502", ["产品库", "kb-file", "kb-product"]))
+    assert ids == ["kb-product", "kb-file"]
+    assert mode == "manual" and [row["id"] for row in selected] == ids
+    with pytest.raises(PermissionError):
+        asyncio.run(MODULE._search_scope("user", "E502", ["不存在的库"]))
+
+
+def test_search_rejects_ambiguous_dataset_name(monkeypatch):
+    async def accessible(user_id):
+        return [{"id": "one", "name": "同名"}, {"id": "two", "name": "同名"}]
+    api_module = ModuleType("api.apps.services.agentic_search_api_service")
+    api_module.validate_explicit_dataset_scope = lambda **kwargs: None
+    monkeypatch.setitem(sys.modules, api_module.__name__, api_module)
+    monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
+    with pytest.raises(ValueError, match="ambiguous"):
+        asyncio.run(MODULE._search_scope("user", "E502", ["同名"]))
+
+
 @pytest.mark.parametrize("payload", [
     {"query": "x", "top_k": 0},
     {"query": "x", "exclude_ids": "a"},
     {"query": "x", "dataset_ids": ["a"]},
+    {"query": "x", "dataset_names": ["a"]},
     {"query": "x", "unknown": 1},
 ])
 def test_search_rejects_invalid_arguments(payload):

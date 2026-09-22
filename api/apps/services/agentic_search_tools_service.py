@@ -9,7 +9,7 @@ from urllib.request import url2pathname
 
 TOOL_NAMES = frozenset({"search", "open", "navigate", "read", "grep", "ingest", "delete"})
 _FIELDS = {
-    "search": {"query", "top_k", "exclude_ids", "dataset_ids"},
+    "search": {"query", "top_k", "exclude_ids", "dataset_ids", "dataset_names"},
     "open": {"chunk_id", "window"},
     "navigate": {"source_id", "start_offset", "end_offset", "direction", "top_k"},
     "read": {"source_id", "start_offset", "end_offset", "top_k"},
@@ -46,9 +46,12 @@ def validate_tool_request(name: str, payload: dict) -> dict:
         excludes = payload.get("exclude_ids", [])
         if not isinstance(excludes, list) or len(excludes) > 200 or any(not isinstance(item, str) or not item.strip() for item in excludes):
             raise ValueError("exclude_ids must be a list of up to 200 chunk IDs")
-        dataset_ids = payload.get("dataset_ids", "")
+        if "dataset_ids" in payload and "dataset_names" in payload:
+            raise ValueError("Specify dataset_ids or dataset_names, not both")
+        scope_key = "dataset_names" if "dataset_names" in payload else "dataset_ids"
+        dataset_ids = payload.get(scope_key, "")
         if not isinstance(dataset_ids, str):
-            raise ValueError("dataset_ids must be a comma-separated string")
+            raise ValueError(f"{scope_key} must be a comma-separated string")
         return {"query": query, "top_k": top_k, "exclude_ids": list(dict.fromkeys(excludes)),
                 "dataset_ids": list(dict.fromkeys(item.strip() for item in dataset_ids.split(",") if item.strip()))}
     if name == "open":
@@ -185,12 +188,29 @@ async def _accessible_catalog(user_id: str) -> list[dict]:
 
 
 async def _search_scope(user_id: str, query: str, dataset_ids: list[str]) -> tuple[list[str], str, list[dict]]:
-    """Resolve explicit IDs or run the existing description-based dataset router."""
+    """Resolve visible IDs or exact names, or run description-based routing."""
     if dataset_ids:
         from api.apps.services.agentic_search_api_service import validate_explicit_dataset_scope
 
-        selected = await validate_explicit_dataset_scope(dataset_ids=dataset_ids, user_id=user_id)
-        return dataset_ids, "manual", selected
+        catalog = await _accessible_catalog(user_id)
+        visible_ids = {row["id"] for row in catalog}
+        by_name = {}
+        for row in catalog:
+            by_name.setdefault(row["name"], []).append(row["id"])
+        resolved = []
+        for token in dataset_ids:
+            if token in visible_ids:
+                resolved.append(token)
+                continue
+            matches = by_name.get(token, [])
+            if len(matches) > 1:
+                raise ValueError(f"ambiguous dataset name: {token}")
+            if not matches:
+                raise PermissionError("Dataset name or ID not found or not authorized")
+            resolved.append(matches[0])
+        resolved = list(dict.fromkeys(resolved))
+        selected = await validate_explicit_dataset_scope(dataset_ids=resolved, user_id=user_id)
+        return resolved, "manual", selected
 
     from api.apps.services.agentic_search_api_service import select_datasets
     from api.db.services.user_service import TenantService

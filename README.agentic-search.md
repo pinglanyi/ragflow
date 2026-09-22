@@ -12,7 +12,7 @@
 
 | 工具 | JSON 请求体 | `data` |
 |---|---|---|
-| `search` | `query` 必填；`top_k` 默认 5；`exclude_ids` 可选 chunk ID 数组；`dataset_ids` 可选逗号分隔字符串 | `chunks`、`selected_datasets`、`dataset_selection_mode`、`search_metadata` |
+| `search` | `query` 必填；`top_k` 默认 5；`exclude_ids` 可选 chunk ID 数组；`dataset_names` 可选逗号分隔的知识库名称或 ID；旧 `dataset_ids` 仍可用 | `chunks`、`selected_datasets`、`dataset_selection_mode`、`search_metadata` |
 | `open` | `chunk_id` 必填；`window` 默认 2 | 锚块及每侧最多 `window` 个相邻块 |
 | `navigate` | `source_id`、`start_offset`、`end_offset`、`direction` (`next`/`previous`) 必填；`top_k` 默认 1 | 同文档前/后相邻块 |
 | `read` | `source_id` 必填；`start_offset`、`end_offset` 可为空；`top_k` 默认 20 | 指定闭区间内的原文块 |
@@ -26,8 +26,10 @@
 `chunk_order_int` 确定逻辑顺序；旧文档缺少该字段时回退到页/顶部/左侧坐标。
 没有可靠顺序的文档会拒绝导航。`metadata.positions` 保留原始页面坐标。
 
-检索默认依据知识库描述自动选库。显式范围写成一个字符串
-`"dataset_ids":"id1,id2"`，每个 ID 都需在 API key 的访问权限内。
+检索默认依据知识库描述自动选库。原生 `search` 显式范围可写成一个字符串
+`"dataset_names":"产品库,另一个知识库ID"`，名称和 ID 可以混用；旧字段
+`"dataset_ids":"id1,id2"` 保持兼容。两个字段不能同时传入。名称在调用者可访问、
+已解析的知识库中做精确匹配，同名多库会报歧义错误，找不到或无权访问会报错。
 文档导航每次重新校验文档所属知识库；`ingest`/`delete` 只允许修改调用者拥有的库。
 `ingest` 的本地路径必须位于部署端设置的 `RAGFLOW_AGENTIC_SEARCH_INGEST_ROOT`
 下；HTTP(S) 地址的主机必须列在逗号分隔的
@@ -38,7 +40,7 @@
 export RAGFLOW_API_KEY='<RAGFlow API key>'
 curl -sS http://127.0.0.1:9380/api/v1/agentic-search/tools/search \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"query":"CAN 扩展模块接线和接地有什么要求？","top_k":5}' | jq .
+  -d '{"query":"CAN 扩展模块接线和接地有什么要求？","top_k":5,"dataset_names":"产品库"}' | jq .
 
 # 把上一步 data.chunks[0].id 替换为实际 chunk ID
 curl -sS http://127.0.0.1:9380/api/v1/agentic-search/tools/open \
