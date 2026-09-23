@@ -9,7 +9,7 @@ from urllib.request import url2pathname
 
 TOOL_NAMES = frozenset({"search", "open", "navigate", "read", "grep", "ingest", "delete"})
 _FIELDS = {
-    "search": {"query", "top_k", "exclude_ids", "dataset_ids", "dataset_names"},
+    "search": {"query", "top_k", "exclude_ids", "dataset_ids", "dataset_names", "dataset_selection_mode"},
     "open": {"chunk_id", "window"},
     "navigate": {"source_id", "start_offset", "end_offset", "direction", "top_k"},
     "read": {"source_id", "start_offset", "end_offset", "top_k"},
@@ -52,8 +52,14 @@ def validate_tool_request(name: str, payload: dict) -> dict:
         dataset_ids = payload.get(scope_key, "")
         if not isinstance(dataset_ids, str):
             raise ValueError(f"{scope_key} must be a comma-separated string")
+        dataset_ids = list(dict.fromkeys(item.strip() for item in dataset_ids.split(",") if item.strip()))
+        selection_mode = payload.get("dataset_selection_mode", "all")
+        if selection_mode not in ("all", "auto"):
+            raise ValueError("dataset_selection_mode must be all or auto")
+        if selection_mode == "auto" and dataset_ids:
+            raise ValueError("dataset_selection_mode=auto cannot be combined with dataset_names or dataset_ids")
         return {"query": query, "top_k": top_k, "exclude_ids": list(dict.fromkeys(excludes)),
-                "dataset_ids": list(dict.fromkeys(item.strip() for item in dataset_ids.split(",") if item.strip()))}
+                "dataset_ids": dataset_ids, "dataset_selection_mode": selection_mode}
     if name == "open":
         return {"chunk_id": _text(payload.get("chunk_id"), "chunk_id"),
                 "window": _number(payload.get("window", 2), "window", maximum=20)}
@@ -187,7 +193,24 @@ async def _accessible_catalog(user_id: str) -> list[dict]:
     return await load_routable_datasets(user_id=user_id)
 
 
-async def _search_scope(user_id: str, query: str, dataset_ids: list[str]) -> tuple[list[str], str, list[dict]]:
+async def _auto_select_search_datasets(user_id: str, query: str, catalog: list[dict]) -> list[dict]:
+    """Run the optional description-based router for an explicitly automatic search."""
+    from api.apps.services.agentic_search_api_service import select_datasets
+    from api.db.joint_services.tenant_model_service import resolve_model_config
+    from api.db.services.user_service import TenantService
+    from common.constants import LLMType
+    from common.misc_utils import thread_pool_exec
+
+    found, tenant = await thread_pool_exec(TenantService.get_by_id, user_id)
+    if not found or not tenant or not tenant.llm_id:
+        raise ValueError("No default chat model configured for automatic dataset selection")
+    model_config = await thread_pool_exec(
+        resolve_model_config, tenant_id=user_id, model_type=LLMType.CHAT, model_ref=tenant.llm_id
+    )
+    return await select_datasets(tenant_id=user_id, query=query, datasets=catalog, model_config=model_config)
+
+
+async def _search_scope(user_id: str, query: str, dataset_ids: list[str], selection_mode: str) -> tuple[list[str], str, list[dict]]:
     """Resolve visible IDs/names; an omitted scope means every visible parsed dataset."""
     catalog = await _accessible_catalog(user_id)
     if dataset_ids:
@@ -211,6 +234,10 @@ async def _search_scope(user_id: str, query: str, dataset_ids: list[str]) -> tup
         resolved = list(dict.fromkeys(resolved))
         selected = await validate_explicit_dataset_scope(dataset_ids=resolved, user_id=user_id)
         return resolved, "manual", selected
+
+    if selection_mode == "auto":
+        selected = await _auto_select_search_datasets(user_id, query, catalog)
+        return [row["id"] for row in selected], "auto", selected
 
     selected = [
         {"id": row["id"], "name": row["name"], "reason": "", "confidence": None}
@@ -309,7 +336,9 @@ async def _source_for_chunk(user_id: str, chunk_id: str) -> str:
 async def _search(user_id: str, options: dict) -> dict:
     from rag.advanced_rag.harness.tools.search import hybrid_search
 
-    ids, mode, selected = await _search_scope(user_id, options["query"], options["dataset_ids"])
+    ids, mode, selected = await _search_scope(
+        user_id, options["query"], options["dataset_ids"], options["dataset_selection_mode"]
+    )
     groups = await _search_embedding_groups(user_id, ids)
     chunks = []
     group_metadata = []

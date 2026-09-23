@@ -12,7 +12,7 @@
 
 | 工具 | JSON 请求体 | `data` |
 |---|---|---|
-| `search` | `query` 必填；`top_k` 默认 5；`exclude_ids` 可选 chunk ID 数组；`dataset_names` 可选逗号分隔的知识库名称或 ID；旧 `dataset_ids` 仍可用 | `chunks`、`selected_datasets`、`dataset_selection_mode`、`search_metadata`；未传知识库范围时 `dataset_selection_mode` 为 `all` |
+| `search` | `query` 必填；`top_k` 默认 5；`exclude_ids` 可选 chunk ID 数组；`dataset_selection_mode` 为 `all`（默认）或 `auto`；`dataset_names` 可选逗号分隔的知识库名称或 ID；旧 `dataset_ids` 仍可用 | `chunks`、`selected_datasets`、`dataset_selection_mode`、`search_metadata`；返回模式可为 `all`、`auto`、`manual` |
 | `open` | `chunk_id` 必填；`window` 默认 2 | 锚块及每侧最多 `window` 个相邻块 |
 | `navigate` | `source_id`、`start_offset`、`end_offset`、`direction` (`next`/`previous`) 必填；`top_k` 默认 1 | 同文档前/后相邻块 |
 | `read` | `source_id` 必填；`start_offset`、`end_offset` 可为空；`top_k` 默认 20 | 指定闭区间内的原文块 |
@@ -31,6 +31,9 @@
 `"dataset_names":"产品库,另一个知识库ID"`，名称和 ID 可以混用；旧字段
 `"dataset_ids":"id1,id2"` 保持兼容。两个字段不能同时传入。名称在调用者可访问、
 已解析的知识库中做精确匹配，同名多库会报歧义错误，找不到或无权访问会报错。
+需要保留原来的描述路由时，传 `"dataset_selection_mode":"auto"` 且不传知识库范围；
+后端会根据查询、知识库名称和描述选择 1–3 个 embedding 兼容的库。`auto` 与显式
+`dataset_names`/`dataset_ids` 不能同时使用。
 文档导航每次重新校验文档所属知识库；`ingest`/`delete` 只允许修改调用者拥有的库。
 `ingest` 的本地路径必须位于部署端设置的 `RAGFLOW_AGENTIC_SEARCH_INGEST_ROOT`
 下；HTTP(S) 地址的主机必须列在逗号分隔的

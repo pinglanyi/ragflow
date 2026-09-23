@@ -24,7 +24,8 @@ def test_all_native_tools_have_validated_contracts(name):
 
 def test_search_defaults_and_comma_separated_dataset_ids():
     request = MODULE.validate_tool_request("search", {"query": " CAN 接线 ", "dataset_ids": " a, b,a ", "exclude_ids": ["x", "x"]})
-    assert request == {"query": "CAN 接线", "top_k": 5, "exclude_ids": ["x"], "dataset_ids": ["a", "b"]}
+    assert request == {"query": "CAN 接线", "top_k": 5, "exclude_ids": ["x"], "dataset_ids": ["a", "b"],
+                       "dataset_selection_mode": "all"}
 
 
 def test_search_accepts_comma_separated_dataset_names_or_ids():
@@ -34,6 +35,18 @@ def test_search_accepts_comma_separated_dataset_names_or_ids():
     assert request["dataset_ids"] == ["产品库", "982c06185fc011f1ae03d7c376fa307f"]
     with pytest.raises(ValueError, match="both"):
         MODULE.validate_tool_request("search", {"query": "E502", "dataset_names": "产品库", "dataset_ids": "kb"})
+
+
+def test_search_auto_selection_is_explicit_and_cannot_combine_with_scope():
+    request = MODULE.validate_tool_request("search", {
+        "query": "什么是破模", "dataset_selection_mode": "auto",
+    })
+    assert request["dataset_selection_mode"] == "auto"
+    assert request["dataset_ids"] == []
+    with pytest.raises(ValueError, match="auto"):
+        MODULE.validate_tool_request("search", {
+            "query": "什么是破模", "dataset_selection_mode": "auto", "dataset_names": "缺陷库",
+        })
 
 
 def test_search_resolves_visible_names_and_ids_without_scope_widening(monkeypatch):
@@ -50,11 +63,11 @@ def test_search_resolves_visible_names_and_ids_without_scope_widening(monkeypatc
     api_module.validate_explicit_dataset_scope = validate
     monkeypatch.setitem(sys.modules, api_module.__name__, api_module)
     monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
-    ids, mode, selected = asyncio.run(MODULE._search_scope("user", "E502", ["产品库", "kb-file", "kb-product"]))
+    ids, mode, selected = asyncio.run(MODULE._search_scope("user", "E502", ["产品库", "kb-file", "kb-product"], "all"))
     assert ids == ["kb-product", "kb-file"]
     assert mode == "manual" and [row["id"] for row in selected] == ids
     with pytest.raises(PermissionError):
-        asyncio.run(MODULE._search_scope("user", "E502", ["不存在的库"]))
+        asyncio.run(MODULE._search_scope("user", "E502", ["不存在的库"], "all"))
 
 
 def test_search_without_scope_uses_all_accessible_parsed_datasets(monkeypatch):
@@ -67,7 +80,7 @@ def test_search_without_scope_uses_all_accessible_parsed_datasets(monkeypatch):
         return catalog
 
     monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
-    ids, mode, selected = asyncio.run(MODULE._search_scope("user", "什么是破模", []))
+    ids, mode, selected = asyncio.run(MODULE._search_scope("user", "什么是破模", [], "all"))
 
     assert ids == ["kb-product", "kb-defect"]
     assert mode == "all"
@@ -75,6 +88,29 @@ def test_search_without_scope_uses_all_accessible_parsed_datasets(monkeypatch):
         {"id": "kb-product", "name": "产品库", "reason": "", "confidence": None},
         {"id": "kb-defect", "name": "缺陷库", "reason": "", "confidence": None},
     ]
+
+
+def test_search_auto_mode_routes_to_selected_datasets(monkeypatch):
+    catalog = [
+        {"id": "kb-product", "name": "产品库", "description": "产品资料", "embd_id": "embed"},
+        {"id": "kb-defect", "name": "缺陷库", "description": "缺陷案例", "embd_id": "embed"},
+    ]
+
+    async def accessible(user_id):
+        return catalog
+
+    async def auto_select(user_id, query, datasets):
+        assert query == "什么是破模"
+        assert datasets == catalog
+        return [{"id": "kb-defect", "name": "缺陷库", "reason": "包含缺陷案例", "confidence": 0.8}]
+
+    monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
+    monkeypatch.setattr(MODULE, "_auto_select_search_datasets", auto_select)
+    ids, mode, selected = asyncio.run(MODULE._search_scope("user", "什么是破模", [], "auto"))
+
+    assert ids == ["kb-defect"]
+    assert mode == "auto"
+    assert selected[0]["name"] == "缺陷库"
 
 
 def test_search_rejects_ambiguous_dataset_name(monkeypatch):
@@ -85,7 +121,7 @@ def test_search_rejects_ambiguous_dataset_name(monkeypatch):
     monkeypatch.setitem(sys.modules, api_module.__name__, api_module)
     monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
     with pytest.raises(ValueError, match="ambiguous"):
-        asyncio.run(MODULE._search_scope("user", "E502", ["同名"]))
+        asyncio.run(MODULE._search_scope("user", "E502", ["同名"], "all"))
 
 
 @pytest.mark.parametrize("payload", [
@@ -190,7 +226,7 @@ def test_search_forwards_exclusions_and_preserves_chunk_order(monkeypatch):
     search_module.hybrid_search = hybrid_search
     monkeypatch.setitem(sys.modules, "rag.advanced_rag.harness.tools.search", search_module)
 
-    async def scope(user_id, query, dataset_ids):
+    async def scope(user_id, query, dataset_ids, selection_mode):
         return ["kb"], "manual", [{"id": "kb"}]
 
     async def tools(user_id, dataset_ids, *, embedding=False):
@@ -233,7 +269,7 @@ def test_search_all_mode_merges_results_across_embedding_groups(monkeypatch):
     search_module.hybrid_search = hybrid_search
     monkeypatch.setitem(sys.modules, "rag.advanced_rag.harness.tools.search", search_module)
 
-    async def scope(user_id, query, dataset_ids):
+    async def scope(user_id, query, dataset_ids, selection_mode):
         return ["kb-a", "kb-b"], "all", [{"id": "kb-a"}, {"id": "kb-b"}]
 
     async def accessible(user_id):
@@ -254,7 +290,7 @@ def test_search_all_mode_merges_results_across_embedding_groups(monkeypatch):
     monkeypatch.setattr(MODULE, "_ordered_document", ordered)
 
     result = asyncio.run(MODULE._search("user", {
-        "query": "破模", "top_k": 2, "exclude_ids": [], "dataset_ids": [],
+        "query": "破模", "top_k": 2, "exclude_ids": [], "dataset_ids": [], "dataset_selection_mode": "all",
     }))
 
     assert calls == ["kb-a", "kb-b"]
