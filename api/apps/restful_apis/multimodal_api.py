@@ -75,3 +75,23 @@ async def task_status(tenant_id, task_id):
         return jsonify(code=0, data=data)
     except service.ApiError as exc:
         return _error(exc)
+
+
+@manager.route("/multimodal/models/test", methods=["POST"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def model_connectivity(tenant_id):
+    try:
+        body = await request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) != {"model", "model_type"}:
+            raise service.ApiError("Expected model and model_type")
+        model = body.get("model")
+        model_type = body.get("model_type")
+        if not isinstance(model, str) or not model.strip():
+            raise service.ApiError("model must be a non-empty string")
+        if not isinstance(model_type, str):
+            raise service.ApiError("model_type must be a string")
+        data = await thread_pool_exec(service.test_model, tenant_id, model.strip(), model_type.strip())
+        return jsonify(code=0, data=data)
+    except service.ApiError as exc:
+        return _error(exc)

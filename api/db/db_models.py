@@ -1000,6 +1000,7 @@ class MultimodalJob(DataBaseModel):
     chunk_count = IntegerField(default=0)
     message = TextField(default="Queued")
     error = JSONField(default=dict)
+    metrics = JSONField(default=dict)
     created_at = CharField(max_length=40)
     updated_at = CharField(max_length=40)
 
@@ -1802,6 +1803,7 @@ def migrate_db():
     alter_db_add_column(migrator, "file_commit_item", "content_after_location", CharField(max_length=512, null=True))
     alter_db_add_column(migrator, "file_commit_item", "slug_kwd", CharField(max_length=512, null=True, index=True))
     alter_db_add_column(migrator, "file_commit_item", "page_type_kwd", CharField(max_length=32, null=True, index=True))
+    alter_db_add_column(migrator, "multimodaljob", "metrics", JSONField(default=dict))
     alter_db_drop_index(migrator, "tenant_langfuse", "idx_tenant_langfuse_secret_key")
     alter_db_drop_index(migrator, "tenant_langfuse", "idx_tenant_langfuse_public_key")
     alter_db_drop_index(migrator, "tenant_langfuse", "idx_tenant_langfuse_host")

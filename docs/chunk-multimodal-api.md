@@ -11,6 +11,7 @@
 | 已有文档多模态解析 | POST `/api/v1/multimodal/parse` |
 | 上传单个文件并解析 | POST `/api/v1/multimodal/upload-and-parse` |
 | 查询任务状态 | GET `/api/v1/multimodal/tasks/{task_id}` |
+| 测试已注册模型 | POST `/api/v1/multimodal/models/test` |
 
 ### 输入示例
 
@@ -31,7 +32,10 @@ curl -sS -X POST "$BASE/multimodal/parse" \
     "dataset_id": "知识库ID",
     "document_id": "文档ID",
     "multimodal": {
+      "mode": "smart",
       "model": "实际模型名@实际实例名@VLLM",
+      "router_prompt": "",
+      "router_max_tokens": 64,
       "prompt": "",
       "max_tokens": 8192,
       "enable_thinking": false,
@@ -50,7 +54,7 @@ curl -sS -X POST "$BASE/multimodal/upload-and-parse" \
   -F 'multimodal={"model":"实际模型名@实际实例名@VLLM","enable_thinking":false,"reuse":true}'
 ```
 
-PDF 自动使用 naive + DeepDOC，静态 PNG/JPEG/BMP/TIFF/WebP 图片自动使用 Picture；不支持视频、DOCX 等其他格式。PNG 示例只需替换 file 路径。
+支持 PDF、DOC/DOCX/RTF/WPS/ODT、PPT/PPTX/ODP、XLS/XLSX/XLSM/XLSB/ODS/CSV、常见文本/代码/邮件/EPUB，以及静态 PNG/JPEG/GIF/ICO/BMP/TIFF/WebP。图片使用 Picture；其他文件保留提交前的基础 `chunk_method`。Office Chunk 有稳定页码或幻灯片号时，通过 LibreOffice 临时转为 PDF 并渲染对应页；没有稳定页定位的 Chunk 与文本类文件使用确定性 Chunk 画布。解析结果始终保留原始文件的文档 ID、文件名与位置字段。视频和音频不在此接口的自动解析范围。
 
 multimodal 可省略，省略的字段继承文档/知识库配置，但必须能得到可用的 vision 模型。enabled 自动开启、父子切分自动关闭，不修改知识库的全局配置。有自定义 Pipeline 的文档/知识库会返回 409，不会偷偷清除 Pipeline。
 
@@ -97,6 +101,15 @@ curl -sS "$BASE/multimodal/tasks/$TASK_ID" \
     "created_at": "2026-09-11T03:00:00+00:00",
     "updated_at": "2026-09-11T03:02:00+00:00",
     "chunk_count": 12,
+    "elapsed_seconds": 120.0,
+    "metrics": {
+      "prompt_tokens": 1380,
+      "completion_tokens": 860,
+      "total_tokens": 2240,
+      "routed_chunks": 12,
+      "multimodal_chunks": 4,
+      "processing_seconds": 91.4
+    },
     "error": null,
     "status_url": "/api/v1/multimodal/tasks/本次任务ID",
     "result_url": "/api/v1/datasets/知识库ID/documents/文档ID/chunks"
@@ -117,6 +130,25 @@ curl -sS "$BASE/multimodal/tasks/$TASK_ID" \
 建议每 3～5 秒查询一次，遇到 complete / failed / cancelled 停止轮询。不需要保持原提交连接。断线也不要直接重复 POST，先用已返回的 task_id 查询；若响应丢失，重复已有文档提交可能返回 409 并附现有任务 ID。上传入口不承诺幂等，重复上传可能新增文件。
 
 `result_url` 指向现有 Chunk 列表，返回 Markdown 的 `content` 和图片引用 `image_id`，需继续分页获取。它指向该文档的当前索引，不是历史不可变快照；历史模型结果使用多模态磁盘归档。
+
+`elapsed_seconds` 是任务从创建到当前/结束的耗时。`metrics` 汇总模型的输入、输出与总 Token；`routed_chunks` 是智能路由判定次数，`multimodal_chunks` 是实际做完整视觉解析的 Chunk 数。缓存命中不会重复计入模型 Token。`full` 模式的路由次数为 0；不用多模态的普通任务不经过此接口，调用方应记录 Token 为 0。
+
+### 模型连通性测试
+
+```bash
+curl -sS -X POST "$BASE/multimodal/models/test" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"实际模型名@实际实例名@VLLM","model_type":"vision"}'
+```
+
+请求体只能包含 `model` 和 `model_type`，类型支持 `chat`、`vision`、`embedding`。成功返回：
+
+```json
+{"code":0,"data":{"ok":true,"model":"实际模型名","model_type":"vision","latency_ms":325,"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}}}
+```
+
+测试使用 RAGFlow 已保存的 Provider 地址和密钥，响应不会返回密钥。`vision` 会发送一个最小 PNG，以验证图像输入链路；`chat` 发送短文本，`embedding` 执行一次短文本向量化。找不到模型返回 404，连接或模型调用失败返回 502 且只返回清理后的错误类型。
 
 ### 错误与部署注意
 
@@ -229,8 +261,11 @@ PNG 将 `chunk_method` 改为 `picture`；此时 `layout_recognize` 不参与 Pi
 
 | 多模态字段 | 输入类型 / 默认值 | 说明 |
 | --- | --- | --- |
-| enabled | boolean / 关闭 | 开启截图多模态解析 |
+| enabled | boolean / 关闭 | 兼容字段；`true` 且未写 mode 等同 `full` |
+| mode | `off` / `smart` / `full` | 普通原生配置可关闭；自定义异步提交接口只接受 smart 或 full |
 | model | string / 开启时必填 | 已注册的 vision 模型引用，可为模型 ID 或 `模型名@实例名@供应商`；优先使用前端实际保存的值，不要照抄示例占位符 |
+| router_prompt | string / 空字符串 | smart 路由提示；空值使用内置 TEXT/MULTIMODAL 判定规则 |
+| router_max_tokens | integer / 64 | 路由输出上限，允许 1～1024 |
 | prompt | string / 空字符串 | 空字符串使用内置工业文档提示词；非空时替换提示词，需要自己保留文字、图片和表格处理要求 |
 | max_tokens | integer / 8192 | 允许 256～65536；实际仍受模型服务上限限制 |
 | enable_thinking | boolean / false | Qwen 思考开关；VLLM 与其他供应商使用不同兼容参数 |
@@ -339,6 +374,9 @@ Authorization: Bearer <RAGFlow API Key>
 
 - `api/apps/__init__.py`：REST 路由 `/api/v1` 注册及 Bearer 鉴权。
 - `api/apps/restful_apis/document_api.py`：上传、PATCH 配置、异步启动、状态列表、图片读取。
+- `api/apps/restful_apis/multimodal_api.py`：异步提交、任务查询和模型连通性测试。
+- `api/db/services/multimodal_job_service.py`：任务状态、耗时和 Token 指标。
+- `rag/svr/multimodal_source_renderer.py`：PDF、Office、文本与图片的统一临时渲染。
 - `api/apps/restful_apis/chunk_api.py`：分页返回 `content`、`image_id`、`positions`。
 - `api/utils/validation_utils.py`：`ParserConfig.ext` 扩展入口。
 - `rag/svr/chunk_multimodal.py`：模型解析、缓存复用、结果归档。

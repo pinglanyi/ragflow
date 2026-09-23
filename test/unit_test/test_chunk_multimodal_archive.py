@@ -95,6 +95,43 @@ class ArchiveTest(unittest.TestCase):
         self.assertTrue(b["cache_hit"])
         self.assertEqual(len(self.calls), 1)
 
+    def test_current_run_usage_is_counted_and_cache_hits_are_zero(self):
+        _, first = self.parser().parse(b"usage-image", {})
+        _, cached = self.parser().parse(b"usage-image", {})
+        self.assertEqual(first["usage"]["total_tokens"], 12)
+        self.assertEqual(cached["usage"]["total_tokens"], 0)
+
+    def test_smart_mode_keeps_plain_text_and_visually_recovers_selected_chunks(self):
+        from PIL import Image
+
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *a, **kw: chunk.update(content_with_weight=text)
+        answers = iter([
+            response("TEXT"),
+            response("MULTIMODAL"),
+            response("# Recovered table\n\n| A |\n| --- |\n| 1 |"),
+        ])
+        chunks = [
+            {"content_with_weight": "plain OCR", "image": Image.new("RGB", (20, 20), "white")},
+            {"content_with_weight": "broken table OCR", "image": Image.new("RGB", (21, 20), "white")},
+        ]
+        task = {"tenant_id": "tenant", "doc_id": "doc", "name": "test.pdf", "id": "task", "language": "Chinese"}
+        options = {"enabled": True, "mode": "smart", "model": "vision", "router_max_tokens": 64}
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict(
+            "os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}
+        ), patch.object(m.ScreenshotParser, "_complete", lambda *args: next(answers)):
+            result = m.parse_chunks(chunks, task, b"pdf", options, self.model, lambda **kwargs: None)
+
+        self.assertEqual(result[0]["content_with_weight"], "plain OCR")
+        self.assertIn("Recovered table", result[1]["content_with_weight"])
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["mode"], "smart")
+        self.assertEqual(manifest["routed_chunk_count"], 2)
+        self.assertEqual(manifest["multimodal_chunk_count"], 1)
+        self.assertEqual(manifest["usage"]["total_tokens"], 36)
+        self.assertTrue(manifest["chunks"][0]["kept_base_parse"])
+        self.assertEqual(manifest["chunks"][1]["route"]["decision"], "MULTIMODAL")
+
     def test_changed_crop_prompt_model_revision_or_limit_invalidates(self):
         keys = [self.parser().parse(b"image", {})[1]["key"]]
         for options in [{"prompt": "new"}, {"model_revision": "v2"}, {"max_tokens": 16384}, {"enable_thinking": True}]:
@@ -190,6 +227,9 @@ class ArchiveTest(unittest.TestCase):
         self.assertNotEqual(result[0]["_multimodal_image_sha256"], result[1]["_multimodal_image_sha256"])
         manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
         self.assertEqual(manifest["status"], "ok")
+        self.assertEqual(manifest["mode"], "full")
+        self.assertEqual(manifest["usage"]["total_tokens"], 24)
+        self.assertEqual(manifest["multimodal_chunk_count"], 2)
         self.assertEqual(manifest["result_chunk_count"], 2)
         self.assertTrue(manifest["chunks"][1]["duplicate_source"])
         self.assertEqual(manifest["chunks"][0]["positions"], result[0]["position_int"])
@@ -212,6 +252,12 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(m.configure_multimodal(task, config)["model"], "kb-model")
         self.assertEqual(config["children_delimiter"], "")
         self.assertEqual(task["parser_config"]["multimodal"]["max_tokens"], 16000)
+
+    def test_legacy_enabled_maps_to_full_and_explicit_smart_is_preserved(self):
+        legacy_task = {"parser_config": {"multimodal": {"enabled": True, "model": "vision"}}}
+        self.assertEqual(m.configure_multimodal(legacy_task, {})["mode"], "full")
+        smart_task = {"parser_config": {"multimodal": {"enabled": True, "mode": "smart", "model": "vision"}}}
+        self.assertEqual(m.configure_multimodal(smart_task, {})["mode"], "smart")
 
     def test_parent_child_is_rejected_before_call(self):
         task = {"parser_config": {"multimodal": {"enabled": True, "model": "model"}}}
@@ -262,6 +308,138 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(request["extra_body"], {"chat_template_kwargs": {"enable_thinking": False}})
         self.assertEqual(request["messages"][0]["content"][1]["image_url"]["url"], "data:image/png;base64,cG5n")
         self.assertEqual(request["max_tokens"], 8192)
+
+    def test_openai_request_accepts_multiple_labeled_source_pages(self):
+        from rag.svr.multimodal_source_renderer import RenderedVisual
+
+        captured = []
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self.create))
+
+            def create(self, **kwargs):
+                captured.append(kwargs)
+                return types.SimpleNamespace(model_dump=lambda **kwargs: response())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        visuals = [
+            RenderedVisual(b"page-one", {"source_type": "pdf", "page": 1}, "Page 1"),
+            RenderedVisual(b"page-two", {"source_type": "pdf", "page": 2}, "Page 2"),
+        ]
+        with patch.dict("sys.modules", {"openai": types.SimpleNamespace(OpenAI=Client)}):
+            self.parser()._complete(visuals, "prompt")
+
+        content = captured[0]["messages"][0]["content"]
+        self.assertEqual([item["text"] for item in content if item["type"] == "text"], ["prompt", "Page 1", "Page 2"])
+        self.assertEqual(len([item for item in content if item["type"] == "image_url"]), 2)
+
+    def test_missing_chunk_image_uses_source_renderer_and_retains_source_fields(self):
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *a, **kw: chunk.update(
+            content_with_weight=text,
+            content_ltks="new tokens",
+            content_sm_ltks="new small tokens",
+        )
+        source_fields = {
+            "doc_id": "doc-1",
+            "dataset_id": "kb-1",
+            "location": "bucket/source.txt",
+            "sha256": "source-sha",
+            "position_int": [[7, 0, 0, 0, 0]],
+            "page_num_int": [7],
+        }
+        chunk = {**source_fields, "content_with_weight": "original text"}
+        task = {
+            "tenant_id": "tenant",
+            "doc_id": "doc-1",
+            "name": "source.txt",
+            "id": "task",
+            "language": "Chinese",
+        }
+
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict(
+            "os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}
+        ), patch.object(m.ScreenshotParser, "_complete", lambda *args: response()):
+            result = m.parse_chunks([chunk], task, b"original text", {}, self.model, lambda **kwargs: None)
+
+        for key, value in source_fields.items():
+            self.assertEqual(result[0][key], value)
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        locator = manifest["chunks"][0]["visuals"][0]["locator"]
+        self.assertEqual(locator["location"], source_fields["location"])
+        self.assertEqual(locator["sha256"], source_fields["sha256"])
+        self.assertEqual(locator["positions"], source_fields["position_int"])
+
+    def test_archive_locator_inherits_original_identity_from_task(self):
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *a, **kw: chunk.update(content_with_weight=text)
+        task = {
+            "tenant_id": "tenant",
+            "kb_id": "dataset-from-task",
+            "doc_id": "document-from-task",
+            "location": "minio/path/original.md",
+            "name": "original.md",
+            "id": "task",
+            "language": "Chinese",
+        }
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict(
+            "os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}
+        ), patch.object(m.ScreenshotParser, "_complete", lambda *args: response()):
+            m.parse_chunks([{"content_with_weight": "source"}], task, b"source bytes", {}, self.model, lambda **kwargs: None)
+
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        locator = manifest["chunks"][0]["visuals"][0]["locator"]
+        self.assertEqual(locator["doc_id"], task["doc_id"])
+        self.assertEqual(locator["dataset_id"], task["kb_id"])
+        self.assertEqual(locator["location"], task["location"])
+        self.assertEqual(locator["sha256"], manifest["file_sha256"])
+
+    def test_shared_renderer_accepts_chunks_from_every_builtin_method(self):
+        parser_ids = [
+            "naive",
+            "qa",
+            "resume",
+            "manual",
+            "table",
+            "paper",
+            "book",
+            "laws",
+            "presentation",
+            "picture",
+            "one",
+            "audio",
+            "email",
+            "tag",
+            "knowledge_graph",
+        ]
+        chunks = [
+            {"parser_id_kwd": parser_id, "content_with_weight": f"source from {parser_id}"}
+            for parser_id in parser_ids
+        ]
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *a, **kw: chunk.update(content_with_weight=text)
+        task = {
+            "tenant_id": "tenant",
+            "kb_id": "kb",
+            "doc_id": "doc",
+            "location": "source.txt",
+            "name": "source.txt",
+            "id": "task",
+            "language": "Chinese",
+        }
+
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict(
+            "os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}
+        ), patch.object(m.ScreenshotParser, "_complete", lambda *args: response()):
+            result = m.parse_chunks(chunks, task, b"source", {}, self.model, lambda **kwargs: None)
+
+        self.assertEqual([chunk["parser_id_kwd"] for chunk in result], parser_ids)
 
 
 if __name__ == "__main__":

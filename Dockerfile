@@ -47,7 +47,8 @@ RUN --mount=type=cache,id=ragflow_apt,target=/var/cache/apt,sharing=locked \
     libglib2.0-0 libglx-mesa0 libgl1 pkg-config libgdiplus default-jdk libatk-bridge2.0-0 \
     libgtk-4-1 libnss3 xdg-utils libjemalloc-dev gnupg unzip curl wget git vim less \
     ghostscript pandoc texlive texlive-latex-extra texlive-xetex texlive-lang-chinese \
-    fonts-freefont-ttf fonts-noto-cjk postgresql-client
+    fonts-freefont-ttf fonts-noto-cjk postgresql-client \
+    libreoffice-core libreoffice-common libreoffice-writer libreoffice-calc libreoffice-impress
 
 # Download resource from GitHub to /usr/share/infinity
 RUN mkdir -p /usr/share/infinity/resource && \

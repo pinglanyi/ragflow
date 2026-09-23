@@ -10,9 +10,12 @@ import { Textarea } from './ui/textarea';
 
 export const multimodalParserSchema = z.object({
   enabled: z.boolean().optional(),
+  mode: z.enum(['off', 'smart', 'full']).optional(),
   model: z.string().optional(),
   prompt: z.string().optional(),
   max_tokens: z.coerce.number().int().min(256).max(65536).optional(),
+  router_prompt: z.string().optional(),
+  router_max_tokens: z.coerce.number().int().min(1).max(1024).optional(),
   model_revision: z.string().optional(),
   enable_thinking: z.boolean().optional(),
   reuse: z.boolean().optional(),
@@ -23,22 +26,37 @@ export const multimodalParserSchema = z.object({
 export function MultimodalParserOptions({ ownerTenantId, picture = false }: { ownerTenantId?: string; picture?: boolean }) {
   const form = useFormContext();
   const enabled = useWatch({ control: form.control, name: 'parser_config.multimodal.enabled' });
+  const mode = useWatch({ control: form.control, name: 'parser_config.multimodal.mode' }) ?? (enabled ? 'full' : 'off');
   const { data: models } = useFetchAllAddedModels(undefined, ownerTenantId);
   return (
     <div className="space-y-4 py-4">
-      <RAGFlowFormItem name="parser_config.multimodal.enabled" label={picture ? '图片多模态直接解析' : 'Chunk 多模态解析'}>
-        {(field) => <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />}
+      <RAGFlowFormItem name="parser_config.multimodal.mode" label={picture ? '图片多模态策略' : 'Chunk 多模态策略'}>
+        {(field) => <div className="grid grid-cols-3 gap-2">
+          {([
+            ['off', '不用多模态'],
+            ['smart', '智能路由'],
+            ['full', '全部多模态'],
+          ] as const).map(([value, label]) => <button key={value} type="button" className={`rounded border px-3 py-2 text-sm ${mode === value ? 'border-accent-primary bg-accent-primary/10 text-accent-primary' : 'border-border-button'}`} onClick={() => { field.onChange(value); form.setValue('parser_config.multimodal.enabled', value !== 'off', { shouldDirty: true }); }}>{label}</button>)}
+        </div>}
       </RAGFlowFormItem>
       {enabled && <>
         <p className="text-sm text-text-secondary">{picture
-          ? '直接将图片交给多模态模型，跳过 OCR。输出包含文件名、文字转录、摊平的 Markdown 表格和详细图片描述，自动参与检索，无需手动填写图片描述元数据。仅适用于图片文件，不适用于视频。'
-          : '将 Chunk 原图转换为可检索的 Markdown：文字转录、表格摊平、图片详细描述。请使用能生成截图的解析方式（推荐 DeepDOC），并关闭父子切分。'}支持 OpenAI 兼容的本地 vLLM 或商用 API；模型类型请勾选视觉（vision）。</p>
+          ? '智能路由会先判断图片是否需要视觉恢复；全部多模态会直接生成文字转录、Markdown 表格和图片描述。'
+          : '基础 Chunk 方法先负责分块。智能路由保留完整纯文本结果，只把表格、图片、复杂版式或 OCR 不足的 Chunk 交给视觉模型；全部多模态会处理每个 Chunk。PDF 直接渲染，Office 文件临时渲染，源文件位置与页码/幻灯片号保持不变。'}支持 OpenAI 兼容的本地 vLLM 或商用 API；模型类型请勾选视觉（vision）。</p>
         <RAGFlowFormItem name="parser_config.multimodal.model" label="多模态模型">
           {(field) => <TreeSelect {...field} data={buildModelTree(models ?? [], ['vision'])} showSearch defaultExpandAll />}
         </RAGFlowFormItem>
         <RAGFlowFormItem name="parser_config.multimodal.prompt" label="解析提示词">
           {(field) => <Textarea {...field} value={field.value ?? ''} rows={7} placeholder="留空使用内置工业文档提示词：忠实 OCR、合并值逐行逐列补齐、嵌套表摊平、图片详细描述、直接输出 Markdown。" />}
         </RAGFlowFormItem>
+        {mode === 'smart' && <>
+          <RAGFlowFormItem name="parser_config.multimodal.router_prompt" label="智能路由提示词">
+            {(field) => <Textarea {...field} value={field.value ?? ''} rows={4} placeholder="留空使用内置规则：纯文本保留基础结果，表格、图片、复杂版式或 OCR 不足时进入多模态。" />}
+          </RAGFlowFormItem>
+          <RAGFlowFormItem name="parser_config.multimodal.router_max_tokens" label="路由最大输出 Token">
+            {(field) => <Input {...field} value={field.value ?? 64} type="number" min={1} max={1024} />}
+          </RAGFlowFormItem>
+        </>}
         <RAGFlowFormItem name="parser_config.multimodal.max_tokens" label="最大输出 Token">
           {(field) => <Input {...field} value={field.value ?? 8192} type="number" min={256} max={65536} />}
         </RAGFlowFormItem>

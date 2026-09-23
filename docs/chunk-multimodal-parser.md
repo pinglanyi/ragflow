@@ -2,7 +2,7 @@
 
 ## 功能与范围
 
-当前接入 Python 内置解析任务（API + Python task executor 部署），包括默认 `TE_RUN_MODE=0` 的重构执行器与备用入口，共用同一个解析/归档模块。在原解析器完成切分和截图后，对每张 Chunk 截图调用多模态模型，再生成关键词和 Embedding。此实现不覆盖 Go ingestion 进程或自定义 Dataflow 的独立执行路径。
+当前接入 Python 内置解析任务（API + Python task executor 部署），包括默认 `TE_RUN_MODE=0` 的重构执行器与备用入口，共用同一个解析/归档模块。基础 `chunk_method` 先决定原始切分；随后可选择关闭、智能路由或全部多模态，再生成关键词和 Embedding。此实现不覆盖 Go ingestion 进程或自定义 Dataflow 的独立执行路径。
 
 文字忠实转录；图片/接线图/流程图输出详细描述；复杂表格输出 Markdown，多层表头明确关联，合并值逐行逐列复制，嵌套表拆分并带上父级条件。结果替换 `content_with_weight` 并重新分词，Embedding 使用处理后的正文。原截图和位置继续用于 RAGFlow 图片引用。模型不生成图片 URL，引用地址由 RAGFlow 的图片存储接口提供。
 
@@ -11,17 +11,17 @@
 ## 前端操作
 
 1. 在模型设置中添加 **vision** 模型，填入 OpenAI-compatible API base URL、模型名与密钥。本地 vLLM 示例 base URL 为 `http://模型服务器:8000/v1`；商用服务使用自己的兼容地址。密钥只存在模型配置里，不填进提示词。
-2. 在数据集解析设置或单文档切分设置中打开 **Chunk 多模态解析**，选择模型。推荐先选 DeepDOC 作为 PDF 布局/切分来源，并关闭父子切分。
+2. 在数据集解析设置或单文档切分设置中选择 **不用多模态 / 智能路由 / 全部多模态**，并在后两种策略下选择模型。基础 Chunk 方法仍可自由选择，父子切分必须关闭。
 3. 可以编辑提示词。留空使用内置工业文档提示词。最大输出默认 8192；大表可提高至模型支持的范围。Qwen 默认关闭思考；vLLM 使用 `chat_template_kwargs.enable_thinking`，其他兼容 Qwen API 使用 `enable_thinking`，服务端需支持对应参数。
 4. 默认打开 **复用已归档解析结果**。本地相同模型名更换权重时，修改 **模型版本标记**。关闭复用会再次调用模型，但保留旧版本。
-5. 重新解析文档。Chunk 卡片显示 Markdown 表格与描述，图片预览保留。进度显示 `Multimodal Markdown n/N (archive reused: True/False)`。
+5. 重新解析文档。智能路由先让模型判断每个 Chunk：返回 `TEXT` 时保留基础解析文本，返回 `MULTIMODAL` 时再把截图转换成 Markdown；全部多模态直接处理每个 Chunk。Chunk 卡片显示最终 Markdown，图片预览和原始位置保留。
 
-不生成截图的解析器/文件类型会明确报错，不会把未处理的 OCR 当作多模态结果。父子切分也会在解析前报错。输出超出 Embedding 输入上限会明确失败并保留归档；请使用更大上下文的 Embedding 模型或减少源 Chunk 大小。
+统一源文件渲染器为 PDF、Office、表格、文本和图片补充可复现截图；Office 依赖 LibreOffice headless。临时渲染结果只用于模型输入，最终 Chunk 继续保留原始文件名、文档 ID、页码和位置。无法渲染时明确失败，不把未处理的 OCR 冒充多模态结果。父子切分也会在解析前报错。
 
 配置字段为 `parser_config.multimodal`（API 扩展配置也可放在 `parser_config.ext.multimodal`）：
 
 ```json
-{"enabled": true, "model": "模型设置返回的模型 ID", "prompt": "", "max_tokens": 8192, "enable_thinking": false, "model_revision": "v1", "reuse": true}
+{"enabled": true, "mode": "smart", "model": "模型设置返回的模型 ID", "router_prompt": "", "router_max_tokens": 64, "prompt": "", "max_tokens": 8192, "enable_thinking": false, "model_revision": "v1", "reuse": true}
 ```
 
 ## Ubuntu 持久化与同步

@@ -2,6 +2,7 @@
 
 import logging
 from pathlib import Path
+from time import monotonic
 
 from peewee import IntegrityError
 
@@ -55,6 +56,8 @@ def submit(tenant_id, dataset_id, document_id, options):
     if doc.pipeline_id or getattr(kb, "pipeline_id", ""):
         raise ApiError("Switch the document/dataset from Pipeline to direct parsing first", 409)
     config = _config(tenant_id, kb, doc.parser_config, options, doc.name)
+    base_parser_id = str(getattr(doc, "parser_id", "") or getattr(kb, "parser_id", "") or "naive")
+    config.setdefault("ext", {})["_multimodal_base_parser_id"] = base_parser_id
     Jobs.refresh_document(document_id)
     # Refresh may recover a stale run flag after an interrupted submission.
     rows = DocumentService.query(id=document_id, kb_id=dataset_id)
@@ -74,7 +77,7 @@ def submit(tenant_id, dataset_id, document_id, options):
         if not active:
             raise
         raise ApiError("Document already has an active multimodal job", 409, Jobs.response(active)) from exc
-    parser_id = "naive" if Path(doc.name).suffix.lower() == ".pdf" else "picture"
+    parser_id = "picture" if Path(doc.name).suffix.lower() in Jobs.IMAGE_SUFFIXES else base_parser_id
     try:
         DocumentService.clear_chunk_num_when_rerun(document_id)
         DocumentService.update_by_id(document_id, {"parser_config": config, "parser_id": parser_id, "run": "1", "progress": 0, "progress_msg": "", "chunk_num": 0, "token_num": 0})
@@ -118,3 +121,63 @@ def status(tenant_id, job_id):
         raise ApiError("Task not found", 404)
     _dataset(tenant_id, job.dataset_id)
     return Jobs.response(Jobs.refresh(job_id))
+
+
+def test_model(tenant_id, model_ref, model_type):
+    """Probe a registered OpenAI-compatible model without exposing its secret."""
+
+    from openai import OpenAI
+
+    if model_type not in {LLMType.CHAT.value, LLMType.VISION.value, LLMType.EMBEDDING.value}:
+        raise ApiError("Connectivity testing supports chat, vision, and embedding models")
+    try:
+        model = resolve_model_config(tenant_id, LLMType(model_type), model_ref)
+        if not model.get("api_base"):
+            raise ValueError("An OpenAI-compatible endpoint is required")
+        started = monotonic()
+        with OpenAI(
+            api_key=model.get("api_key") or "EMPTY",
+            base_url=model["api_base"].rstrip("/"),
+            timeout=30,
+            max_retries=0,
+        ) as client:
+            if model_type == LLMType.EMBEDDING.value:
+                response = client.embeddings.create(model=model["llm_name"], input=["connectivity test"])
+                ok = bool(response.data and response.data[0].embedding)
+                usage = response.usage.model_dump() if response.usage else {}
+            else:
+                content = "Reply with OK."
+                if model_type == LLMType.VISION.value:
+                    # Exercise the image-input path instead of only probing chat.
+                    content = [
+                        {"type": "text", "text": "Describe this image with the single word OK."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    "data:image/png;base64,"
+                                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+                                    "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                )
+                            },
+                        },
+                    ]
+                response = client.chat.completions.create(
+                    model=model["llm_name"],
+                    messages=[{"role": "user", "content": content}],
+                    max_tokens=8,
+                )
+                ok = bool(response.choices and response.choices[0].message.content)
+                usage = response.usage.model_dump() if response.usage else {}
+        return {
+            "ok": ok,
+            "model": model["llm_name"],
+            "model_type": model_type,
+            "latency_ms": round((monotonic() - started) * 1000, 1),
+            "usage": usage,
+        }
+    except LookupError as exc:
+        raise ApiError("Registered model not found or unavailable", 404) from exc
+    except Exception as exc:
+        logger.warning("Model connectivity test failed type=%s", type(exc).__name__)
+        raise ApiError(f"Model connectivity test failed: {type(exc).__name__}", 502) from exc

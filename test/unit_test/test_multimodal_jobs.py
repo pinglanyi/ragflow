@@ -92,9 +92,37 @@ class JobsTest(unittest.TestCase):
         for options in ({"enabled": False}, {"max_tokens": True}, {"max_tokens": 12}, {"reuse": "false"}, {"api_key": "secret"}, {"prompt": None}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.mod.build_config({}, {"multimodal": {"model": "m"}}, options, "x.pdf")
-        for name in ("x.mp4", "x.docx", ""):
+        for name in ("x.mp4", ""):
             with self.assertRaises(ValueError):
                 self.mod.build_config({}, {}, {}, name)
+        for name in ("x.pdf", "x.docx", "x.xlsx", "x.pptx", "x.png", "x.txt"):
+            config = self.mod.build_config(
+                {}, {"multimodal": {"model": "vision"}}, {"mode": "full"}, name
+            )
+            self.assertEqual(config["multimodal"]["mode"], "full")
+
+    def test_metrics_accumulate_full_mode_token_usage(self):
+        self.svc.record_metrics(
+            self.job.id,
+            usage={"prompt_tokens": 80, "completion_tokens": 20, "total_tokens": 100},
+            elapsed_seconds=1.5,
+            routed_chunks=0,
+            multimodal_chunks=2,
+        )
+        self.svc.record_metrics(
+            self.job.id,
+            usage={"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50},
+            elapsed_seconds=2.0,
+            routed_chunks=0,
+            multimodal_chunks=1,
+        )
+        response = self.svc.response(self.Job.get_by_id(self.job.id))
+        self.assertEqual(response["metrics"]["prompt_tokens"], 120)
+        self.assertEqual(response["metrics"]["completion_tokens"], 30)
+        self.assertEqual(response["metrics"]["total_tokens"], 150)
+        self.assertEqual(response["metrics"]["multimodal_chunks"], 3)
+        self.assertEqual(response["metrics"]["routed_chunks"], 0)
+        self.assertEqual(response["metrics"]["processing_seconds"], 2.0)
 
     def test_complete_requires_all_children_and_dispatch(self):
         self.child(progress=1, chunks="c1")

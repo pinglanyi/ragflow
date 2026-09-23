@@ -11,35 +11,46 @@ from api.db.db_models import DB, Document, MultimodalJob, Task
 logger = logging.getLogger(__name__)
 
 TERMINAL = ("complete", "failed", "cancelled")
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".tif", ".tiff", ".webp"}
 
 
 def build_config(kb_config, doc_config, overrides, filename):
     if not isinstance(overrides, dict):
         raise TypeError("multimodal must be an object")
     suffix = Path(filename).suffix.lower()
-    if suffix not in IMAGE_SUFFIXES | {".pdf"}:
-        raise ValueError("Only PDF and static PNG/JPEG/BMP/TIFF/WebP images are supported")
-    allowed = {"enabled", "model", "prompt", "max_tokens", "enable_thinking", "model_revision", "reuse"}
+    supported = IMAGE_SUFFIXES | {
+        ".pdf", ".doc", ".docx", ".rtf", ".wps", ".odt", ".ppt", ".pptx", ".odp",
+        ".xls", ".xlsx", ".xlsm", ".xlsb", ".ods", ".csv", ".txt", ".md", ".rst",
+        ".html", ".xml", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".sql",
+        ".py", ".js", ".ts", ".java", ".go", ".c", ".cpp", ".h", ".css", ".tex",
+        ".eml", ".msg", ".epub",
+    }
+    if suffix not in supported:
+        raise ValueError("This file type cannot be rendered for multimodal parsing")
+    allowed = {"enabled", "mode", "model", "prompt", "router_prompt", "router_max_tokens", "max_tokens", "enable_thinking", "model_revision", "reuse"}
     if set(overrides) - allowed:
         raise ValueError("Unknown multimodal fields: " + ", ".join(sorted(set(overrides) - allowed)))
     cfg = deepcopy(kb_config or {})
     cfg.update(deepcopy(doc_config or {}))
-    options = {"enabled": True, "prompt": "", "max_tokens": 8192, "enable_thinking": False, "model_revision": "", "reuse": True}
+    options = {"enabled": True, "mode": "full", "prompt": "", "router_prompt": "", "router_max_tokens": 64, "max_tokens": 8192, "enable_thinking": False, "model_revision": "", "reuse": True}
     for source in (kb_config or {}, doc_config or {}):
         options.update(source.get("multimodal") or (source.get("ext") or {}).get("multimodal") or {})
-    options["enabled"] = True
     options.update(overrides)
-    if options.get("enabled") is not True:
-        raise ValueError("This endpoint requires multimodal.enabled=true")
+    mode = str(options.get("mode") or ("full" if options.get("enabled") else "off")).lower()
+    if mode not in {"smart", "full"}:
+        raise ValueError("This endpoint requires multimodal mode smart or full")
+    options["mode"] = mode
+    options["enabled"] = True
     for field in ("reuse", "enable_thinking"):
         if type(options[field]) is not bool:
             raise ValueError(f"{field} must be a boolean")
-    for field in ("model", "prompt", "model_revision"):
+    for field in ("model", "prompt", "router_prompt", "model_revision"):
         if not isinstance(options.get(field), str) or (field == "model" and not options[field].strip()):
             raise ValueError(f"{field} must be a string; model must not be empty")
     if type(options["max_tokens"]) is not int or not 256 <= options["max_tokens"] <= 65536:
         raise ValueError("max_tokens must be an integer between 256 and 65536")
+    if type(options["router_max_tokens"]) is not int or not 1 <= options["router_max_tokens"] <= 1024:
+        raise ValueError("router_max_tokens must be an integer between 1 and 1024")
     cfg.update(multimodal=options, layout_recognize="DeepDOC", enable_children=False, parent_child={"use_parent_child": False}, children_delimiter="")
     # Do not leave contradictory extension values that downstream merging could restore.
     ext = cfg.get("ext") or {}
@@ -80,6 +91,7 @@ def guarded_insert(task_id, chunks, index_name, dataset_id, insert):
 
 
 class MultimodalJobService:
+    IMAGE_SUFFIXES = IMAGE_SUFFIXES
     @staticmethod
     def create(tenant_id, dataset_id, document_id, config):
         now = _now()
@@ -121,6 +133,22 @@ class MultimodalJobService:
             job = MultimodalJob.get_by_id(job_id)
             if job.status not in TERMINAL:
                 cls._update(job_id, status="failed", message=message, error={"code": code, "message": message})
+
+    @classmethod
+    def record_metrics(cls, job_id, *, usage, elapsed_seconds, routed_chunks, multimodal_chunks):
+        with DB.lock("mmjob-metrics-" + job_id, -1):
+            job = MultimodalJob.get_by_id(job_id)
+            metrics = dict(job.metrics or {})
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                metrics[key] = int(metrics.get(key, 0)) + int(usage.get(key, 0))
+            metrics["routed_chunks"] = int(metrics.get("routed_chunks", 0)) + int(routed_chunks)
+            metrics["multimodal_chunks"] = int(metrics.get("multimodal_chunks", 0)) + int(multimodal_chunks)
+            metrics["processing_seconds"] = round(
+                max(float(metrics.get("processing_seconds", 0)), float(elapsed_seconds)), 3
+            )
+            MultimodalJob.update(metrics=metrics, updated_at=_now()).where(
+                MultimodalJob.id == job_id
+            ).execute()
 
     @classmethod
     def refresh(cls, job_id):
@@ -187,7 +215,11 @@ class MultimodalJobService:
                 task["parser_config"] = deepcopy(job.config)
                 task["kb_parser_config"] = deepcopy(job.config)
                 task["_multimodal_job_id"] = job.id
-                task["parser_id"] = "naive" if task.get("type") == "pdf" else "picture"
+                task["parser_id"] = (
+                    (job.config.get("ext") or {}).get("_multimodal_base_parser_id")
+                    or task.get("parser_id")
+                    or ("picture" if Path(task.get("name") or "").suffix.lower() in IMAGE_SUFFIXES else "naive")
+                )
                 break
         return task
 
@@ -196,6 +228,18 @@ class MultimodalJobService:
         result = {key: getattr(job, key) for key in ("id", "dataset_id", "document_id", "status", "progress", "message", "created_at", "updated_at", "chunk_count")}
         result["task_id"] = result.pop("id")
         result["error"] = job.error or None
+        result["metrics"] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "routed_chunks": 0,
+            "multimodal_chunks": 0,
+            "processing_seconds": 0,
+            **(job.metrics or {}),
+        }
+        started = datetime.fromisoformat(job.created_at)
+        finished = datetime.fromisoformat(job.updated_at) if job.status in TERMINAL else datetime.now(UTC)
+        result["elapsed_seconds"] = round(max(0, (finished - started).total_seconds()), 3)
         result["status_url"] = f"/api/v1/multimodal/tasks/{job.id}"
         if job.status == "complete":
             result["result_url"] = f"/api/v1/datasets/{job.dataset_id}/documents/{job.document_id}/chunks"
