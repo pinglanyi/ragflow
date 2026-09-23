@@ -18,6 +18,7 @@ import asyncio
 import logging
 import json
 import uuid
+from time import sleep
 
 import valkey as redis
 from common.decorator import singleton
@@ -402,7 +403,7 @@ class RedisDB:
         return False
 
     def queue_product(self, queue, message) -> bool:
-        for _ in range(3):
+        for attempt in range(3):
             try:
                 payload = {"message": json.dumps(message)}
                 self.REDIS.xadd(queue, payload)
@@ -410,6 +411,8 @@ class RedisDB:
             except Exception as e:
                 logging.exception("RedisDB.queue_product " + str(queue) + " got exception: " + str(e))
                 self.__open__()
+                if attempt < 2:
+                    sleep(2**attempt)
         return False
 
     def queue_consumer(self, queue_name, group_name, consumer_name, msg_id=b">") -> RedisMsg:
