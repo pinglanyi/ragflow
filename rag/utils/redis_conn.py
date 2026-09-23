@@ -403,7 +403,7 @@ class RedisDB:
         return False
 
     def queue_product(self, queue, message) -> bool:
-        for attempt in range(3):
+        for attempt in range(4):
             try:
                 payload = {"message": json.dumps(message)}
                 self.REDIS.xadd(queue, payload)
@@ -411,7 +411,7 @@ class RedisDB:
             except Exception as e:
                 logging.exception("RedisDB.queue_product " + str(queue) + " got exception: " + str(e))
                 self.__open__()
-                if attempt < 2:
+                if attempt < 3:
                     sleep(2**attempt)
         return False
 

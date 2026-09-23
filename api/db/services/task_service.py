@@ -18,6 +18,7 @@ import os
 import random
 import xxhash
 from datetime import datetime
+from time import sleep
 
 from api.db.db_utils import bulk_insert_into_db
 from deepdoc.parser import PdfParser
@@ -56,16 +57,20 @@ def _doc_chunking_done_key(task_id: str) -> str:
 def seed_doc_chunking_counter(doc_id: str, pending_count: int) -> bool:
     if not doc_id or pending_count <= 0:
         return False
-    try:
-        REDIS_CONN.delete(_doc_chunking_aborted_key(doc_id))
-        return REDIS_CONN.set(
-            _doc_chunking_pending_key(doc_id),
-            str(pending_count),
-            exp=DOC_CHUNKING_COUNTER_TTL_SECONDS,
-        )
-    except Exception:
-        logging.exception("Failed to seed chunking counter for doc %s", doc_id)
-        return False
+    for attempt in range(4):
+        try:
+            REDIS_CONN.delete(_doc_chunking_aborted_key(doc_id))
+            if REDIS_CONN.set(
+                _doc_chunking_pending_key(doc_id),
+                str(pending_count),
+                exp=DOC_CHUNKING_COUNTER_TTL_SECONDS,
+            ):
+                return True
+        except Exception:
+            logging.exception("Failed to seed chunking counter for doc %s", doc_id)
+        if attempt < 3:
+            sleep(2**attempt)
+    return False
 
 
 def clear_doc_chunking_counter(doc_id: str) -> None:
