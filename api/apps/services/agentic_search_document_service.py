@@ -10,7 +10,7 @@ def validate_request(payload: dict) -> dict:
     """Normalize file-name search arguments and reject ambiguous aliases."""
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
-    unknown = set(payload) - {"keyword", "query", "mode", "top_k", "topkey", "dataset_names", "dataset_ids"}
+    unknown = set(payload) - {"keyword", "query", "mode", "scan_meta", "top_k", "topkey", "dataset_names", "dataset_ids"}
     if unknown:
         raise ValueError(f"unknown fields: {', '.join(sorted(unknown))}")
     if "keyword" in payload and "query" in payload:
@@ -21,6 +21,9 @@ def validate_request(payload: dict) -> dict:
     mode = payload.get("mode", "phrase")
     if mode not in ("phrase", "term"):
         raise ValueError("mode must be phrase or term")
+    scan_meta = payload.get("scan_meta", False)
+    if not isinstance(scan_meta, bool):
+        raise ValueError("scan_meta must be a boolean")
     if "top_k" in payload and "topkey" in payload:
         raise ValueError("Specify top_k or topkey, not both")
     top_k = payload.get("top_k", payload.get("topkey", 5))
@@ -35,6 +38,7 @@ def validate_request(payload: dict) -> dict:
     return {
         "keyword": keyword.strip(),
         "mode": mode,
+        "scan_meta": scan_meta,
         "top_k": top_k,
         "dataset_refs": list(dict.fromkeys(item.strip() for item in scope.split(",") if item.strip())),
     }
@@ -147,6 +151,7 @@ async def find_source_files(payload: dict, *, user_id: str) -> dict:
     result = {
         "keyword": options["keyword"],
         "mode": options["mode"],
+        "scan_meta": options["scan_meta"],
         "documents": [],
         "count": 0,
         "searched_dataset_count": len(selected),
@@ -159,7 +164,7 @@ async def find_source_files(payload: dict, *, user_id: str) -> dict:
     )
     description_ids = await _description_ids(
         selected, options["keyword"], options["mode"], DocMetadataService, thread_pool_exec
-    )
+    ) if options["scan_meta"] else []
     description_rows = await thread_pool_exec(
         DocumentService.get_name_retrieval_documents, dataset_ids, description_ids
     ) if description_ids else []

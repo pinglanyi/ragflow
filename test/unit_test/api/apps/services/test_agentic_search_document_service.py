@@ -17,16 +17,17 @@ SPEC.loader.exec_module(MODULE)
 
 def test_request_aliases_and_limits():
     assert MODULE.validate_request({"keyword": " E502 接线 ", "mode": "term", "top_k": 30, "dataset_names": "产品库,kb-id,产品库"}) == {
-        "keyword": "E502 接线", "mode": "term", "top_k": 30, "dataset_refs": ["产品库", "kb-id"]
+        "keyword": "E502 接线", "mode": "term", "scan_meta": False, "top_k": 30, "dataset_refs": ["产品库", "kb-id"]
     }
     assert MODULE.validate_request({"keyword": "E502"}) == {
-        "keyword": "E502", "mode": "phrase", "top_k": 5, "dataset_refs": []
+        "keyword": "E502", "mode": "phrase", "scan_meta": False, "top_k": 5, "dataset_refs": []
     }
     assert MODULE.validate_request({"query": "旧参数", "topkey": 2})["keyword"] == "旧参数"
     for payload in (
         {}, {"keyword": " "}, {"keyword": "a", "mode": "regex"}, {"keyword": "a", "top_k": 0},
         {"keyword": "a", "top_k": 31}, {"keyword": "a", "topkey": 2, "top_k": 3},
-        {"keyword": "a", "query": "b"}, {"keyword": "a", "dataset_names": ["产品库"]},
+        {"keyword": "a", "query": "b"}, {"keyword": "a", "scan_meta": "yes"},
+        {"keyword": "a", "dataset_names": ["产品库"]},
         {"keyword": "a", "dataset_names": "产品库", "dataset_ids": "kb"}, {"keyword": "a", "unknown": True},
     ):
         with pytest.raises(ValueError):
@@ -67,7 +68,9 @@ def test_retrieval_merges_document_metadata_without_chunk_lookup(monkeypatch):
     metadata_module = ModuleType("api.db.services.doc_metadata_service")
     metadata_module.DocMetadataService = SimpleNamespace(
         get_metadata_for_documents=metadata,
-        filter_doc_ids_by_meta_pushdown=lambda *args: [],
+        filter_doc_ids_by_meta_pushdown=lambda *args: (_ for _ in ()).throw(
+            AssertionError("scan_meta=false must not search all document descriptions")
+        ),
     )
     misc_module = ModuleType("common.misc_utils")
     misc_module.thread_pool_exec = thread_pool_exec
@@ -137,7 +140,7 @@ def test_description_only_metadata_finds_file_without_name_or_chunks(monkeypatch
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
 
-    result = asyncio.run(MODULE.find_source_files({"keyword": "E502"}, user_id="user"))
+    result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "scan_meta": True}, user_id="user"))
     assert result["count"] == 1
     assert result["documents"][0]["file_name"] == "产品说明.pdf"
     assert result["documents"][0]["matched_by"] == ["description"]
@@ -175,7 +178,7 @@ def test_file_name_and_description_candidates_are_deduplicated_and_ranked(monkey
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
 
-    result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "top_k": 4}, user_id="user"))
+    result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "scan_meta": True, "top_k": 4}, user_id="user"))
     assert [row["metafield"]["docid"] for row in result["documents"]] == [
         "exact", "prefix", "description", "both",
     ]
