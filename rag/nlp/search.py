@@ -190,6 +190,10 @@ class Dealer:
             elif isinstance(highlight, list):
                 highlightFields = highlight
             matchText, keywords = self.qryr.question(qst, min_match=0.3)
+            # Specialized callers can raise title/file-name weight without
+            # mutating the shared FulltextQueryer used by normal retrieval.
+            if matchText is not None and req.get("query_fields"):
+                matchText.fields = list(req["query_fields"])
             if emb_mdl is None:
                 matchExprs = [matchText]
                 res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs, orderBy, offset, limit, idx_names, kb_ids, rank_feature=rank_feature)
@@ -431,7 +435,7 @@ class Dealer:
             out[cid] = v
         return out
 
-    def rerank_with_knn(self, sres, query, knn_scores: dict[str, float], tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None):
+    def rerank_with_knn(self, sres, query, knn_scores: dict[str, float], tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None, filename_token_weight: int = 2):
         """
         Merge ES-side KNN cosine similarity with locally computed term
         similarity using the user-configured weights. Replaces the older
@@ -449,7 +453,7 @@ class Dealer:
             title_tks = [t for t in sres.field[i].get("title_tks", "").split() if t]
             question_tks = [t for t in sres.field[i].get("question_tks", "").split() if t]
             important_kwd = sres.field[i].get("important_kwd", [])
-            tks = content_ltks + title_tks * 2 + important_kwd * 5 + question_tks * 6
+            tks = content_ltks + title_tks * filename_token_weight + important_kwd * 5 + question_tks * 6
             ins_tw.append(tks)
 
         tksim = np.array(self.qryr.token_similarity(keywords, ins_tw), dtype=np.float64)
@@ -458,7 +462,7 @@ class Dealer:
         sim = tkweight * tksim + vtweight * vtsim + rank_fea
         return sim, tksim, vtsim
 
-    def rerank(self, sres, query, tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None):
+    def rerank(self, sres, query, tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None, filename_token_weight: int = 2):
         _, keywords = self.qryr.question(query)
         vector_size = len(sres.query_vector)
         vector_column = f"q_{vector_size}_vec"
@@ -481,7 +485,7 @@ class Dealer:
             title_tks = [t for t in sres.field[i].get("title_tks", "").split() if t]
             question_tks = [t for t in sres.field[i].get("question_tks", "").split() if t]
             important_kwd = sres.field[i].get("important_kwd", [])
-            tks = content_ltks + title_tks * 2 + important_kwd * 5 + question_tks * 6
+            tks = content_ltks + title_tks * filename_token_weight + important_kwd * 5 + question_tks * 6
             ins_tw.append(tks)
 
         ## For rank feature(tag_fea) scores.
@@ -491,7 +495,7 @@ class Dealer:
 
         return sim + rank_fea, tksim, vtsim
 
-    def rerank_by_model(self, rerank_mdl, sres, query, tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None):
+    def rerank_by_model(self, rerank_mdl, sres, query, tkweight=0.3, vtweight=0.7, cfield="content_ltks", rank_feature: dict | None = None, filename_token_weight: int = 1):
         _, keywords = self.qryr.question(query)
 
         for i in sres.ids:
@@ -503,7 +507,7 @@ class Dealer:
             content_ltks = sres.field[i][cfield].split()
             title_tks = [t for t in sres.field[i].get("title_tks", "").split() if t]
             important_kwd = sres.field[i].get("important_kwd", [])
-            tks = content_ltks + title_tks + important_kwd
+            tks = content_ltks + title_tks * filename_token_weight + important_kwd
             ins_tw.append(tks)
 
         docs = [remove_redundant_spaces(" ".join(tks)) for tks in ins_tw]
@@ -563,6 +567,8 @@ class Dealer:
         highlight=False,
         rank_feature: dict | None = {PAGERANK_FLD: 10},
         trace_id=None,
+        query_fields: list[str] | None = None,
+        filename_token_weight: int = 2,
     ):
         ranks = {"total": 0, "chunks": [], "doc_aggs": {}}
         if not question:
@@ -586,6 +592,7 @@ class Dealer:
             "topk": top,
             "similarity": similarity_threshold,
             "available_int": 1,
+            "query_fields": query_fields,
         }
         logging.debug(f"[Search] global_offset={global_offset}, rerank_limit={RERANK_LIMIT}, page_size={page_size}, page={page}")
 
@@ -620,6 +627,7 @@ class Dealer:
                 term_similarity_weight,
                 vector_similarity_weight,
                 rank_feature=rank_feature,
+                filename_token_weight=filename_token_weight,
             )
         else:
             if settings.DOC_ENGINE_INFINITY:
@@ -637,6 +645,7 @@ class Dealer:
                     term_similarity_weight,
                     vector_similarity_weight,
                     rank_feature=rank_feature,
+                    filename_token_weight=filename_token_weight,
                 )
             else:
                 # ES path: ask ES for the clean cosine score via a second
@@ -651,6 +660,7 @@ class Dealer:
                     term_similarity_weight,
                     vector_similarity_weight,
                     rank_feature=rank_feature,
+                    filename_token_weight=filename_token_weight,
                 )
 
         sim_np = np.array(sim, dtype=np.float64)

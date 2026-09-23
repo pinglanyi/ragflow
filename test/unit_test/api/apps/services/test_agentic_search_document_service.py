@@ -15,6 +15,10 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+async def _async_value(value):
+    return value
+
+
 def test_request_aliases_and_limits():
     assert MODULE.validate_request({"keyword": " E502 接线 ", "mode": "term", "top_k": 30, "dataset_names": "产品库,kb-id,产品库"}) == {
         "keyword": "E502 接线", "mode": "term", "scan_meta": False, "top_k": 30, "dataset_refs": ["产品库", "kb-id"]
@@ -44,6 +48,45 @@ def test_scope_resolves_visible_names_ids_and_rejects_ambiguity():
         MODULE.resolve_scope(["重名"], [{"id": "one", "name": "重名"}, {"id": "two", "name": "重名"}])
 
 
+def test_filename_candidates_use_hybrid_retrieval_with_dominant_filename_weight(monkeypatch):
+    calls = []
+
+    class Retriever:
+        async def retrieval(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {"chunks": [
+                {"document_id": "doc1", "similarity": 0.74},
+                {"document_id": "doc1", "similarity": 0.91},
+                {"document_id": "doc2", "similarity": 0.63},
+            ]}
+
+    model_module = ModuleType("api.db.joint_services.tenant_model_service")
+    model_module.resolve_model_config = lambda tenant_id, model_type, embd_id: {"id": embd_id}
+    llm_module = ModuleType("api.db.services.llm_service")
+    llm_module.LLMBundle = lambda tenant_id, config: (tenant_id, config)
+    settings_module = ModuleType("common.settings")
+    settings_module.retriever = Retriever()
+    constants_module = ModuleType("common.constants")
+    constants_module.LLMType = SimpleNamespace(EMBEDDING="embedding")
+    search_module = SimpleNamespace(index_name=lambda tenant_id: f"ragflow_{tenant_id}")
+    nlp_module = ModuleType("rag.nlp")
+    nlp_module.search = search_module
+    for module in (model_module, llm_module, settings_module, constants_module, nlp_module):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    result = asyncio.run(MODULE._retrieve_filename_candidates([
+        {"id": "kb1", "tenant_id": "tenant", "embd_id": "embed", "chunk_num": 3},
+    ], "E502 接线", 5))
+
+    assert result == {"doc1": 0.91, "doc2": 0.63}
+    args, kwargs = calls[0]
+    assert args[0] == "E502 接线"
+    assert args[2:4] == (["tenant"], ["kb1"])
+    assert kwargs["vector_similarity_weight"] == 0.15
+    assert kwargs["filename_token_weight"] == 20
+    assert kwargs["query_fields"][0] == "docnm_kwd^200"
+
+
 def test_retrieval_merges_document_metadata_without_chunk_lookup(monkeypatch):
     calls = []
     docs = [
@@ -56,15 +99,18 @@ def test_retrieval_merges_document_metadata_without_chunk_lookup(monkeypatch):
     async def thread_pool_exec(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    def search(ids, keyword, mode, top_k):
-        calls.append((ids, keyword, mode, top_k))
-        return docs
+    def search(ids, keyword, mode, top_k, *, unparsed_only=False):
+        calls.append((ids, keyword, mode, top_k, unparsed_only))
+        return [docs[0]]
 
     def metadata(ids, kb_id):
         return {"doc1": {"author": "张三", "doc_id": "spoof", "datasetid": "spoof", "location": "spoof"}} if kb_id == "kb1" else {}
 
     document_module = ModuleType("api.db.services.document_service")
-    document_module.DocumentService = SimpleNamespace(search_by_name=search, get_name_retrieval_documents=lambda *args: [])
+    document_module.DocumentService = SimpleNamespace(
+        search_by_name=search,
+        get_name_retrieval_documents=lambda kb_ids, doc_ids: [docs[1]] if doc_ids == ["doc2"] else [],
+    )
     metadata_module = ModuleType("api.db.services.doc_metadata_service")
     metadata_module.DocMetadataService = SimpleNamespace(
         get_metadata_for_documents=metadata,
@@ -78,15 +124,50 @@ def test_retrieval_merges_document_metadata_without_chunk_lookup(monkeypatch):
     for module in (document_module, metadata_module, misc_module):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
+    monkeypatch.setattr(MODULE, "_retrieve_filename_candidates", lambda *args: _async_value({"doc2": 0.82}))
 
     result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "top_k": 2}, user_id="user"))
-    assert calls == [(["kb1", "kb2"], "E502", "phrase", 2)]
+    assert calls == [(["kb1", "kb2"], "E502", "phrase", 2, True)]
     assert result["count"] == 2
     assert result["searched_dataset_count"] == 2
-    assert result["documents"][0] == {"file_name": "E502手册.pdf", "matched_by": ["file_name"], "metafield": {
+    doc1 = next(row for row in result["documents"] if row["metafield"]["doc_id"] == "doc1")
+    assert doc1 == {"file_name": "E502手册.pdf", "matched_by": ["file_name"], "metafield": {
         "author": "张三", "datasetid": "kb1", "docid": "doc1", "dataset_id": "kb1", "dataset_name": "产品库", "doc_id": "doc1", "location": "folder/E502手册.pdf"
     }}
-    assert result["documents"][1]["metafield"]["doc_id"] == "doc2"
+    assert {row["metafield"]["doc_id"] for row in result["documents"]} == {"doc1", "doc2"}
+
+
+def test_semantic_retrieval_candidate_survives_phrase_mode_without_literal_name_match(monkeypatch):
+    async def visible(user_id):
+        return [{"id": "kb1", "name": "产品库", "tenant_id": "tenant", "embd_id": "embedding", "chunk_num": 2}]
+
+    async def thread_pool_exec(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    semantic_doc = {
+        "id": "semantic", "kb_id": "kb1", "name": "温度采集模块说明书.pdf", "location": "manual.pdf"
+    }
+    document_module = ModuleType("api.db.services.document_service")
+    document_module.DocumentService = SimpleNamespace(
+        search_by_name=lambda *args, **kwargs: [],
+        get_name_retrieval_documents=lambda kb_ids, doc_ids: [semantic_doc],
+    )
+    metadata_module = ModuleType("api.db.services.doc_metadata_service")
+    metadata_module.DocMetadataService = SimpleNamespace(get_metadata_for_documents=lambda *args: {})
+    misc_module = ModuleType("common.misc_utils")
+    misc_module.thread_pool_exec = thread_pool_exec
+    for module in (document_module, metadata_module, misc_module):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(MODULE, "_visible_datasets", visible)
+    monkeypatch.setattr(
+        MODULE, "_retrieve_filename_candidates", lambda *args: _async_value({"semantic": 0.91})
+    )
+
+    result = asyncio.run(MODULE.find_source_files({"keyword": "E502 接线", "mode": "phrase"}, user_id="user"))
+
+    assert result["count"] == 1
+    assert result["documents"][0]["file_name"] == "温度采集模块说明书.pdf"
+    assert result["documents"][0]["matched_by"] == ["retrieval"]
 
 
 def test_retrieval_rejects_a_document_outside_authorized_scope(monkeypatch):
@@ -97,7 +178,7 @@ def test_retrieval_rejects_a_document_outside_authorized_scope(monkeypatch):
         return fn(*args, **kwargs)
 
     document_module = ModuleType("api.db.services.document_service")
-    document_module.DocumentService = SimpleNamespace(search_by_name=lambda *args: [
+    document_module.DocumentService = SimpleNamespace(search_by_name=lambda *args, **kwargs: [
         {"id": "private-doc", "kb_id": "private-kb", "name": "E502.pdf", "location": "E502.pdf"}
     ], get_name_retrieval_documents=lambda *args: [])
     metadata_module = ModuleType("api.db.services.doc_metadata_service")
@@ -110,6 +191,7 @@ def test_retrieval_rejects_a_document_outside_authorized_scope(monkeypatch):
     for module in (document_module, metadata_module, misc_module):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
+    monkeypatch.setattr(MODULE, "_retrieve_filename_candidates", lambda *args: _async_value({}))
 
     with pytest.raises(ValueError, match="authorized scope"):
         asyncio.run(MODULE.find_source_files({"keyword": "E502"}, user_id="user"))
@@ -125,7 +207,7 @@ def test_description_only_metadata_finds_file_without_name_or_chunks(monkeypatch
     doc = {"id": "manual", "kb_id": "kb1", "name": "产品说明.pdf", "location": "folder/manual.pdf", "chunk_num": 0}
     document_module = ModuleType("api.db.services.document_service")
     document_module.DocumentService = SimpleNamespace(
-        search_by_name=lambda *args: [],
+        search_by_name=lambda *args, **kwargs: [],
         get_name_retrieval_documents=lambda kb_ids, doc_ids: [doc] if doc_ids == ["manual"] else [],
     )
     metadata_module = ModuleType("api.db.services.doc_metadata_service")
@@ -139,6 +221,7 @@ def test_description_only_metadata_finds_file_without_name_or_chunks(monkeypatch
     for module in (document_module, metadata_module, misc_module):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
+    monkeypatch.setattr(MODULE, "_retrieve_filename_candidates", lambda *args: _async_value({}))
 
     result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "scan_meta": True}, user_id="user"))
     assert result["count"] == 1
@@ -161,8 +244,10 @@ def test_file_name_and_description_candidates_are_deduplicated_and_ranked(monkey
     description_docs = [doc("description", "接线说明.pdf"), name_docs[2]]
     document_module = ModuleType("api.db.services.document_service")
     document_module.DocumentService = SimpleNamespace(
-        search_by_name=lambda *args: name_docs,
-        get_name_retrieval_documents=lambda *args: description_docs,
+        search_by_name=lambda *args, **kwargs: [],
+        get_name_retrieval_documents=lambda kb_ids, doc_ids: (
+            name_docs if doc_ids == ["exact", "prefix", "both"] else description_docs
+        ),
     )
     metadata_module = ModuleType("api.db.services.doc_metadata_service")
     metadata_module.DocMetadataService = SimpleNamespace(
@@ -177,12 +262,15 @@ def test_file_name_and_description_candidates_are_deduplicated_and_ranked(monkey
     for module in (document_module, metadata_module, misc_module):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
+    monkeypatch.setattr(
+        MODULE, "_retrieve_filename_candidates", lambda *args: _async_value({"exact": 0.7, "prefix": 0.8, "both": 0.9})
+    )
 
     result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "scan_meta": True, "top_k": 4}, user_id="user"))
     assert [row["metafield"]["docid"] for row in result["documents"]] == [
-        "exact", "prefix", "description", "both",
+        "exact", "prefix", "both", "description",
     ]
-    assert result["documents"][-1]["matched_by"] == ["file_name", "description"]
+    assert result["documents"][2]["matched_by"] == ["file_name", "description"]
 
 
 def test_description_lookup_falls_back_when_pushdown_unavailable(monkeypatch):

@@ -1,6 +1,7 @@
 """Authorized document-name retrieval independent of chunk search."""
 
 from collections import defaultdict
+import logging
 
 
 DESCRIPTION_FIELDS = ("description", "描述", "file_description")
@@ -80,7 +81,85 @@ async def _visible_datasets(user_id: str) -> list[dict]:
         KnowledgebaseService.get_by_tenant_ids,
         [item["tenant_id"] for item in joined], user_id, 0, 0, "update_time", True, "",
     )
-    return [{"id": row["id"], "name": row["name"], "tenant_id": row["tenant_id"]} for row in rows]
+    return [{
+        "id": row["id"], "name": row["name"], "tenant_id": row["tenant_id"],
+        "chunk_num": row.get("chunk_num", 0), "embd_id": row.get("embd_id"),
+    } for row in rows]
+
+
+async def _retrieve_filename_candidates(selected: list[dict], keyword: str, top_k: int) -> dict[str, float]:
+    """Recall documents through hybrid retrieval with dominant file-name fields."""
+    from api.db.joint_services.tenant_model_service import resolve_model_config
+    from api.db.services.llm_service import LLMBundle
+    from common import settings
+    from common.constants import LLMType
+    from rag.nlp import search
+
+    indexed = [row for row in selected if row.get("chunk_num", 1) > 0]
+    if not indexed:
+        return {}
+    candidate_limit = min(max(top_k * 10, 50), 300)
+    query_fields = ["docnm_kwd^200", "title_tks^100", "title_sm_tks^50", "content_ltks"]
+    groups = defaultdict(list)
+    for row in indexed:
+        groups[(row["tenant_id"], row.get("embd_id"))].append(row["id"])
+
+    candidates = {}
+    for (tenant_id, embd_id), dataset_ids in groups.items():
+        try:
+            embd_config = resolve_model_config(tenant_id, LLMType.EMBEDDING, embd_id)
+            embd_mdl = LLMBundle(tenant_id, embd_config)
+            ranks = await settings.retriever.retrieval(
+                keyword,
+                embd_mdl,
+                [tenant_id],
+                dataset_ids,
+                1,
+                candidate_limit,
+                similarity_threshold=0.05,
+                vector_similarity_weight=0.15,
+                top=candidate_limit,
+                aggs=False,
+                rerank_mdl=None,
+                highlight=False,
+                rank_feature={},
+                query_fields=query_fields,
+                filename_token_weight=20,
+            )
+            for chunk in ranks.get("chunks", []):
+                doc_id = chunk.get("document_id") or chunk.get("doc_id")
+                if doc_id:
+                    candidates[doc_id] = max(candidates.get(doc_id, float("-inf")), float(chunk.get("similarity", 0)))
+        except Exception as exc:
+            # A missing embedding configuration should not make filename lookup unusable.
+            logging.warning("Hybrid source-file retrieval failed; falling back to BM25: %s", exc)
+            result = await settings.retriever.search(
+                {
+                    "kb_ids": dataset_ids,
+                    "page": 1,
+                    "size": candidate_limit,
+                    "topk": candidate_limit,
+                    "question": keyword,
+                    "available_int": 1,
+                    "query_fields": query_fields,
+                },
+                [search.index_name(tenant_id)],
+                dataset_ids,
+                emb_mdl=None,
+                highlight=False,
+            )
+            for chunk_id in result.ids:
+                chunk = result.field.get(chunk_id) or {}
+                doc_id = chunk.get("doc_id")
+                if doc_id:
+                    candidates[doc_id] = max(candidates.get(doc_id, float("-inf")), float(chunk.get("_score", 0) or 0))
+    return candidates
+
+
+def _text_matches(value: str, keyword: str, mode: str) -> bool:
+    folded = (value or "").casefold()
+    terms = [keyword.casefold()] if mode == "phrase" else keyword.casefold().split()
+    return all(term in folded for term in terms)
 
 
 async def _description_ids(selected: list[dict], keyword: str, mode: str, metadata_service, thread_pool_exec) -> list[str]:
@@ -130,14 +209,23 @@ async def _description_ids(selected: list[dict], keyword: str, mode: str, metada
     return list(dict.fromkeys(matched))
 
 
-def _name_rank(name: str, keyword: str) -> int:
+def _name_rank(name: str, keyword: str, mode: str) -> int:
     lowered = (name or "").casefold()
     needle = keyword.casefold()
     if lowered == needle:
         return 0
-    if lowered.startswith(needle):
+    if mode == "phrase":
+        if lowered.startswith(needle):
+            return 1
+        if needle in lowered:
+            return 2
+        return 4
+    terms = needle.split()
+    if terms and all(term in lowered for term in terms):
         return 1
-    return 3
+    if any(term in lowered for term in terms):
+        return 3
+    return 4
 
 
 async def find_source_files(payload: dict, *, user_id: str) -> dict:
@@ -159,9 +247,18 @@ async def find_source_files(payload: dict, *, user_id: str) -> dict:
     if not selected:
         return result
     dataset_ids = [row["id"] for row in selected]
-    name_rows = await thread_pool_exec(
-        DocumentService.search_by_name, dataset_ids, options["keyword"], options["mode"], options["top_k"]
+    retrieval_scores = await _retrieve_filename_candidates(selected, options["keyword"], options["top_k"])
+    retrieval_ids = list(retrieval_scores)
+    retrieval_rows = await thread_pool_exec(
+        DocumentService.get_name_retrieval_documents, dataset_ids, retrieval_ids
+    ) if retrieval_ids else []
+    # Chunkless documents cannot appear in the full-text index, so query only
+    # that bounded subset in SQL and merge it with indexed candidates.
+    unparsed_rows = await thread_pool_exec(
+        DocumentService.search_by_name, dataset_ids, options["keyword"], options["mode"], options["top_k"],
+        unparsed_only=True,
     )
+    name_rows = list({row["id"]: row for row in [*retrieval_rows, *unparsed_rows]}.values())
     description_ids = await _description_ids(
         selected, options["keyword"], options["mode"], DocMetadataService, thread_pool_exec
     ) if options["scan_meta"] else []
@@ -170,13 +267,18 @@ async def find_source_files(payload: dict, *, user_id: str) -> dict:
     ) if description_ids else []
     by_id = {row["id"]: row for row in description_rows}
     by_id.update({row["id"]: row for row in name_rows})
-    name_ids = {row["id"] for row in name_rows}
+    retrieval_set = {row["id"] for row in retrieval_rows}
+    filename_set = {
+        row["id"] for row in name_rows
+        if _text_matches(row.get("name") or "", options["keyword"], options["mode"])
+    }
     description_set = {row["id"] for row in description_rows}
     rows = sorted(
         by_id.values(),
         key=lambda row: (
-            min(_name_rank(row["name"], options["keyword"]) if row["id"] in name_ids else 4,
+            min(_name_rank(row["name"], options["keyword"], options["mode"]) if row["id"] in filename_set else 4,
                 2 if row["id"] in description_set else 4),
+            -retrieval_scores.get(row["id"], 0),
             (row["name"] or "").casefold(), row["id"],
         ),
     )[:options["top_k"]]
@@ -204,7 +306,11 @@ async def find_source_files(payload: dict, *, user_id: str) -> dict:
         result["documents"].append({
             "file_name": row["name"],
             "metafield": metafield,
-            "matched_by": [source for source, ids in (("file_name", name_ids), ("description", description_set)) if doc_id in ids],
+            "matched_by": [source for source, ids in (
+                ("file_name", filename_set),
+                ("description", description_set),
+                ("retrieval", retrieval_set - filename_set),
+            ) if doc_id in ids],
         })
     result["count"] = len(result["documents"])
     return result

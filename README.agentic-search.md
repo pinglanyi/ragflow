@@ -57,8 +57,9 @@ DeepAgent 侧默认注册 `search/open/navigate/read/grep` 五个工具，保留
 
 `POST /api/v1/retrieval-doc-name` 是与 `POST /api/v1/retrieval` 同级的独立接口，
 **不属于** `/api/v1/agentic-search/tools/{tool_name}` 的七个工具。它使用相同的
-RAGFlow Bearer API key，检索文档表的**文件名**和文档级 `meta_fields` 描述，
-不调用 chunk 检索、embedding 或研究代理。
+RAGFlow Bearer API key，先通过已有 chunk 索引进行向量 + BM25 混合召回，并显著提高
+文件名/title 字段权重；可选地再把文档级 `meta_fields` 描述加入候选。它不会运行研究代理，
+返回单位始终是一份文件而不是一个 chunk。
 一份文件最多返回一次；即使文件还没有解析出 chunk，也可以按文件名找到。适合先定位
 文件，再由调用方使用 `metafield.datasetid` 和 `metafield.location` 生成 MinIO URL；
 这个 API 本身不生成 URL，也不返回文件正文。
@@ -66,7 +67,7 @@ RAGFlow Bearer API key，检索文档表的**文件名**和文档级 `meta_field
 | 请求字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `keyword` | string，必填 | — | 非空文件名或描述关键词，最多 255 字符；旧 `query` 仍兼容，两者不能同时传。 |
-| `mode` | `phrase` / `term` | `phrase` | `phrase` 匹配连续完整短语；`term` 要求同一文件名或描述包含 `keyword` 中所有空白分隔词项。 |
+| `mode` | `phrase` / `term` | `phrase` | 排序偏好。`phrase` 优先完整短语文件名；`term` 优先包含全部空白分隔词项的文件名。它们不会过滤掉向量/BM25 召回的语义候选。描述扫描和零 chunk 文件的 SQL 回退仍按该规则做字面匹配。 |
 | `scan_meta` | boolean | `false` | 是否把文档 `meta_fields` 描述作为召回源。默认只查文件名；设为 `true` 才扫描/过滤描述，大范围可能较慢。无论取值，命中文档仍返回其 `metafield`。 |
 | `top_k` | integer，1–30 | 5 | 最多返回多少份文件。`topkey` 是兼容别名，两者不能同时传。 |
 | `dataset_names` | string | `""` | 可选的逗号分隔知识库名称或 ID，允许混用；空值搜索当前 key 可访问的全部有效知识库。 |
@@ -75,11 +76,14 @@ RAGFlow Bearer API key，检索文档表的**文件名**和文档级 `meta_field
 可以在文档的 `meta_fields` 中写 `description`，也识别 `描述`、`file_description`；
 响应中将这些字段放在 `metafield` 字典里。
 例如文件名只有“产品说明.pdf”，而 `description` 为“E502 温度采集模块接线说明”，
-输入 `E502` 仍能召回该文件。候选顺序为文件名完全匹配、文件名前缀匹配、描述命中、
-文件名其他包含匹配；同一类按文件名和文档 ID 稳定排序。ES 使用文档 metadata
+输入 `E502` 仍能召回该文件。已有 chunk 的文件由向量 + BM25 召回，查询字段权重以
+`docnm_kwd` 为最高、title 次之、正文最低；本地重排还将文件名 token 权重提高。
+`phrase`/`term` 只提升明确的文件名匹配，未出现字面词但正文语义相关的文件仍可返回。
+零 chunk 文件无法进入 chunk 索引，因此仅对这部分数据执行数据库文件名字面匹配。
+ES 使用文档 metadata
 索引过滤描述；建议描述简洁（ES 默认动态 `.keyword` 映射只索引不超过 256 字符的完整值，
 更长的描述可能无法通过索引召回）。Infinity 对描述子串检索会回退扫描文档级 metadata，
-大范围搜索可能较慢。文件名和描述是两个独立召回源，不依赖文件解析后的 chunk。
+大范围搜索可能较慢。`scan_meta=false` 不执行这项描述扫描。
 知识库名称做精确匹配，重名、未知或无权访问的指定范围会报错。
 成功时 HTTP 外层仍是 `{"code":0,"data":{...}}`：
 
@@ -114,7 +118,9 @@ RAGFlow Bearer API key，检索文档表的**文件名**和文档级 `meta_field
 
 `metafield` 合并文档原有 `meta_fields`；`datasetid`、`docid`、`location` 及
 带下划线的兼容键来自 RAGFlow 文档记录，不能被用户自定义 metadata 覆盖。
-没有自定义 metadata 时仍返回这些基础字段。`matched_by` 标明文件名或描述的命中来源；
+没有自定义 metadata 时仍返回这些基础字段。`matched_by` 可为 `file_name`、`description`
+或 `retrieval`；`retrieval` 表示混合检索召回了文件，但文件名没有满足当前
+`phrase`/`term` 的字面偏好。
 零命中为 `code=0`、`documents=[]`、
 `count=0`。注意 `location` 是 RAGFlow 保存的存储位置，不能单独当作公开 URL。
 
