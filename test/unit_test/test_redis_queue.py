@@ -48,6 +48,17 @@ class RedisQueueTest(unittest.TestCase):
         self.assertEqual(redis.set.call_count, 4)
         self.assertEqual(namespace["sleep"].call_args_list, [unittest.mock.call(1), unittest.mock.call(2), unittest.mock.call(4)])
 
+    def test_submission_uses_dispatch_snapshot_returned_by_queueing(self):
+        service_tree = ast.parse((ROOT / "api/apps/services/multimodal_api_service.py").read_text(encoding="utf-8"))
+        submit = next(node for node in service_tree.body if isinstance(node, ast.FunctionDef) and node.name == "submit")
+        submit_code = ast.unparse(submit)
+        self.assertIn("current = DocumentService.run", submit_code)
+
+        document_tree = ast.parse((ROOT / "api/db/services/document_service.py").read_text(encoding="utf-8"))
+        document_class = next(node for node in document_tree.body if isinstance(node, ast.ClassDef) and node.name == "DocumentService")
+        run = next(node for node in document_class.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+        self.assertIn("return queue_tasks", ast.unparse(run))
+
 
 if __name__ == "__main__":
     unittest.main()

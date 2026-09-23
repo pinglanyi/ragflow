@@ -83,8 +83,9 @@ def submit(tenant_id, dataset_id, document_id, options):
         DocumentService.update_by_id(document_id, {"parser_config": config, "parser_id": parser_id, "run": "1", "progress": 0, "progress_msg": "", "chunk_num": 0, "token_num": 0})
         task_doc = doc.to_dict()
         task_doc.update(parser_config=config, parser_id=parser_id, _multimodal_job_id=job.id)
-        DocumentService.run(tenant_id, task_doc, {})
-        current = Jobs.refresh(job.id)
+        current = DocumentService.run(tenant_id, task_doc, {})
+        if current is None:
+            current = Jobs.refresh(job.id)
         if not current.dispatched:
             raise RuntimeError("Job dispatch did not complete")
         return Jobs.response(current)

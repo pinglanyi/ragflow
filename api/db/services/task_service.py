@@ -587,7 +587,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
         raise
 
     if doc.get("_multimodal_job_id"):
-        MultimodalJobService.mark_dispatched(doc["_multimodal_job_id"])
+        return MultimodalJobService.mark_dispatched(doc["_multimodal_job_id"])
 
 
 def reuse_prev_task_chunks(task: dict, prev_tasks: list[dict], chunking_config: dict):

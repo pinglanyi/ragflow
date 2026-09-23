@@ -1143,7 +1143,7 @@ class DocumentService(CommonService):
             queue_dataflow(tenant_id, flow_id=doc["pipeline_id"], task_id=get_uuid(), doc_id=doc["id"])
         else:
             bucket, name = File2DocumentService.get_storage_address(doc_id=doc["id"])
-            queue_tasks(doc, bucket, name, 0)
+            return queue_tasks(doc, bucket, name, 0)
 
 
 def queue_raptor_o_graphrag_tasks(sample_doc, ty, priority, fake_doc_id="", doc_ids=None):
