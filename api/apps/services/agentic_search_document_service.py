@@ -10,17 +10,22 @@ def validate_request(payload: dict) -> dict:
     """Normalize file-name search arguments and reject ambiguous aliases."""
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
-    unknown = set(payload) - {"query", "top_k", "topkey", "dataset_names", "dataset_ids"}
+    unknown = set(payload) - {"keyword", "query", "mode", "top_k", "topkey", "dataset_names", "dataset_ids"}
     if unknown:
         raise ValueError(f"unknown fields: {', '.join(sorted(unknown))}")
-    query = payload.get("query")
-    if not isinstance(query, str) or not query.strip() or len(query.strip()) > 255:
-        raise ValueError("query must be a nonempty file-name or description fragment of at most 255 characters")
+    if "keyword" in payload and "query" in payload:
+        raise ValueError("Specify keyword or legacy query, not both")
+    keyword = payload.get("keyword", payload.get("query"))
+    if not isinstance(keyword, str) or not keyword.strip() or len(keyword.strip()) > 255:
+        raise ValueError("keyword must be a nonempty file-name or description fragment of at most 255 characters")
+    mode = payload.get("mode", "phrase")
+    if mode not in ("phrase", "term"):
+        raise ValueError("mode must be phrase or term")
     if "top_k" in payload and "topkey" in payload:
         raise ValueError("Specify top_k or topkey, not both")
     top_k = payload.get("top_k", payload.get("topkey", 5))
-    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 20:
-        raise ValueError("top_k must be an integer between 1 and 20")
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 30:
+        raise ValueError("top_k must be an integer between 1 and 30")
     if "dataset_names" in payload and "dataset_ids" in payload:
         raise ValueError("Specify dataset_names or dataset_ids, not both")
     scope_key = "dataset_names" if "dataset_names" in payload else "dataset_ids"
@@ -28,7 +33,8 @@ def validate_request(payload: dict) -> dict:
     if not isinstance(scope, str):
         raise ValueError(f"{scope_key} must be a comma-separated string")
     return {
-        "query": query.strip(),
+        "keyword": keyword.strip(),
+        "mode": mode,
         "top_k": top_k,
         "dataset_refs": list(dict.fromkeys(item.strip() for item in scope.split(",") if item.strip())),
     }
@@ -73,36 +79,56 @@ async def _visible_datasets(user_id: str) -> list[dict]:
     return [{"id": row["id"], "name": row["name"], "tenant_id": row["tenant_id"]} for row in rows]
 
 
-async def _description_ids(selected: list[dict], query: str, metadata_service, thread_pool_exec) -> list[str]:
+async def _description_ids(selected: list[dict], keyword: str, mode: str, metadata_service, thread_pool_exec) -> list[str]:
     """Find document-level description matches without reading chunk content."""
     from common import settings
 
+    terms = [keyword.casefold()] if mode == "phrase" else keyword.casefold().split()
     groups = defaultdict(list)
     for dataset in selected:
         groups[dataset.get("tenant_id")].append(dataset["id"])
-    filters = [{"key": key, "op": "contains", "value": query} for key in DESCRIPTION_FIELDS]
     matched = []
     for kb_ids in groups.values():
-        # Infinity's JSON_CONTAINS tests exact values, not substrings. Scan its
-        # document metadata to preserve the API's contains semantics.
-        ids = None if settings.DOC_ENGINE_INFINITY else await thread_pool_exec(
-            metadata_service.filter_doc_ids_by_meta_pushdown, kb_ids, filters, "or", 10000
-        )
-        if ids is None:
-            # Backends without push-down still have a correct, slower path.
-            flattened = await thread_pool_exec(metadata_service.get_flatted_meta_by_kbs, kb_ids)
+        flattened = None
+
+        async def scan(fields):
+            nonlocal flattened
+            if flattened is None:
+                flattened = await thread_pool_exec(metadata_service.get_flatted_meta_by_kbs, kb_ids)
+            ids = []
+            for field in fields:
+                for value, doc_ids in (flattened.get(field) or {}).items():
+                    folded = str(value).casefold()
+                    if all(term in folded for term in terms):
+                        ids.extend(doc_ids)
+            return ids
+
+        if settings.DOC_ENGINE_INFINITY:
+            # Infinity's JSON_CONTAINS tests exact values, not substrings.
+            ids = await scan(DESCRIPTION_FIELDS)
+        elif mode == "phrase":
+            filters = [{"key": key, "op": "contains", "value": keyword} for key in DESCRIPTION_FIELDS]
+            ids = await thread_pool_exec(metadata_service.filter_doc_ids_by_meta_pushdown, kb_ids, filters, "or", 10000)
+            if ids is None:
+                ids = await scan(DESCRIPTION_FIELDS)
+        else:
+            # Each description field must itself contain every whitespace-delimited term.
             ids = []
             for field in DESCRIPTION_FIELDS:
-                for value, doc_ids in (flattened.get(field) or {}).items():
-                    if query.casefold() in str(value).casefold():
-                        ids.extend(doc_ids)
+                filters = [{"key": field, "op": "contains", "value": term} for term in terms]
+                field_ids = await thread_pool_exec(
+                    metadata_service.filter_doc_ids_by_meta_pushdown, kb_ids, filters, "and", 10000
+                )
+                if field_ids is None:
+                    field_ids = await scan((field,))
+                ids.extend(field_ids)
         matched.extend(ids)
     return list(dict.fromkeys(matched))
 
 
-def _name_rank(name: str, query: str) -> int:
+def _name_rank(name: str, keyword: str) -> int:
     lowered = (name or "").casefold()
-    needle = query.casefold()
+    needle = keyword.casefold()
     if lowered == needle:
         return 0
     if lowered.startswith(needle):
@@ -110,7 +136,7 @@ def _name_rank(name: str, query: str) -> int:
     return 3
 
 
-async def retrieve_documents_by_name(payload: dict, *, user_id: str) -> dict:
+async def find_source_files(payload: dict, *, user_id: str) -> dict:
     """Search one document record per file and return trusted storage coordinates."""
     from api.db.services.doc_metadata_service import DocMetadataService
     from api.db.services.document_service import DocumentService
@@ -119,7 +145,8 @@ async def retrieve_documents_by_name(payload: dict, *, user_id: str) -> dict:
     options = validate_request(payload)
     selected = resolve_scope(options["dataset_refs"], await _visible_datasets(user_id))
     result = {
-        "query": options["query"],
+        "keyword": options["keyword"],
+        "mode": options["mode"],
         "documents": [],
         "count": 0,
         "searched_dataset_count": len(selected),
@@ -127,8 +154,12 @@ async def retrieve_documents_by_name(payload: dict, *, user_id: str) -> dict:
     if not selected:
         return result
     dataset_ids = [row["id"] for row in selected]
-    name_rows = await thread_pool_exec(DocumentService.search_by_name, dataset_ids, options["query"], options["top_k"])
-    description_ids = await _description_ids(selected, options["query"], DocMetadataService, thread_pool_exec)
+    name_rows = await thread_pool_exec(
+        DocumentService.search_by_name, dataset_ids, options["keyword"], options["mode"], options["top_k"]
+    )
+    description_ids = await _description_ids(
+        selected, options["keyword"], options["mode"], DocMetadataService, thread_pool_exec
+    )
     description_rows = await thread_pool_exec(
         DocumentService.get_name_retrieval_documents, dataset_ids, description_ids
     ) if description_ids else []
@@ -139,7 +170,7 @@ async def retrieve_documents_by_name(payload: dict, *, user_id: str) -> dict:
     rows = sorted(
         by_id.values(),
         key=lambda row: (
-            min(_name_rank(row["name"], options["query"]) if row["id"] in name_ids else 4,
+            min(_name_rank(row["name"], options["keyword"]) if row["id"] in name_ids else 4,
                 2 if row["id"] in description_set else 4),
             (row["name"] or "").casefold(), row["id"],
         ),
@@ -172,3 +203,7 @@ async def retrieve_documents_by_name(payload: dict, *, user_id: str) -> dict:
         })
     result["count"] = len(result["documents"])
     return result
+
+
+# Compatibility for deployments that imported the original internal name.
+retrieve_documents_by_name = find_source_files

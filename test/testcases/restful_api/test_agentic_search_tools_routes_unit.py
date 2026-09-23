@@ -68,12 +68,12 @@ def test_document_name_route_uses_authenticated_user(monkeypatch):
         calls.append((payload, user_id))
         return {"documents": [], "count": 0}
 
-    documents.retrieve_documents_by_name = retrieve
+    documents.find_source_files = retrieve
     monkeypatch.setitem(sys.modules, documents.__name__, documents)
     utils = ModuleType("api.utils.api_utils")
 
     async def request_json():
-        return {"query": "E502"}
+        return {"keyword": "E502", "mode": "phrase"}
 
     utils.get_request_json = request_json
     utils.get_json_result = lambda **kwargs: kwargs
@@ -90,6 +90,6 @@ def test_document_name_route_uses_authenticated_user(monkeypatch):
     spec.loader.exec_module(module)
     response = asyncio.run(inspect.unwrap(module.retrieval_doc_name)())
     assert ("/retrieval-doc-name", {"methods": ["POST"]}) in routes
-    assert calls == [({"query": "E502"}, "user-1")]
+    assert calls == [({"keyword": "E502", "mode": "phrase"}, "user-1")]
     assert response["data"]["documents"] == []
     assert response["data"]["request_id"]

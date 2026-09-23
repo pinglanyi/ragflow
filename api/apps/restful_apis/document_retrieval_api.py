@@ -4,7 +4,7 @@ import logging
 import uuid
 
 from api.apps import current_user, login_required
-from api.apps.services.agentic_search_document_service import retrieve_documents_by_name
+from api.apps.services.agentic_search_document_service import find_source_files
 from api.utils.api_utils import get_data_error_result, get_json_result, get_request_json
 from common.constants import RetCode
 
@@ -16,7 +16,7 @@ async def retrieval_doc_name():
     request_id = str(uuid.uuid4())
     try:
         payload = await get_request_json()
-        data = await retrieve_documents_by_name(payload, user_id=current_user.id)
+        data = await find_source_files(payload, user_id=current_user.id)
         return get_json_result(data={**data, "request_id": request_id})
     except (ValueError, PermissionError) as error:
         return get_data_error_result(message=str(error))

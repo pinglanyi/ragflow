@@ -65,8 +65,9 @@ RAGFlow Bearer API key，检索文档表的**文件名**和文档级 `meta_field
 
 | 请求字段 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `query` | string，必填 | — | 非空文件名或描述片段，最多 255 字符；不区分大小写的包含匹配。 |
-| `top_k` | integer，1–20 | 5 | 最多返回多少份文件。`topkey` 是兼容别名，两者不能同时传。 |
+| `keyword` | string，必填 | — | 非空文件名或描述关键词，最多 255 字符；旧 `query` 仍兼容，两者不能同时传。 |
+| `mode` | `phrase` / `term` | `phrase` | `phrase` 匹配连续完整短语；`term` 要求同一文件名或描述包含 `keyword` 中所有空白分隔词项。 |
+| `top_k` | integer，1–30 | 5 | 最多返回多少份文件。`topkey` 是兼容别名，两者不能同时传。 |
 | `dataset_names` | string | `""` | 可选的逗号分隔知识库名称或 ID，允许混用；空值搜索当前 key 可访问的全部有效知识库。 |
 | `dataset_ids` | string | `""` | 旧字段兼容；不能和 `dataset_names` 同时传。 |
 
@@ -85,7 +86,8 @@ RAGFlow Bearer API key，检索文档表的**文件名**和文档级 `meta_field
 {
   "code": 0,
   "data": {
-    "query": "E502",
+    "keyword": "E502 接线",
+    "mode": "term",
     "count": 1,
     "searched_dataset_count": 1,
     "documents": [
@@ -118,12 +120,12 @@ RAGFlow Bearer API key，检索文档表的**文件名**和文档级 `meta_field
 export RAGFLOW_API_KEY='<RAGFlow API key>'
 curl -sS http://127.0.0.1:9380/api/v1/retrieval-doc-name \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"query":"E502","topkey":5,"dataset_names":"产品库"}' | jq .
+  -d '{"keyword":"E502","mode":"phrase","top_k":5,"dataset_names":"产品库"}' | jq .
 
 # 仅通过 meta_fields.description 命中：文件名可以完全不含该查询词
 curl -sS http://127.0.0.1:9380/api/v1/retrieval-doc-name \
   -H "Authorization: Bearer $RAGFLOW_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"query":"温度采集模块","top_k":5,"dataset_names":"产品库"}' | jq .
+  -d '{"keyword":"温度 采集","mode":"term","top_k":5,"dataset_names":"产品库"}' | jq .
 ```
 
 实现位于 `chunk-mm` 分支，开发基线为 `9db1d92`。这是对 RAGFlow 原生 Agentic RAG harness 的增强：采用了检索与文档阅读交替进行的方案，没有引入 Mistral SDK、Mistral API、Vespa 或新的服务依赖。与 Mistral Agentic Search 的联系是设计思路，不是官方适配器或功能完全等价的实现。

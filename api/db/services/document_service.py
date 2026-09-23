@@ -44,7 +44,7 @@ class DocumentService(CommonService):
 
     @classmethod
     @DB.connection_context()
-    def search_by_name(cls, kb_ids: list[str], query: str, top_k: int) -> list[dict]:
+    def search_by_name(cls, kb_ids: list[str], keyword: str, mode: str, top_k: int) -> list[dict]:
         """Return globally ranked file-name matches from authorized datasets.
 
         The caller must supply already authorized knowledge-base IDs. This
@@ -54,17 +54,19 @@ class DocumentService(CommonService):
         if not kb_ids or top_k <= 0:
             return []
         lower_name = fn.LOWER(cls.model.name)
-        needle = query.lower()
+        needle = keyword.lower()
+        terms = [needle] if mode == "phrase" else needle.split()
         match_rank = Case(None, [
             (lower_name == needle, 0),
             (lower_name.startswith(needle), 1),
         ], 2)
+        name_conditions = [lower_name.contains(term) for term in terms]
         rows = (
             cls.model.select(cls.model.id, cls.model.kb_id, cls.model.name, cls.model.location)
             .where(
                 cls.model.kb_id.in_(kb_ids),
                 cls.model.status == StatusEnum.VALID.value,
-                lower_name.contains(needle),
+                *name_conditions,
             )
             .order_by(match_rank.asc(), lower_name.asc(), cls.model.id.asc())
             .limit(top_k)

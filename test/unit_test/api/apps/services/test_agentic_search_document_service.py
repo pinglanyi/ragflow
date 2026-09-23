@@ -16,14 +16,18 @@ SPEC.loader.exec_module(MODULE)
 
 
 def test_request_aliases_and_limits():
-    assert MODULE.validate_request({"query": " E502 ", "topkey": 3, "dataset_names": "产品库,kb-id,产品库"}) == {
-        "query": "E502", "top_k": 3, "dataset_refs": ["产品库", "kb-id"]
+    assert MODULE.validate_request({"keyword": " E502 接线 ", "mode": "term", "top_k": 30, "dataset_names": "产品库,kb-id,产品库"}) == {
+        "keyword": "E502 接线", "mode": "term", "top_k": 30, "dataset_refs": ["产品库", "kb-id"]
     }
-    assert MODULE.validate_request({"query": "E502"}) == {"query": "E502", "top_k": 5, "dataset_refs": []}
+    assert MODULE.validate_request({"keyword": "E502"}) == {
+        "keyword": "E502", "mode": "phrase", "top_k": 5, "dataset_refs": []
+    }
+    assert MODULE.validate_request({"query": "旧参数", "topkey": 2})["keyword"] == "旧参数"
     for payload in (
-        {}, {"query": " "}, {"query": "a", "top_k": 0}, {"query": "a", "topkey": 21},
-        {"query": "a", "topkey": 2, "top_k": 3}, {"query": "a", "dataset_names": ["产品库"]},
-        {"query": "a", "dataset_names": "产品库", "dataset_ids": "kb"}, {"query": "a", "unknown": True},
+        {}, {"keyword": " "}, {"keyword": "a", "mode": "regex"}, {"keyword": "a", "top_k": 0},
+        {"keyword": "a", "top_k": 31}, {"keyword": "a", "topkey": 2, "top_k": 3},
+        {"keyword": "a", "query": "b"}, {"keyword": "a", "dataset_names": ["产品库"]},
+        {"keyword": "a", "dataset_names": "产品库", "dataset_ids": "kb"}, {"keyword": "a", "unknown": True},
     ):
         with pytest.raises(ValueError):
             MODULE.validate_request(payload)
@@ -51,8 +55,8 @@ def test_retrieval_merges_document_metadata_without_chunk_lookup(monkeypatch):
     async def thread_pool_exec(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    def search(ids, query, top_k):
-        calls.append((ids, query, top_k))
+    def search(ids, keyword, mode, top_k):
+        calls.append((ids, keyword, mode, top_k))
         return docs
 
     def metadata(ids, kb_id):
@@ -72,8 +76,8 @@ def test_retrieval_merges_document_metadata_without_chunk_lookup(monkeypatch):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
 
-    result = asyncio.run(MODULE.retrieve_documents_by_name({"query": "E502", "top_k": 2}, user_id="user"))
-    assert calls == [(["kb1", "kb2"], "E502", 2)]
+    result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "top_k": 2}, user_id="user"))
+    assert calls == [(["kb1", "kb2"], "E502", "phrase", 2)]
     assert result["count"] == 2
     assert result["searched_dataset_count"] == 2
     assert result["documents"][0] == {"file_name": "E502手册.pdf", "matched_by": ["file_name"], "metafield": {
@@ -105,7 +109,7 @@ def test_retrieval_rejects_a_document_outside_authorized_scope(monkeypatch):
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
 
     with pytest.raises(ValueError, match="authorized scope"):
-        asyncio.run(MODULE.retrieve_documents_by_name({"query": "E502"}, user_id="user"))
+        asyncio.run(MODULE.find_source_files({"keyword": "E502"}, user_id="user"))
 
 
 def test_description_only_metadata_finds_file_without_name_or_chunks(monkeypatch):
@@ -133,7 +137,7 @@ def test_description_only_metadata_finds_file_without_name_or_chunks(monkeypatch
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
 
-    result = asyncio.run(MODULE.retrieve_documents_by_name({"query": "E502"}, user_id="user"))
+    result = asyncio.run(MODULE.find_source_files({"keyword": "E502"}, user_id="user"))
     assert result["count"] == 1
     assert result["documents"][0]["file_name"] == "产品说明.pdf"
     assert result["documents"][0]["matched_by"] == ["description"]
@@ -171,7 +175,7 @@ def test_file_name_and_description_candidates_are_deduplicated_and_ranked(monkey
         monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(MODULE, "_visible_datasets", visible)
 
-    result = asyncio.run(MODULE.retrieve_documents_by_name({"query": "E502", "top_k": 4}, user_id="user"))
+    result = asyncio.run(MODULE.find_source_files({"keyword": "E502", "top_k": 4}, user_id="user"))
     assert [row["metafield"]["docid"] for row in result["documents"]] == [
         "exact", "prefix", "description", "both",
     ]
@@ -188,7 +192,7 @@ def test_description_lookup_falls_back_when_pushdown_unavailable(monkeypatch):
     async def thread_pool_exec(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    result = asyncio.run(MODULE._description_ids([{"id": "kb1", "tenant_id": "tenant"}], "E502", service, thread_pool_exec))
+    result = asyncio.run(MODULE._description_ids([{"id": "kb1", "tenant_id": "tenant"}], "E502", "phrase", service, thread_pool_exec))
     assert result == ["doc1"]
 
 
@@ -202,4 +206,48 @@ def test_infinity_description_lookup_scans_metadata_values(monkeypatch):
     async def thread_pool_exec(fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
-    assert asyncio.run(MODULE._description_ids([{"id": "kb1", "tenant_id": "tenant"}], "温度", service, thread_pool_exec)) == ["doc1"]
+    assert asyncio.run(MODULE._description_ids([{"id": "kb1", "tenant_id": "tenant"}], "温度", "phrase", service, thread_pool_exec)) == ["doc1"]
+
+
+def test_term_description_requires_all_whitespace_delimited_terms(monkeypatch):
+    monkeypatch.setitem(sys.modules, "common.settings", SimpleNamespace(DOC_ENGINE_INFINITY=True))
+    service = SimpleNamespace(get_flatted_meta_by_kbs=lambda ids: {
+        "description": {
+            "E502 温度采集模块接线说明": ["all"],
+            "E502 通讯模块": ["first"],
+            "温度采集模块": ["second"],
+        }
+    })
+
+    async def thread_pool_exec(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    result = asyncio.run(MODULE._description_ids(
+        [{"id": "kb1", "tenant_id": "tenant"}], "E502 温度", "term", service, thread_pool_exec
+    ))
+    assert result == ["all"]
+
+
+def test_term_description_pushdown_ands_terms_within_each_description_field(monkeypatch):
+    monkeypatch.setitem(sys.modules, "common.settings", SimpleNamespace(DOC_ENGINE_INFINITY=False))
+    calls = []
+
+    def pushdown(kb_ids, filters, logic, limit):
+        calls.append((filters, logic))
+        return ["doc1"] if filters[0]["key"] == "description" else []
+
+    service = SimpleNamespace(filter_doc_ids_by_meta_pushdown=pushdown)
+
+    async def thread_pool_exec(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    result = asyncio.run(MODULE._description_ids(
+        [{"id": "kb1", "tenant_id": "tenant"}], "E502 接线", "term", service, thread_pool_exec
+    ))
+    assert result == ["doc1"]
+    assert len(calls) == 3
+    assert all(logic == "and" for _, logic in calls)
+    assert calls[0][0] == [
+        {"key": "description", "op": "contains", "value": "e502"},
+        {"key": "description", "op": "contains", "value": "接线"},
+    ]
