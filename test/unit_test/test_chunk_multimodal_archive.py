@@ -23,6 +23,28 @@ def response(content="# Motor\n\n| Model | Power |\n| --- | --- |\n| A | 10 kW |
 
 
 class ArchiveTest(unittest.TestCase):
+    def test_connectivity_probe_uses_provider_acceptable_image_dimensions(self):
+        import base64
+        import io
+
+        from PIL import Image
+
+        source = Path(__file__).resolve().parents[2] / "api/apps/services/multimodal_api_service.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "test_model"
+        )
+        data_url = next(
+            node.value for node in ast.walk(function)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value.startswith("data:image/png;base64,")
+        )
+        image = Image.open(io.BytesIO(base64.b64decode(data_url.split(",", 1)[1])))
+        self.assertGreaterEqual(image.width, 64)
+        self.assertGreaterEqual(image.height, 64)
+
     def test_picture_direct_mode_skips_ocr_and_defers_model_call(self):
         import io
         import re
