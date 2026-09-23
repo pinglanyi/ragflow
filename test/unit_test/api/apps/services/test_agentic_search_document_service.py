@@ -170,6 +170,41 @@ def test_semantic_retrieval_candidate_survives_phrase_mode_without_literal_name_
     assert result["documents"][0]["matched_by"] == ["retrieval"]
 
 
+def test_term_mode_ranks_partial_filename_match_above_pure_semantic_candidate(monkeypatch):
+    async def visible(user_id):
+        return [{"id": "kb1", "name": "产品库", "tenant_id": "tenant", "embd_id": "embedding", "chunk_num": 2}]
+
+    async def thread_pool_exec(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    docs = {
+        "semantic": {"id": "semantic", "kb_id": "kb1", "name": "系统方案.pdf", "location": "system.pdf"},
+        "partial": {"id": "partial", "kb_id": "kb1", "name": "E502模块规格书.pdf", "location": "E502.pdf"},
+    }
+    document_module = ModuleType("api.db.services.document_service")
+    document_module.DocumentService = SimpleNamespace(
+        search_by_name=lambda *args, **kwargs: [],
+        get_name_retrieval_documents=lambda kb_ids, doc_ids: [docs[doc_id] for doc_id in doc_ids],
+    )
+    metadata_module = ModuleType("api.db.services.doc_metadata_service")
+    metadata_module.DocMetadataService = SimpleNamespace(get_metadata_for_documents=lambda *args: {})
+    misc_module = ModuleType("common.misc_utils")
+    misc_module.thread_pool_exec = thread_pool_exec
+    for module in (document_module, metadata_module, misc_module):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(MODULE, "_visible_datasets", visible)
+    monkeypatch.setattr(
+        MODULE, "_retrieve_filename_candidates", lambda *args: _async_value({"semantic": 0.99, "partial": 0.5})
+    )
+
+    result = asyncio.run(MODULE.find_source_files({
+        "keyword": "E502 温度采集", "mode": "term", "top_k": 2,
+    }, user_id="user"))
+
+    assert [row["metafield"]["docid"] for row in result["documents"]] == ["partial", "semantic"]
+    assert result["documents"][0]["matched_by"] == ["retrieval"]
+
+
 def test_retrieval_rejects_a_document_outside_authorized_scope(monkeypatch):
     async def visible(user_id):
         return [{"id": "kb1", "name": "产品库"}]

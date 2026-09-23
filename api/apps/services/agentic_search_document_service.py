@@ -276,7 +276,7 @@ async def find_source_files(payload: dict, *, user_id: str) -> dict:
     rows = sorted(
         by_id.values(),
         key=lambda row: (
-            min(_name_rank(row["name"], options["keyword"], options["mode"]) if row["id"] in filename_set else 4,
+            min(_name_rank(row["name"], options["keyword"], options["mode"]),
                 2 if row["id"] in description_set else 4),
             -retrieval_scores.get(row["id"], 0),
             (row["name"] or "").casefold(), row["id"],
