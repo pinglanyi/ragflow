@@ -188,11 +188,11 @@ async def _accessible_catalog(user_id: str) -> list[dict]:
 
 
 async def _search_scope(user_id: str, query: str, dataset_ids: list[str]) -> tuple[list[str], str, list[dict]]:
-    """Resolve visible IDs or exact names, or run description-based routing."""
+    """Resolve visible IDs/names; an omitted scope means every visible parsed dataset."""
+    catalog = await _accessible_catalog(user_id)
     if dataset_ids:
         from api.apps.services.agentic_search_api_service import validate_explicit_dataset_scope
 
-        catalog = await _accessible_catalog(user_id)
         visible_ids = {row["id"] for row in catalog}
         by_name = {}
         for row in catalog:
@@ -212,19 +212,24 @@ async def _search_scope(user_id: str, query: str, dataset_ids: list[str]) -> tup
         selected = await validate_explicit_dataset_scope(dataset_ids=resolved, user_id=user_id)
         return resolved, "manual", selected
 
-    from api.apps.services.agentic_search_api_service import select_datasets
-    from api.db.services.user_service import TenantService
-    from api.db.joint_services.tenant_model_service import resolve_model_config
-    from common.constants import LLMType
-    from common.misc_utils import thread_pool_exec
+    selected = [
+        {"id": row["id"], "name": row["name"], "reason": "", "confidence": None}
+        for row in catalog
+    ]
+    return [row["id"] for row in catalog], "all", selected
 
-    catalog = await _accessible_catalog(user_id)
-    found, tenant = await thread_pool_exec(TenantService.get_by_id, user_id)
-    if not found or not tenant or not tenant.llm_id:
-        raise ValueError("No default chat model configured for automatic dataset selection")
-    model_config = await thread_pool_exec(resolve_model_config, tenant_id=user_id, model_type=LLMType.CHAT, model_ref=tenant.llm_id)
-    selected = await select_datasets(tenant_id=user_id, query=query, datasets=catalog, model_config=model_config)
-    return [row["id"] for row in selected], "auto", selected
+
+async def _search_embedding_groups(user_id: str, dataset_ids: list[str]) -> list[list[str]]:
+    """Partition an all-dataset search so each vector call uses one embedding model."""
+    catalog = {row["id"]: row for row in await _accessible_catalog(user_id)}
+    groups = {}
+    for dataset_id in dataset_ids:
+        row = catalog.get(dataset_id)
+        if row is None:
+            raise PermissionError("Dataset not found or not authorized")
+        embedding_group = (row.get("embd_id") or "").rsplit("@", 2)[0]
+        groups.setdefault(embedding_group, []).append(dataset_id)
+    return list(groups.values())
 
 
 async def _authorized_tools(user_id: str, dataset_ids: list[str], *, embedding: bool = False):
@@ -305,16 +310,31 @@ async def _search(user_id: str, options: dict) -> dict:
     from rag.advanced_rag.harness.tools.search import hybrid_search
 
     ids, mode, selected = await _search_scope(user_id, options["query"], options["dataset_ids"])
-    tools = await _authorized_tools(user_id, ids, embedding=True)
-    result = await hybrid_search(
-        tools, options["query"], top_n=options["top_k"], exclude_ids=options["exclude_ids"]
-    )
-    if result.get("error"):
-        raise ValueError(result["error"])
-    chunks = result.get("chunks") or []
+    groups = await _search_embedding_groups(user_id, ids)
+    chunks = []
+    group_metadata = []
+    tools_by_source = {}
+    for group_ids in groups:
+        tools = await _authorized_tools(user_id, group_ids, embedding=True)
+        result = await hybrid_search(
+            tools, options["query"], top_n=options["top_k"], exclude_ids=options["exclude_ids"]
+        )
+        if result.get("error"):
+            raise ValueError(result["error"])
+        group_chunks = result.get("chunks") or []
+        chunks.extend(group_chunks)
+        group_metadata.append({
+            "dataset_ids": group_ids,
+            "search_metadata": result.get("search_metadata") or {},
+        })
+        for source_id in {chunk.get("doc_id") for chunk in group_chunks if chunk.get("doc_id")}:
+            tools_by_source[source_id] = tools
+    chunks.sort(key=lambda chunk: float(chunk.get("similarity") or 0), reverse=True)
+    chunks = chunks[:options["top_k"]]
     orders = {}
     for source_id in {chunk.get("doc_id") for chunk in chunks if chunk.get("doc_id")}:
         try:
+            tools = tools_by_source[source_id]
             orders[source_id] = {
                 chunk["chunk_id"]: chunk["chunk_order"] for chunk in await _ordered_document(tools, source_id)
             }
@@ -327,8 +347,11 @@ async def _search(user_id: str, options: dict) -> dict:
         chunk_id = item.get("chunk_id") or item.get("id")
         item["chunk_order"] = orders.get(item.get("doc_id"), {}).get(chunk_id)
         normalized.append(normalize_chunk(item))
+    search_metadata = group_metadata[0]["search_metadata"] if len(group_metadata) == 1 else {
+        "embedding_group_count": len(group_metadata), "groups": group_metadata,
+    }
     return {"chunks": normalized, "selected_datasets": selected,
-            "dataset_selection_mode": mode, "search_metadata": result.get("search_metadata") or {},
+            "dataset_selection_mode": mode, "search_metadata": search_metadata,
             "coordinate": "visible_chunk_ordinal"}
 
 

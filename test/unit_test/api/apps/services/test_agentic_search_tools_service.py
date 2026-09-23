@@ -57,6 +57,26 @@ def test_search_resolves_visible_names_and_ids_without_scope_widening(monkeypatc
         asyncio.run(MODULE._search_scope("user", "E502", ["不存在的库"]))
 
 
+def test_search_without_scope_uses_all_accessible_parsed_datasets(monkeypatch):
+    catalog = [
+        {"id": "kb-product", "name": "产品库", "description": "产品资料", "embd_id": "embed"},
+        {"id": "kb-defect", "name": "缺陷库", "description": "缺陷案例", "embd_id": "embed"},
+    ]
+
+    async def accessible(user_id):
+        return catalog
+
+    monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
+    ids, mode, selected = asyncio.run(MODULE._search_scope("user", "什么是破模", []))
+
+    assert ids == ["kb-product", "kb-defect"]
+    assert mode == "all"
+    assert selected == [
+        {"id": "kb-product", "name": "产品库", "reason": "", "confidence": None},
+        {"id": "kb-defect", "name": "缺陷库", "reason": "", "confidence": None},
+    ]
+
+
 def test_search_rejects_ambiguous_dataset_name(monkeypatch):
     async def accessible(user_id):
         return [{"id": "one", "name": "同名"}, {"id": "two", "name": "同名"}]
@@ -176,10 +196,14 @@ def test_search_forwards_exclusions_and_preserves_chunk_order(monkeypatch):
     async def tools(user_id, dataset_ids, *, embedding=False):
         return SimpleNamespace()
 
+    async def groups(user_id, dataset_ids):
+        return [dataset_ids]
+
     async def ordered(tools, source_id):
         return [{"chunk_id": "ck-1", "chunk_order": 3}]
 
     monkeypatch.setattr(MODULE, "_search_scope", scope)
+    monkeypatch.setattr(MODULE, "_search_embedding_groups", groups)
     monkeypatch.setattr(MODULE, "_authorized_tools", tools)
     monkeypatch.setattr(MODULE, "_ordered_document", ordered)
     result = asyncio.run(MODULE.execute_tool("search", {
@@ -188,6 +212,55 @@ def test_search_forwards_exclusions_and_preserves_chunk_order(monkeypatch):
     assert calls[0][1]["exclude_ids"] == ["seen"]
     assert result["chunks"][0]["start_offset"] == 3
     assert result["selected_datasets"] == [{"id": "kb"}]
+
+
+def test_search_all_mode_merges_results_across_embedding_groups(monkeypatch):
+    calls = []
+    search_module = ModuleType("rag.advanced_rag.harness.tools.search")
+
+    async def hybrid_search(tools, query, **kwargs):
+        dataset_id = tools.dataset_ids[0]
+        calls.append(dataset_id)
+        score = 0.9 if dataset_id == "kb-b" else 0.6
+        return {
+            "chunks": [{
+                "chunk_id": f"chunk-{dataset_id}", "doc_id": f"doc-{dataset_id}", "kb_id": dataset_id,
+                "content_with_weight": dataset_id, "similarity": score,
+            }],
+            "search_metadata": {"dataset": dataset_id},
+        }
+
+    search_module.hybrid_search = hybrid_search
+    monkeypatch.setitem(sys.modules, "rag.advanced_rag.harness.tools.search", search_module)
+
+    async def scope(user_id, query, dataset_ids):
+        return ["kb-a", "kb-b"], "all", [{"id": "kb-a"}, {"id": "kb-b"}]
+
+    async def accessible(user_id):
+        return [
+            {"id": "kb-a", "name": "A", "embd_id": "embed-a@provider"},
+            {"id": "kb-b", "name": "B", "embd_id": "embed-b@provider"},
+        ]
+
+    async def tools(user_id, dataset_ids, *, embedding=False):
+        return SimpleNamespace(dataset_ids=dataset_ids)
+
+    async def ordered(tools, source_id):
+        return [{"chunk_id": f"chunk-{tools.dataset_ids[0]}", "chunk_order": 0}]
+
+    monkeypatch.setattr(MODULE, "_search_scope", scope)
+    monkeypatch.setattr(MODULE, "_accessible_catalog", accessible)
+    monkeypatch.setattr(MODULE, "_authorized_tools", tools)
+    monkeypatch.setattr(MODULE, "_ordered_document", ordered)
+
+    result = asyncio.run(MODULE._search("user", {
+        "query": "破模", "top_k": 2, "exclude_ids": [], "dataset_ids": [],
+    }))
+
+    assert calls == ["kb-a", "kb-b"]
+    assert [chunk["metadata"]["dataset_id"] for chunk in result["chunks"]] == ["kb-b", "kb-a"]
+    assert result["dataset_selection_mode"] == "all"
+    assert result["search_metadata"]["embedding_group_count"] == 2
 
 
 def test_execute_write_tool_denied_before_side_effects(monkeypatch):
