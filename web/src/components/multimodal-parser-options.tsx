@@ -7,6 +7,10 @@ import { TreeSelect } from './tree-select';
 import { Input } from './ui/input';
 import { Switch } from './ui/switch';
 import { Textarea } from './ui/textarea';
+import {
+  DEFAULT_MULTIMODAL_PROMPT,
+  DEFAULT_MULTIMODAL_ROUTER_PROMPT,
+} from './multimodal-parser-defaults';
 
 export const multimodalParserSchema = z.object({
   enabled: z.boolean().optional(),
@@ -47,11 +51,11 @@ export function MultimodalParserOptions({ ownerTenantId, picture = false }: { ow
           {(field) => <TreeSelect {...field} data={buildModelTree(models ?? [], ['vision'])} showSearch defaultExpandAll />}
         </RAGFlowFormItem>
         <RAGFlowFormItem name="parser_config.multimodal.prompt" label="解析提示词">
-          {(field) => <Textarea {...field} value={field.value ?? ''} rows={7} placeholder="留空使用内置工业文档提示词：忠实 OCR、合并值逐行逐列补齐、嵌套表摊平、图片详细描述、直接输出 Markdown。" />}
+          {(field) => <Textarea {...field} value={field.value ?? DEFAULT_MULTIMODAL_PROMPT} rows={12} placeholder="默认规则会忠实 OCR、摊平复杂表格并描述图片；可按知识库覆盖。" />}
         </RAGFlowFormItem>
         {mode === 'smart' && <>
           <RAGFlowFormItem name="parser_config.multimodal.router_prompt" label="智能路由提示词">
-            {(field) => <Textarea {...field} value={field.value ?? ''} rows={4} placeholder="留空使用内置规则：纯文本保留基础结果，表格、图片、复杂版式或 OCR 不足时进入多模态。" />}
+            {(field) => <Textarea {...field} value={field.value ?? DEFAULT_MULTIMODAL_ROUTER_PROMPT} rows={7} placeholder="默认规则：纯文本保留 OCR；其余内容进入多模态解析。" />}
           </RAGFlowFormItem>
           <RAGFlowFormItem name="parser_config.multimodal.router_max_tokens" label="路由最大输出 Token">
             {(field) => <Input {...field} value={field.value ?? 64} type="number" min={1} max={1024} />}

@@ -72,6 +72,7 @@ import signal
 import exceptiongroup
 import faulthandler
 import numpy as np
+from pathlib import Path
 from peewee import DoesNotExist
 from common.constants import LLMType, ParserType, PipelineTaskType
 from api.db.services.document_service import DocumentService
@@ -351,13 +352,22 @@ async def build_chunks(task, progress_callback):
                 parser_config=parser_config_for_chunk,
                 tenant_id=task["tenant_id"],
             )
+        if task.get("parser_id", "").lower() == "table" and multimodal.get("enabled") and not cks:
+            raise ValueError("Table parser produced no chunks")
         logging.info("Chunking({}) {}/{} done".format(timer() - st, task["location"], task["name"]))
     except TaskCanceledException:
         raise
     except Exception as e:
-        progress_callback(-1, "Internal server error while chunking: %s" % str(e).replace("'", ""))
-        logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
-        raise
+        if task.get("parser_id", "").lower() == "table" and multimodal.get("enabled") and Path(task["name"]).suffix.lower() in {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}:
+            from rag.svr.multimodal_source_renderer import spreadsheet_pdf_fallback_chunks
+
+            logging.exception("Table parsing failed; falling back to spreadsheet PDF rendering")
+            progress_callback(msg="Table parsing failed; converting the workbook to PDF for multimodal recovery.")
+            cks = await thread_pool_exec(spreadsheet_pdf_fallback_chunks, task["name"], binary, task.get("language") or "Chinese")
+        else:
+            progress_callback(-1, "Internal server error while chunking: %s" % str(e).replace("'", ""))
+            logging.exception("Chunking {}/{} got exception".format(task["location"], task["name"]))
+            raise
 
     if multimodal.get("enabled"):
         cks = await thread_pool_exec(

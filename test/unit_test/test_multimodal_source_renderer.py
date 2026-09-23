@@ -75,6 +75,50 @@ class MultimodalSourceRendererTest(unittest.TestCase):
         convert.assert_called_once()
         render.assert_called_once()
 
+    def test_spreadsheet_row_positions_use_text_canvas_instead_of_pdf_pages(self):
+        chunk = {
+            "content_with_weight": "标识\t型号\t功率\nEXCEL-SMART\tDL180\t15",
+            "position_int": [[2, 1, 3, 0, 0]],
+        }
+
+        with patch("rag.svr.multimodal_source_renderer.convert_office_to_pdf") as convert:
+            visuals = render_chunk_visuals(
+                "pumps.xlsx",
+                b"xlsx",
+                chunk,
+                0,
+                source_identity={"doc_id": "doc-1", "dataset_id": "kb-1", "location": "docs/pumps.xlsx"},
+            )
+
+        convert.assert_not_called()
+        self.assertEqual(visuals[0].locator["source_type"], "text")
+        self.assertEqual(visuals[0].locator["positions"], chunk["position_int"])
+        self.assertEqual(visuals[0].locator["doc_id"], "doc-1")
+        self.assertEqual(visuals[0].locator["dataset_id"], "kb-1")
+        self.assertEqual(visuals[0].locator["location"], "docs/pumps.xlsx")
+
+    def test_spreadsheet_pdf_fallback_image_keeps_original_identity_and_rendered_page(self):
+        chunk = {
+            "image": Image.new("RGB", (640, 480), "white"),
+            "page_num_int": [3],
+            "position_int": [[3, 0, 640, 0, 480]],
+            "_spreadsheet_pdf_fallback": True,
+        }
+
+        visual = render_chunk_visuals(
+            "pumps.xlsx",
+            b"original-workbook",
+            chunk,
+            0,
+            source_identity={"doc_id": "doc-1", "dataset_id": "kb-1", "location": "docs/pumps.xlsx", "sha256": "abc"},
+        )[0]
+
+        self.assertEqual(visual.locator["source_type"], "spreadsheet")
+        self.assertEqual(visual.locator["rendered_page"], 3)
+        self.assertEqual(visual.locator["fallback_reason"], "table_parse_failed")
+        self.assertEqual(visual.locator["location"], "docs/pumps.xlsx")
+        self.assertEqual(visual.locator["sha256"], "abc")
+
     def test_office_converter_reports_missing_libreoffice(self):
         with patch("rag.svr.multimodal_source_renderer.shutil.which", return_value=None):
             with self.assertRaisesRegex(OfficeRenderError, "LibreOffice"):

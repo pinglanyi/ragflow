@@ -30,6 +30,7 @@ import { ChunkMethodItem, ParseTypeItem } from './configuration/common-item';
 import { formSchema } from './form-schema';
 import { GeneralForm } from './general-form';
 import { useFetchKnowledgeConfigurationOnMount } from './hooks';
+import { withDefaultMultimodalPrompts } from '@/components/multimodal-parser-defaults';
 import { SavingButton } from './saving-button';
 const enum DocumentType {
   DeepDOC = 'DeepDOC',
@@ -66,7 +67,7 @@ export default function DatasetSettings() {
       language: 'English',
       parser_config: {
         layout_recognize: DocumentType.DeepDOC,
-        multimodal: {},
+        multimodal: withDefaultMultimodalPrompts(),
         chunk_token_num: 512,
         delimiter: `\n`,
         enable_children: false,

@@ -45,6 +45,7 @@ import { LayoutRecognizeFormField } from '../layout-recognize-form-field';
 import { MaxTokenNumberFormField } from '../max-token-number-from-field';
 import { MinerUOptionsFormField } from '../mineru-options-form-field';
 import { MultimodalParserOptions, multimodalParserSchema } from '../multimodal-parser-options';
+import { withDefaultMultimodalPrompts } from '../multimodal-parser-defaults';
 import { ButtonLoading } from '../ui/button';
 import { Input } from '../ui/input';
 import { DynamicPageRange } from './dynamic-page-range';
@@ -251,7 +252,9 @@ export function ChunkMethodDialog({
         parser_config: fillDefaultParserValue({
           pages: pages.length > 0 ? pages : [{ from: 1, to: 100000 }],
           ...omit(parserConfig, 'pages'),
-          multimodal: parserConfig?.multimodal ?? parserConfig?.ext?.multimodal ?? knowledgeDetails.parser_config?.multimodal ?? knowledgeDetails.parser_config?.ext?.multimodal ?? {},
+          multimodal: withDefaultMultimodalPrompts(
+            parserConfig?.multimodal ?? parserConfig?.ext?.multimodal ?? knowledgeDetails.parser_config?.multimodal ?? knowledgeDetails.parser_config?.ext?.multimodal ?? defaultParserValues.multimodal,
+          ),
           image_table_context_window:
             parserConfig?.image_table_context_window ??
             parserConfig?.image_context_size ??

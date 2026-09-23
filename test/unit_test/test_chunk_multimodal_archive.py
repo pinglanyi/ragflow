@@ -23,6 +23,14 @@ def response(content="# Motor\n\n| Model | Power |\n| --- | --- |\n| A | 10 kW |
 
 
 class ArchiveTest(unittest.TestCase):
+    def test_default_prompts_preserve_ocr_tables_images_and_route_only_non_text(self):
+        self.assertIn("忠实 OCR", m.DEFAULT_PROMPT)
+        self.assertIn("大表套小表拆成独立矩形表", m.DEFAULT_PROMPT)
+        self.assertIn("图片、接线图、流程图、图表", m.DEFAULT_PROMPT)
+        self.assertIn("保留基础 OCR 文本结果", m.DEFAULT_ROUTER_PROMPT)
+        self.assertIn("只要不是纯文本", m.DEFAULT_ROUTER_PROMPT)
+        self.assertIn("MULTIMODAL", m.DEFAULT_ROUTER_PROMPT)
+
     def test_connectivity_probe_uses_provider_acceptable_image_dimensions(self):
         import base64
         import io

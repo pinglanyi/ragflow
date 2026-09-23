@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 PRESENTATION_EXTENSIONS = {".ppt", ".pptx", ".odp"}
+SPREADSHEET_EXTENSIONS = {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}
 PAGED_OFFICE_EXTENSIONS = PRESENTATION_EXTENSIONS | {
     ".doc",
     ".docx",
@@ -103,6 +104,40 @@ def _render_pdf_pages(binary: bytes, pages: list[int]) -> list[RenderedVisual]:
             image = pdf.pages[page_number - 1].to_image(resolution=144).annotated
             result.append(RenderedVisual(_png_bytes(image), {"source_type": "pdf", "page": page_number}, f"Page {page_number}"))
     return result
+
+
+def spreadsheet_pdf_fallback_chunks(filename: str, binary: bytes, lang: str) -> list[dict[str, Any]]:
+    """Render a failed spreadsheet parse into page chunks for multimodal recovery."""
+    import pdfplumber
+    from rag.nlp import rag_tokenizer, tokenize
+
+    pdf = convert_office_to_pdf(filename, binary)
+    with pdfplumber.open(io.BytesIO(pdf)) as document:
+        page_numbers = list(range(1, len(document.pages) + 1))
+    if not page_numbers:
+        raise OfficeRenderError("LibreOffice produced an empty PDF for the spreadsheet")
+    visuals = _render_pdf_pages(pdf, page_numbers)
+    chunks: list[dict[str, Any]] = []
+    for page_number, visual in zip(page_numbers, visuals, strict=True):
+        image = Image.open(io.BytesIO(visual.png)).convert("RGB")
+        chunk: dict[str, Any] = {
+            "docnm_kwd": filename,
+            "title_tks": rag_tokenizer.tokenize(Path(filename).stem),
+            "doc_type_kwd": "spreadsheet",
+            "image": image,
+            "page_num_int": [page_number],
+            "position_int": [[page_number, 0, image.width, 0, image.height]],
+            "_spreadsheet_pdf_fallback": True,
+            "_multimodal_force": True,
+        }
+        tokenize(
+            chunk,
+            f"[Spreadsheet table parser failed; rendered page {page_number} requires multimodal recovery]",
+            lang.lower() == "english",
+            language=lang,
+        )
+        chunks.append(chunk)
+    return chunks
 
 
 def _cached_pdf_pages(
@@ -240,10 +275,14 @@ def render_chunk_visuals(
 
     image = chunk.get("image")
     if isinstance(image, (Image.Image, bytes, bytearray, memoryview)):
-        source_type = "image" if extension in IMAGE_EXTENSIONS else "pdf" if extension == ".pdf" else "chunk"
+        spreadsheet_fallback = bool(chunk.get("_spreadsheet_pdf_fallback"))
+        source_type = "spreadsheet" if spreadsheet_fallback else "image" if extension in IMAGE_EXTENSIONS else "pdf" if extension == ".pdf" else "chunk"
         locator = {**base, "source_type": source_type}
         if pages:
             locator["page"] = pages[0]
+        if spreadsheet_fallback and pages:
+            locator["rendered_page"] = pages[0]
+            locator["fallback_reason"] = "table_parse_failed"
         return [RenderedVisual(_png_bytes(image), locator, f"Source {pages[0]}" if pages else f"Chunk {chunk_index + 1}")]
 
     if extension in IMAGE_EXTENSIONS:
@@ -256,7 +295,11 @@ def render_chunk_visuals(
         rendered = _cached_pdf_pages(binary, pages, render_cache, "source")
         return [RenderedVisual(item.png, {**base, **item.locator}, item.label) for item in rendered]
 
-    if extension in PAGED_OFFICE_EXTENSIONS and pages:
+    # Spreadsheet parser positions identify rows/cells rather than rendered PDF
+    # pages.  Treating the first position value as a page can request a page that
+    # does not exist.  The table parser output is instead rendered as a stable
+    # text canvas while the original row/cell positions remain in the locator.
+    if extension in PAGED_OFFICE_EXTENSIONS - SPREADSHEET_EXTENSIONS and pages:
         if render_cache is not None and "office_pdf" in render_cache:
             pdf = render_cache["office_pdf"]
         else:

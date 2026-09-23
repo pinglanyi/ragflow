@@ -85,6 +85,8 @@ async def run_chunking(
         List of chunk dictionaries.
     """
     st = timer()
+    base_chunking_complete = False
+    multimodal = {}
     try:
         # Merge table parser config
         parser_config = merge_table_parser_config_from_kb(ctx.raw_task)
@@ -105,6 +107,9 @@ async def run_chunking(
                 parser_config=parser_config,
                 tenant_id=ctx.tenant_id,
             )
+        if ctx.parser_id.lower() == "table" and multimodal.get("enabled") and not cks:
+            raise ValueError("Table parser produced no chunks")
+        base_chunking_complete = True
         if multimodal.get("enabled"):
             cks = await thread_pool_exec(
                 parse_with_config, cks, ctx.raw_task, binary, multimodal,
@@ -116,6 +121,19 @@ async def run_chunking(
     except TaskCanceledException:
         raise
     except Exception as e:
+        from pathlib import Path
+
+        if not base_chunking_complete and ctx.parser_id.lower() == "table" and multimodal.get("enabled") and Path(ctx.name).suffix.lower() in {".xls", ".xlsx", ".xlsm", ".xlsb", ".ods"}:
+            from rag.svr.multimodal_source_renderer import spreadsheet_pdf_fallback_chunks
+
+            logging.exception("Table parsing failed; falling back to spreadsheet PDF rendering")
+            ctx.progress_cb(msg="Table parsing failed; converting the workbook to PDF for multimodal recovery.")
+            cks = await thread_pool_exec(spreadsheet_pdf_fallback_chunks, ctx.name, binary, ctx.language)
+            cks = await thread_pool_exec(
+                parse_with_config, cks, ctx.raw_task, binary, multimodal,
+                ctx.progress_cb, partial(ctx.has_canceled_func, ctx.id),
+            )
+            return cks
         ctx.progress_cb(-1, msg="Internal server error while chunking: %s" % str(e).replace("'", ""))
         logging.exception("Chunking {}/{} got exception".format(ctx.location, ctx.name))
         raise

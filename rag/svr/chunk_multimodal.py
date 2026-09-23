@@ -24,10 +24,10 @@ DEFAULT_PROMPT = """你是工业文档解析器。只解析提供的 Chunk 截�
 不确定或看不清的地方明确标注【不确定】，不得编造。不要生成或猜测图片 URL。
 混排截图同时保留文字、表格和图片描述。输出必须完整。"""
 
-DEFAULT_ROUTER_PROMPT = """你是文档 Chunk 的视觉解析路由器。判断该 Chunk 是否必须用视觉模型重新解析。
-只有纯文本、OCR 完整、阅读顺序清楚且没有表格、图片、图表、流程图、公式或复杂版式时输出 TEXT。
-存在表格、图片、图表、流程图、公式、复杂版式、乱码、缺字、错序或 OCR 无法可靠表达的内容时输出 MULTIMODAL。
-只输出 TEXT 或 MULTIMODAL，不要解释。"""
+DEFAULT_ROUTER_PROMPT = """判断当前 Chunk 是否为纯文本。
+如果内容只有纯文本，并且 OCR 文字完整、阅读顺序正确，不包含表格、图片、图表、流程图、公式或复杂版式，只输出 TEXT，保留基础 OCR 文本结果，不再进行多模态解析。
+只要不是纯文本，或者存在表格、图片、图表、流程图、公式、复杂版式、乱码、缺字、错序及 OCR 无法可靠表达的内容，只输出 MULTIMODAL，交给多模态模型重新解析。
+只能输出 TEXT 或 MULTIMODAL，不要解释。"""
 
 
 def _usage(raw):
@@ -346,6 +346,8 @@ def parse_chunks(chunks, task, binary, options, model, progress_callback, cancel
             if cancelled and cancelled():
                 raise RuntimeError("Multimodal parsing cancelled")
             visuals = render_chunk_visuals(task["name"], binary, chunk, index, source_identity, render_cache)
+            force_multimodal = bool(chunk.pop("_multimodal_force", False))
+            chunk.pop("_spreadsheet_pdf_fallback", None)
             visual_manifest = [
                 {"label": visual.label, "locator": visual.locator, "screenshot_sha256": _hash(visual.png)}
                 for visual in visuals
@@ -372,7 +374,7 @@ def parse_chunks(chunks, task, binary, options, model, progress_callback, cancel
                 manifest["chunks"].append({**source, **seen_sources[source_key], "duplicate_source": True})
                 _write(manifest_path, _json_bytes(manifest))
                 continue
-            if router is not None:
+            if router is not None and not force_multimodal:
                 decision, route_reference = router.decide_visuals(
                     visuals, source, chunk.get("content_with_weight", "")
                 )
@@ -386,6 +388,9 @@ def parse_chunks(chunks, task, binary, options, model, progress_callback, cancel
                     _write(manifest_path, _json_bytes(manifest))
                     progress_callback(msg=f"Smart multimodal route {index + 1}/{len(chunks)}: kept base parser output")
                     continue
+            elif router is not None:
+                routed_chunks += 1
+                source["route"] = {"decision": "MULTIMODAL", "reason": "table_parse_failed"}
             markdown, reference = parser.parse_visuals(visuals, source)
             _add_usage(usage, reference["usage"])
             multimodal_chunks += 1

@@ -10,6 +10,7 @@ import { UseFormReturn } from 'react-hook-form';
 import { useParams, useSearchParams } from 'react-router';
 import { z } from 'zod';
 import { formSchema } from './form-schema';
+import { withDefaultMultimodalPrompts } from '@/components/multimodal-parser-defaults';
 
 // The value that does not need to be displayed in the analysis method Select
 const HiddenFields = ['email', 'picture', 'audio'];
@@ -37,7 +38,9 @@ export const useFetchKnowledgeConfigurationOnMount = (
     const parser_config = {
       ...form.formState?.defaultValues?.parser_config,
       ...knowledgeDetails.parser_config,
-      multimodal: knowledgeDetails.parser_config?.multimodal ?? knowledgeDetails.parser_config?.ext?.multimodal ?? {},
+      multimodal: withDefaultMultimodalPrompts(
+        knowledgeDetails.parser_config?.multimodal ?? knowledgeDetails.parser_config?.ext?.multimodal,
+      ),
       raptor: {
         ...form.formState?.defaultValues?.parser_config?.raptor,
         ...knowledgeDetails.parser_config?.raptor,

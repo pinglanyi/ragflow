@@ -2,6 +2,7 @@ import { IParserConfig } from '@/interfaces/database/document';
 import { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ParseDocumentType } from '../layout-recognize-form-field';
+import { withDefaultMultimodalPrompts } from '../multimodal-parser-defaults';
 
 export function useDefaultParserValues() {
   const { t } = useTranslation();
@@ -9,7 +10,7 @@ export function useDefaultParserValues() {
   const defaultParserValues = useMemo(() => {
     const defaultParserValues = {
       task_page_size: 12,
-      multimodal: {},
+      multimodal: withDefaultMultimodalPrompts(),
       layout_recognize: ParseDocumentType.DeepDOC,
       chunk_token_num: 512,
       delimiter: '\n',
