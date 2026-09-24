@@ -1,6 +1,7 @@
 """Focused tests for Redis queue publishing resilience."""
 
 import ast
+import io
 import json
 import types
 import unittest
@@ -74,6 +75,16 @@ class RedisQueueTest(unittest.TestCase):
         storage.get.return_value = b"stored"
         self.assertEqual(namespace["_document_binary"]({}, "bucket", "file.xlsx"), b"stored")
         storage.get.assert_called_once_with("bucket", "file.xlsx")
+
+    def test_upload_reader_rewinds_stream_before_reading(self):
+        tree = ast.parse((ROOT / "api/db/services/file_service.py").read_text(encoding="utf-8"))
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "read_upload_blob")
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<read-upload>", "exec"), globals())
+
+        expected = b"PK\x03\x04complete-xlsx"
+        stream = io.BytesIO(expected)
+        stream.seek(8)
+        self.assertEqual(globals()["read_upload_blob"](stream), expected)
 
 
 if __name__ == "__main__":

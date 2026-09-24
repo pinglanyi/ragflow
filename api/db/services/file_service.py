@@ -44,6 +44,15 @@ from rag.llm.cv_model import GptV4
 from common import settings
 
 
+def read_upload_blob(file_obj):
+    stream = getattr(file_obj, "stream", file_obj)
+    try:
+        stream.seek(0)
+    except (AttributeError, OSError):
+        pass
+    return file_obj.read()
+
+
 class FileService(CommonService):
     # Service class for managing file operations and storage
     model = File
@@ -543,7 +552,7 @@ class FileService(CommonService):
                         user_msg = "Existing document id collision with another knowledge base; skipping update."
                         err.append(file.filename + ": " + user_msg)
                         continue
-                    blob = file.read()
+                    blob = read_upload_blob(file)
                     # Connector-supplied fingerprint (e.g. xxhash128(S3 ETag))
                     # takes precedence: for connector-sourced docs the bypass
                     # path uses the fingerprint as content_hash, so reverting
@@ -573,7 +582,7 @@ class FileService(CommonService):
                 while settings.STORAGE_IMPL.obj_exist(kb.id, location):
                     location += "_"
 
-                blob = file.read()
+                blob = read_upload_blob(file)
                 if filetype == FileType.PDF.value:
                     blob = read_potential_broken_pdf(blob)
                 settings.STORAGE_IMPL.put(kb.id, location, blob)
