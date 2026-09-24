@@ -50,7 +50,7 @@ def read_upload_blob(file_obj):
         stream.seek(0)
     except (AttributeError, OSError):
         pass
-    return file_obj.read()
+    return stream.read()
 
 
 class FileService(CommonService):

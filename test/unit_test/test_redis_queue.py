@@ -84,7 +84,15 @@ class RedisQueueTest(unittest.TestCase):
         expected = b"PK\x03\x04complete-xlsx"
         stream = io.BytesIO(expected)
         stream.seek(8)
-        self.assertEqual(globals()["read_upload_blob"](stream), expected)
+
+        class WrappedUpload:
+            def __init__(self, wrapped_stream):
+                self.stream = wrapped_stream
+
+            def read(self):
+                return b"partial-wrapper-data"
+
+        self.assertEqual(globals()["read_upload_blob"](WrappedUpload(stream)), expected)
 
 
 if __name__ == "__main__":
