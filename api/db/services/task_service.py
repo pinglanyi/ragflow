@@ -54,6 +54,13 @@ def _doc_chunking_done_key(task_id: str) -> str:
     return f"doc:chunking_done:{task_id}"
 
 
+def _document_binary(doc: dict, bucket: str, name: str):
+    uploaded = doc.pop("_uploaded_binary", None)
+    if uploaded is not None:
+        return uploaded
+    return settings.STORAGE_IMPL.get(bucket, name)
+
+
 def seed_doc_chunking_counter(doc_id: str, pending_count: int) -> bool:
     if not doc_id or pending_count <= 0:
         return False
@@ -499,7 +506,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
     parse_task_array = []
 
     if doc["type"] == FileType.PDF.value:
-        file_bin = settings.STORAGE_IMPL.get(bucket, name)
+        file_bin = _document_binary(doc, bucket, name)
         pages = PdfParser.total_page_number(doc["name"], file_bin)
         if pages is None:
             pages = 0
@@ -520,7 +527,7 @@ def queue_tasks(doc: dict, bucket: str, name: str, priority: int):
                 parse_task_array.append(task)
 
     elif doc["parser_id"] == "table":
-        file_bin = settings.STORAGE_IMPL.get(bucket, name)
+        file_bin = _document_binary(doc, bucket, name)
         rn = RAGFlowExcelParser.row_number(doc["name"], file_bin)
         for i in range(0, rn, 3000):
             task = new_task()

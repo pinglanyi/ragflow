@@ -59,6 +59,22 @@ class RedisQueueTest(unittest.TestCase):
         run = next(node for node in document_class.body if isinstance(node, ast.FunctionDef) and node.name == "run")
         self.assertIn("return queue_tasks", ast.unparse(run))
 
+    def test_uploaded_binary_bypasses_immediate_storage_read(self):
+        tree = ast.parse((ROOT / "api/db/services/task_service.py").read_text(encoding="utf-8"))
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_document_binary")
+        storage = Mock()
+        namespace = {"settings": types.SimpleNamespace(STORAGE_IMPL=storage)}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<document-binary>", "exec"), namespace)
+
+        doc = {"_uploaded_binary": b"PK\x03\x04xlsx"}
+        self.assertEqual(namespace["_document_binary"](doc, "bucket", "file.xlsx"), b"PK\x03\x04xlsx")
+        storage.get.assert_not_called()
+        self.assertNotIn("_uploaded_binary", doc)
+
+        storage.get.return_value = b"stored"
+        self.assertEqual(namespace["_document_binary"]({}, "bucket", "file.xlsx"), b"stored")
+        storage.get.assert_called_once_with("bucket", "file.xlsx")
+
 
 if __name__ == "__main__":
     unittest.main()

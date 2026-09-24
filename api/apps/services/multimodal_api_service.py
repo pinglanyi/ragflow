@@ -47,7 +47,7 @@ def _config(tenant_id, kb, doc_config, options, filename):
 
 
 @DB.connection_context()
-def submit(tenant_id, dataset_id, document_id, options):
+def submit(tenant_id, dataset_id, document_id, options, file_binary=None):
     kb = _dataset(tenant_id, dataset_id)
     rows = DocumentService.query(id=document_id, kb_id=dataset_id)
     if not rows:
@@ -83,6 +83,8 @@ def submit(tenant_id, dataset_id, document_id, options):
         DocumentService.update_by_id(document_id, {"parser_config": config, "parser_id": parser_id, "run": "1", "progress": 0, "progress_msg": "", "chunk_num": 0, "token_num": 0})
         task_doc = doc.to_dict()
         task_doc.update(parser_config=config, parser_id=parser_id, _multimodal_job_id=job.id)
+        if file_binary is not None:
+            task_doc["_uploaded_binary"] = file_binary
         current = DocumentService.run(tenant_id, task_doc, {})
         if current is None:
             current = Jobs.refresh(job.id)
@@ -90,7 +92,7 @@ def submit(tenant_id, dataset_id, document_id, options):
             raise RuntimeError("Job dispatch did not complete")
         return Jobs.response(current)
     except Exception as exc:
-        logger.error("Multimodal dispatch failed job=%s type=%s", job.id, type(exc).__name__)
+        logger.exception("Multimodal dispatch failed job=%s type=%s", job.id, type(exc).__name__)
         Jobs.fail(job.id, "dispatch_error", "Failed to publish parsing tasks; check server logs")
         raise ApiError("Unable to submit parsing job", 503, Jobs.response(MultimodalJob.get_by_id(job.id))) from exc
 
@@ -104,12 +106,12 @@ def upload(tenant_id, dataset_id, file, options):
     errors, files = FileService.upload_document(kb, [file], tenant_id)
     if not files:
         raise ApiError("File upload failed; check file format and storage", 400)
-    document = files[0][0]
+    document, blob = files[0]
     document_id = document["id"]
     if errors:
         raise ApiError("File saved but upload reported an error; retry using document_id", 400, {"document_id": document_id})
     try:
-        return submit(tenant_id, dataset_id, document_id, options)
+        return submit(tenant_id, dataset_id, document_id, options, file_binary=blob)
     except ApiError as exc:
         exc.data = {**(exc.data or {}), "document_id": document_id, "dataset_id": dataset_id}
         raise
