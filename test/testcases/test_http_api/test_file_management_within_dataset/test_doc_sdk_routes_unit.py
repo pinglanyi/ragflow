@@ -132,6 +132,9 @@ def _run(coro):
 
 def _load_doc_module(monkeypatch, module_basename="chunk_api"):
     repo_root = Path(__file__).resolve().parents[4]
+    quart_mod = ModuleType("quart")
+    quart_mod.request = SimpleNamespace(args=_DummyArgs({}), files=_DummyFiles())
+    monkeypatch.setitem(sys.modules, "quart", quart_mod)
     common_pkg = ModuleType("common")
     common_pkg.__path__ = [str(repo_root / "common")]
     monkeypatch.setitem(sys.modules, "common", common_pkg)
@@ -447,19 +450,11 @@ def _load_doc_module(monkeypatch, module_basename="chunk_api"):
             }
 
     def _get_model_config_by_id(
+        tenant_id: str,
+        model_type,
         tenant_model_id: str,
-        allowed_tenant_ids=None,
-        requester_tenant_id=None,
     ) -> dict:
-        mock_tenant_id = "tenant-1"
-        if allowed_tenant_ids is not None:
-            if isinstance(allowed_tenant_ids, str):
-                allowed_tenant_ids = {allowed_tenant_ids}
-            else:
-                allowed_tenant_ids = {str(tenant_id) for tenant_id in allowed_tenant_ids if tenant_id}
-            if mock_tenant_id not in allowed_tenant_ids and str(requester_tenant_id) != mock_tenant_id:
-                raise LookupError(f"Tenant Model with id {tenant_model_id} not authorized")
-        return _MockModelConfig2(mock_tenant_id, "model-1").to_dict()
+        return _MockModelConfig2(tenant_id, str(tenant_model_id)).to_dict()
 
     def _get_model_config_from_provider_instance(tenant_id: str, model_type: str, model_name: str):
         if not model_name:
@@ -473,6 +468,7 @@ def _load_doc_module(monkeypatch, module_basename="chunk_api"):
     tenant_model_service_mod.get_model_config_by_id = _get_model_config_by_id
     tenant_model_service_mod.get_model_config_from_provider_instance = _get_model_config_from_provider_instance
     tenant_model_service_mod.resolve_model_config = _get_model_config_from_provider_instance
+    tenant_model_service_mod.split_model_name = lambda model_name: (model_name, "default", "provider")
     tenant_model_service_mod.get_tenant_default_model_by_type = _get_tenant_default_model_by_type
     monkeypatch.setitem(sys.modules, "api.db.joint_services.tenant_model_service", tenant_model_service_mod)
 
@@ -1017,6 +1013,48 @@ class TestDocRoutesUnit:
         monkeypatch.setattr(module, "beAdoc", lambda d, *_args, **_kwargs: d)
         res = _run(_route_core(module.update_chunk)("tenant-1", "ds-1", "doc-1", "chunk-1"))
         assert res["code"] == 0
+
+    def test_retrieval_prefers_stable_tenant_embedding_model_id(self, monkeypatch):
+        module = _load_doc_module(monkeypatch)
+        resolved = []
+        kb = SimpleNamespace(
+            tenant_id="tenant-1",
+            embd_id="qwen3-emb-0_6b___VLLM@VLLM",
+            tenant_embd_id="tenant-model-id",
+        )
+        monkeypatch.setattr(module, "get_request_json", lambda: _AwaitableValue({
+            "dataset_ids": ["ds-1"],
+            "question": "什么是破模",
+        }))
+        monkeypatch.setattr(module.KnowledgebaseService, "accessible", lambda **_kwargs: True)
+        monkeypatch.setattr(module.KnowledgebaseService, "get_by_ids", lambda _ids: [kb])
+        monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _id: (True, kb))
+        monkeypatch.setattr(
+            module,
+            "get_model_config_by_id",
+            lambda tenant_id, model_type, model_id: resolved.append((tenant_id, model_type, model_id)) or {"id": model_id},
+        )
+        monkeypatch.setattr(
+            module,
+            "resolve_model_config",
+            lambda *_args, **_kwargs: pytest.fail("legacy embd_id must not be used when tenant_embd_id is present"),
+        )
+        monkeypatch.setattr(module, "LLMBundle", lambda *_args, **_kwargs: SimpleNamespace())
+        monkeypatch.setattr(module, "label_question", lambda *_args, **_kwargs: {})
+
+        class _Retriever:
+            async def retrieval(self, *_args, **_kwargs):
+                return {"chunks": [], "total": 0}
+
+            def retrieval_by_children(self, chunks, *_args, **_kwargs):
+                return chunks
+
+        monkeypatch.setattr(module.settings, "retriever", _Retriever())
+
+        res = _run(_route_core(module.retrieval_test)("tenant-1"))
+
+        assert res["code"] == 0
+        assert resolved == [("tenant-1", module.LLMType.EMBEDDING, "tenant-model-id")]
 
     def test_retrieval_metadata_validation_matrix(self, monkeypatch):
         module = _load_doc_module(monkeypatch)
