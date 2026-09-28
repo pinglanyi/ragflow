@@ -275,7 +275,7 @@ async def _authorized_tools(user_id: str, dataset_ids: list[str], *, embedding: 
         raise PermissionError("Dataset not found or not authorized")
     embd_mdl = None
     if embedding:
-        from api.db.joint_services.tenant_model_service import resolve_model_config
+        from api.db.joint_services.tenant_model_service import get_model_config_by_id, resolve_model_config
         from api.db.services.llm_service import LLMBundle
         from common.constants import LLMType
 
@@ -283,9 +283,20 @@ async def _authorized_tools(user_id: str, dataset_ids: list[str], *, embedding: 
         if error:
             raise ValueError(error)
         if kbs[0].embd_id:
-            config = await thread_pool_exec(
-                resolve_model_config, kbs[0].tenant_id, LLMType.EMBEDDING, kbs[0].embd_id
-            )
+            tenant_embd_id = getattr(kbs[0], "tenant_embd_id", None)
+            if tenant_embd_id:
+                try:
+                    config = await thread_pool_exec(
+                        get_model_config_by_id, kbs[0].tenant_id, LLMType.EMBEDDING, tenant_embd_id
+                    )
+                except LookupError:
+                    config = await thread_pool_exec(
+                        resolve_model_config, kbs[0].tenant_id, LLMType.EMBEDDING, kbs[0].embd_id
+                    )
+            else:
+                config = await thread_pool_exec(
+                    resolve_model_config, kbs[0].tenant_id, LLMType.EMBEDDING, kbs[0].embd_id
+                )
             embd_mdl = LLMBundle(kbs[0].tenant_id, config)
     tools = RAGTools(
         tenant_ids=list(dict.fromkeys(kb.tenant_id for kb in kbs)),

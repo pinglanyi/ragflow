@@ -333,6 +333,59 @@ def test_authorized_tools_include_indexed_field_mapped_dataset(monkeypatch):
     assert captured["include_field_mapped_kbs"] is True
 
 
+def test_authorized_tools_prefers_stable_tenant_embedding_model_id(monkeypatch):
+    resolved = []
+    kb = SimpleNamespace(
+        id="kb",
+        tenant_id="tenant",
+        embd_id="qwen3-emb-0_6b___VLLM@VLLM",
+        tenant_embd_id="tenant-model-id",
+        parser_config={},
+    )
+    kb_module = ModuleType("api.db.services.knowledgebase_service")
+    kb_module.KnowledgebaseService = SimpleNamespace(
+        accessible=lambda **kwargs: True,
+        get_by_ids=lambda ids: [kb],
+    )
+    kb_module.validate_dataset_embedding_models = lambda kbs: None
+    tenant_model_module = ModuleType("api.db.joint_services.tenant_model_service")
+
+    def get_model_config_by_id(tenant_id, model_type, model_id):
+        resolved.append((tenant_id, model_type, model_id))
+        return {"id": model_id}
+
+    tenant_model_module.get_model_config_by_id = get_model_config_by_id
+    tenant_model_module.resolve_model_config = lambda *args, **kwargs: pytest.fail(
+        "legacy embedding reference must not be used when tenant_embd_id is present"
+    )
+    llm_module = ModuleType("api.db.services.llm_service")
+    llm_module.LLMBundle = lambda tenant_id, config: SimpleNamespace(tenant_id=tenant_id, config=config)
+    constants_module = ModuleType("common.constants")
+    constants_module.LLMType = SimpleNamespace(EMBEDDING="embedding")
+    misc_module = ModuleType("common.misc_utils")
+
+    async def thread_pool_exec(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    misc_module.thread_pool_exec = thread_pool_exec
+    rag_module = ModuleType("rag.advanced_rag.agentic_rag")
+    rag_module.RAGTools = lambda **kwargs: SimpleNamespace(kb_ids=kwargs["kb_ids"], embed_mdl=kwargs["embed_mdl"])
+    for module in (
+        kb_module,
+        tenant_model_module,
+        llm_module,
+        constants_module,
+        misc_module,
+        rag_module,
+    ):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    tools = asyncio.run(MODULE._authorized_tools("user", ["kb"], embedding=True))
+
+    assert resolved == [("tenant", "embedding", "tenant-model-id")]
+    assert tools.embed_mdl.config == {"id": "tenant-model-id"}
+
+
 def test_delete_checks_owner_and_removes_only_one_document(monkeypatch):
     deleted = []
     document_module = ModuleType("api.db.services.document_service")
