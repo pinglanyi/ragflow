@@ -854,6 +854,79 @@ def test_navigation_tree_service_queries_and_shapes_nodes_unit(monkeypatch):
 
 
 @pytest.mark.p3
+def test_navigation_tree_children_fall_back_to_cluster_document_ids_unit(monkeypatch):
+    module = _load_dataset_module(monkeypatch)
+    _install_order_by_stub(monkeypatch)
+
+    class _NavDocStore:
+        @staticmethod
+        def index_exist(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def search(**kwargs):
+            return kwargs["condition"]
+
+        @staticmethod
+        def get_fields(_result, _fields):
+            # Reproduces a partially projected tree: the cluster exists, but
+            # no nav_doc rows can be found through parent_kwd.
+            return {}
+
+        @staticmethod
+        def get_total(_result):
+            return 0
+
+        @staticmethod
+        def get(row_id, _index_name, _knowledgebase_ids):
+            assert row_id == "cluster:kb-1:产品"
+            return {
+                "id": row_id,
+                "type_kwd": "nav_cluster",
+                "doc_ids_kwd": ["doc-2", "doc-1"],
+            }
+
+    monkeypatch.setattr(module.settings, "docStoreConn", _NavDocStore())
+    monkeypatch.setattr(
+        module.DocumentService,
+        "get_by_kb_id",
+        lambda **kwargs: (
+            [
+                {"id": "doc-1", "name": "说明书.pdf", "meta_fields": {}},
+                {
+                    "id": "doc-2",
+                    "name": "产品表.xlsx",
+                    "meta_fields": {"description": "产品参数表"},
+                },
+            ],
+            2,
+        ),
+    )
+
+    success, children = _run(
+        module.dataset_api_service.list_nav_children(
+            "kb-1", "tenant-1", "产品", page=1, page_size=1
+        )
+    )
+
+    assert success is True
+    assert children == {
+        "total": 2,
+        "items": [
+            {
+                "name": "doc-2",
+                "display_name": "产品表.xlsx",
+                "description": "产品参数表",
+                "doc_count": 1,
+                "type": "doc",
+                "doc_id": "doc-2",
+                "has_children": False,
+            }
+        ],
+    }
+
+
+@pytest.mark.p3
 def test_navigation_tree_service_deletes_subtree_and_handles_access_unit(monkeypatch):
     module = _load_dataset_module(monkeypatch)
     _install_order_by_stub(monkeypatch)

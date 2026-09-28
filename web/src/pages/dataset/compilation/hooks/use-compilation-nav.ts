@@ -81,7 +81,13 @@ export function useCompilationNav() {
 
   const handleParentClick = useCallback(
     (node: DatasetNavNode) => {
-      setSelectedNode(null);
+      setSelectedNode({
+        parentName: '',
+        name: node.name,
+        displayName: node.display_name || node.name,
+        description: node.description,
+        doc_count: node.doc_count,
+      });
       if (node.has_children) {
         loadChildren(node.name);
       }

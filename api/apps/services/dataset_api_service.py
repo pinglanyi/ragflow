@@ -2059,7 +2059,84 @@ async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: in
         "compile_kwd": [_NAV_COMPILE_KWD],
         "parent_kwd": [name.strip()],
     }
-    return await _nav_search(dataset_id, tenant_id, condition, page, page_size)
+    success, result = await _nav_search(dataset_id, tenant_id, condition, page, page_size)
+    if not success or result.get("items"):
+        return success, result
+
+    # A bulk projection can leave a valid cluster row even when its nav_doc
+    # rows were rejected by the document store.  The cluster's doc_ids_kwd is
+    # the authoritative membership list, so use it to keep the tree usable
+    # instead of presenting an empty branch.
+    try:
+        _, kb = KnowledgebaseService.get_by_id(dataset_id)
+        pack = _compiled_index_or_none(kb.tenant_id, dataset_id)
+        if pack is None:
+            return success, result
+        index_nm, _ = pack
+
+        from rag.advanced_rag.knowlege_compile.dataset_nav import nav_cluster_id
+
+        cluster = await thread_pool_exec(
+            settings.docStoreConn.get,
+            nav_cluster_id(dataset_id, name.strip()),
+            index_nm,
+            [dataset_id],
+        )
+        raw_doc_ids = (cluster or {}).get("doc_ids_kwd") or []
+        if isinstance(raw_doc_ids, str):
+            raw_doc_ids = [raw_doc_ids]
+        doc_ids = list(dict.fromkeys(str(doc_id) for doc_id in raw_doc_ids if doc_id))
+        if not doc_ids:
+            return success, result
+
+        page = max(1, int(page or 1))
+        page_size = max(1, min(int(page_size or 1000), 2000))
+        offset = (page - 1) * page_size
+        page_doc_ids = doc_ids[offset : offset + page_size]
+        if not page_doc_ids:
+            return True, {"total": len(doc_ids), "items": []}
+
+        documents, _ = await thread_pool_exec(
+            DocumentService.get_by_kb_id,
+            kb_id=dataset_id,
+            page_number=0,
+            items_per_page=0,
+            orderby="create_time",
+            desc=False,
+            keywords="",
+            run_status=[],
+            types=[],
+            suffix=[],
+            doc_ids=page_doc_ids,
+        )
+        documents_by_id = {str(doc.get("id")): doc for doc in documents}
+        items = []
+        for doc_id in page_doc_ids:
+            doc = documents_by_id.get(doc_id)
+            if not doc:
+                continue
+            metadata = doc.get("meta_fields")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            items.append(
+                {
+                    "name": doc_id,
+                    "display_name": doc.get("name") or doc_id,
+                    "description": metadata.get("description") or metadata.get("summary") or "",
+                    "doc_count": 1,
+                    "type": "doc",
+                    "doc_id": doc_id,
+                    "has_children": False,
+                }
+            )
+        return True, {"total": len(doc_ids), "items": items}
+    except Exception:
+        logging.exception(
+            "dataset_nav: failed to recover children from cluster membership kb=%s parent=%s",
+            dataset_id,
+            name.strip(),
+        )
+        return success, result
 
 
 async def _acquire_nav_lock(dataset_id: str):
