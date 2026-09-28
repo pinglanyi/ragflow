@@ -73,21 +73,21 @@ _KNN_TOP_K = 5
 # ---------------------------------------------------------------------------
 
 
-def _nav_doc_id(doc_id: str) -> str:
+def nav_doc_id(doc_id: str) -> str:
     """Stable row id for a nav_doc (deterministic by doc_id)."""
     return xxhash.xxh64(
         f"dataset_nav:doc:{doc_id}".encode("utf-8", "surrogatepass"),
     ).hexdigest()
 
 
-def _nav_cluster_id(kb_id: str, name: str) -> str:
+def nav_cluster_id(kb_id: str, name: str) -> str:
     """Stable row id for a nav_cluster (deterministic by kb_id + name)."""
     return xxhash.xxh64(
         f"dataset_nav:{kb_id}:cluster:{name}".encode("utf-8", "surrogatepass"),
     ).hexdigest()
 
 
-def _nav_lock_key(kb_id: str) -> str:
+def nav_lock_key(kb_id: str) -> str:
     """Redis lock key for concurrency control on a KB's nav tree."""
     return f"dataset_nav:{kb_id}"
 
@@ -316,7 +316,7 @@ def _make_nav_doc_row(
 ) -> dict:
     """Build a nav_doc ES/Infinity row dict for a single document leaf node."""
     row: dict = {
-        "id": _nav_doc_id(doc_id),
+        "id": nav_doc_id(doc_id),
         "kb_id": kb_id,
         "doc_id": doc_id,
         "compile_kwd": _COMPILE_KWD,
@@ -348,7 +348,7 @@ def _make_nav_cluster_row(
     embedding: list[float] | None = None,
 ) -> dict:
     """Build a nav_cluster ES/Infinity row dict for an internal tree node."""
-    cluster_id = _nav_cluster_id(kb_id, name)
+    cluster_id = nav_cluster_id(kb_id, name)
     row: dict = {
         "id": cluster_id,
         "kb_id": kb_id,
@@ -533,7 +533,7 @@ async def upsert_dataset_nav_doc(
         return
 
     # 2. Check if this doc already has a nav_doc row
-    existing_doc = await _store_get(tenant_id, kb_id, _nav_doc_id(doc_id))
+    existing_doc = await _store_get(tenant_id, kb_id, nav_doc_id(doc_id))
     if existing_doc:
         old_payload = json.loads(existing_doc.get("content_with_weight") or "{}")
         if old_payload.get("description") == summary:
@@ -545,7 +545,7 @@ async def upsert_dataset_nav_doc(
     vec_dim = _EMBED_DIM or 0
 
     lock = RedisDistributedLock(
-        _nav_lock_key(kb_id),
+        nav_lock_key(kb_id),
         timeout=_LOCK_TIMEOUT_S,
         blocking_timeout=_LOCK_BLOCKING_TIMEOUT_S,
     )
@@ -566,7 +566,7 @@ async def upsert_dataset_nav_doc(
 
         if best_name and sim >= _MERGE_THRESHOLD:
             # ── Merge into best cluster ──
-            cluster_id = _nav_cluster_id(kb_id, best_name)
+            cluster_id = nav_cluster_id(kb_id, best_name)
             cluster_row = await _store_get(tenant_id, kb_id, cluster_id)
             if cluster_row:
                 payload = json.loads(cluster_row.get("content_with_weight") or "{}")
@@ -615,7 +615,7 @@ async def upsert_dataset_nav_doc(
             parent_row = await _store_get(
                 tenant_id,
                 kb_id,
-                _nav_cluster_id(kb_id, parent_for_new),
+                nav_cluster_id(kb_id, parent_for_new),
             )
             if parent_row:
                 depth_of_parent = parent_row.get("depth_int", 1)
@@ -700,7 +700,7 @@ async def remove_dataset_nav_doc(
         return
 
     lock = RedisDistributedLock(
-        _nav_lock_key(kb_id),
+        nav_lock_key(kb_id),
         timeout=_LOCK_TIMEOUT_S,
         blocking_timeout=_LOCK_BLOCKING_TIMEOUT_S,
     )
@@ -712,7 +712,7 @@ async def remove_dataset_nav_doc(
 
     try:
         # 1. Find and delete the nav_doc row
-        doc_row_id = _nav_doc_id(doc_id)
+        doc_row_id = nav_doc_id(doc_id)
         doc_row = await _store_get(tenant_id, kb_id, doc_row_id)
         if not doc_row:
             return
@@ -721,7 +721,7 @@ async def remove_dataset_nav_doc(
 
         # 2. Remove doc_id from the parent cluster's doc_ids_kwd
         if parent_name and parent_name != "root":
-            cluster_id = _nav_cluster_id(kb_id, parent_name)
+            cluster_id = nav_cluster_id(kb_id, parent_name)
             cluster_row = await _store_get(tenant_id, kb_id, cluster_id)
             if cluster_row:
                 doc_ids = cluster_row.get("doc_ids_kwd") or []
@@ -761,7 +761,7 @@ async def _cleanup_empty_cluster(
     cluster_name: str,
 ) -> None:
     """Recursively remove a cluster if it has no doc children and no direct doc descendants."""
-    cluster_id = _nav_cluster_id(kb_id, cluster_name)
+    cluster_id = nav_cluster_id(kb_id, cluster_name)
     cluster = await _store_get(tenant_id, kb_id, cluster_id)
     if not cluster:
         return
@@ -883,7 +883,7 @@ async def _maybe_split_cluster(
         labels.append(0 if d0 < d1 else 1)
 
     # Create sub-clusters
-    cluster_row = await _store_get(tenant_id, kb_id, _nav_cluster_id(kb_id, cluster_name))
+    cluster_row = await _store_get(tenant_id, kb_id, nav_cluster_id(kb_id, cluster_name))
     depth = (cluster_row.get("depth_int", 0) if cluster_row else 0) + 1
 
     for gi in (0, 1):
@@ -895,7 +895,7 @@ async def _maybe_split_cluster(
         descs: list[str] = []
         for kn in kid_names:
             is_doc = name_to_type.get(kn) == "nav_doc"
-            cid = _nav_doc_id(kn) if is_doc else _nav_cluster_id(kb_id, kn)
+            cid = nav_doc_id(kn) if is_doc else nav_cluster_id(kb_id, kn)
             row = await _store_get(tenant_id, kb_id, cid)
             if row:
                 payload = json.loads(row.get("content_with_weight") or "{}")
@@ -921,7 +921,7 @@ async def _maybe_split_cluster(
         # Reparent children to new split cluster
         for kn in kid_names:
             is_doc = name_to_type.get(kn) == "nav_doc"
-            cid = _nav_doc_id(kn) if is_doc else _nav_cluster_id(kb_id, kn)
+            cid = nav_doc_id(kn) if is_doc else nav_cluster_id(kb_id, kn)
             row = await _store_get(tenant_id, kb_id, cid)
             if row:
                 row["parent_kwd"] = group_name

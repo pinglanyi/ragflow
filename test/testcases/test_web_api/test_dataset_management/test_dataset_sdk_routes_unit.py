@@ -78,6 +78,7 @@ class _KB:
         embd_id="embd-1",
         chunk_num=0,
         pagerank=0,
+        pipeline_id="",
         graphrag_task_id="",
         raptor_task_id="",
     ):
@@ -89,6 +90,7 @@ class _KB:
         self.embd_id = embd_id
         self.chunk_num = chunk_num
         self.pagerank = pagerank
+        self.pipeline_id = pipeline_id
         self.graphrag_task_id = graphrag_task_id
         self.raptor_task_id = raptor_task_id
 
@@ -129,6 +131,24 @@ def _patch_json_parser(monkeypatch, module, payload_state, err_state=None):
     monkeypatch.setattr(module, "validate_and_parse_json_request", _parse_json)
 
 
+def _install_order_by_stub(monkeypatch):
+    common_doc_store_pkg = ModuleType("common.doc_store")
+    common_doc_store_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "common.doc_store", common_doc_store_pkg)
+
+    doc_store_base_mod = ModuleType("common.doc_store.doc_store_base")
+
+    class _OrderByExpr:
+        def desc(self, _field):
+            return self
+
+        def asc(self, _field):
+            return self
+
+    doc_store_base_mod.OrderByExpr = _OrderByExpr
+    monkeypatch.setitem(sys.modules, "common.doc_store.doc_store_base", doc_store_base_mod)
+
+
 def _load_dataset_module(monkeypatch):
     repo_root = Path(__file__).resolve().parents[4]
 
@@ -136,6 +156,18 @@ def _load_dataset_module(monkeypatch):
     quart_mod.Request = type("Request", (), {})
     quart_mod.request = SimpleNamespace(args=_DummyArgs())
     monkeypatch.setitem(sys.modules, "quart", quart_mod)
+
+    werkzeug_pkg = ModuleType("werkzeug")
+    werkzeug_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "werkzeug", werkzeug_pkg)
+    werkzeug_exceptions_mod = ModuleType("werkzeug.exceptions")
+    werkzeug_exceptions_mod.BadRequest = type("BadRequest", (Exception,), {})
+    werkzeug_exceptions_mod.UnsupportedMediaType = type("UnsupportedMediaType", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "werkzeug.exceptions", werkzeug_exceptions_mod)
+
+    peewee_mod = ModuleType("peewee")
+    peewee_mod.OperationalError = type("OperationalError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "peewee", peewee_mod)
 
     api_pkg = ModuleType("api")
     api_pkg.__path__ = [str(repo_root / "api")]
@@ -169,6 +201,14 @@ def _load_dataset_module(monkeypatch):
     db_pkg.FileType = SimpleNamespace()
     monkeypatch.setitem(sys.modules, "api.db", db_pkg)
     api_pkg.db = db_pkg
+
+    joint_services_pkg = ModuleType("api.db.joint_services")
+    joint_services_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "api.db.joint_services", joint_services_pkg)
+    joint_tenant_model_mod = ModuleType("api.db.joint_services.tenant_model_service")
+    joint_tenant_model_mod.resolve_model_config = lambda *_args, **_kwargs: SimpleNamespace()
+    joint_tenant_model_mod.resolve_model_id = lambda *_args, **_kwargs: "tenant-model-1"
+    monkeypatch.setitem(sys.modules, "api.db.joint_services.tenant_model_service", joint_tenant_model_mod)
 
     db_models_mod = ModuleType("api.db.db_models")
     db_models_mod.File = SimpleNamespace(
@@ -288,8 +328,17 @@ def _load_dataset_module(monkeypatch):
             return True
 
     knowledgebase_service_mod.KnowledgebaseService = _StubKnowledgebaseService
+    knowledgebase_service_mod.validate_dataset_embedding_models = lambda _kbs: None
     monkeypatch.setitem(sys.modules, "api.db.services.knowledgebase_service", knowledgebase_service_mod)
     services_pkg.knowledgebase_service = knowledgebase_service_mod
+
+    tenant_model_service_mod = ModuleType("api.db.services.tenant_model_service")
+    tenant_model_service_mod.TenantModelService = type(
+        "TenantModelService",
+        (),
+        {"get_by_id": staticmethod(lambda _model_id: (False, None))},
+    )
+    monkeypatch.setitem(sys.modules, "api.db.services.tenant_model_service", tenant_model_service_mod)
 
     task_service_mod = ModuleType("api.db.services.task_service")
 
@@ -348,6 +397,7 @@ def _load_dataset_module(monkeypatch):
     constants_mod.FileSource = _FileSource
     constants_mod.StatusEnum = _StatusEnum
     constants_mod.PAGERANK_FLD = "pagerank"
+    constants_mod.LLMType = SimpleNamespace(CHAT="chat", EMBEDDING="embedding", RERANK=SimpleNamespace(value="rerank"))
     monkeypatch.setitem(sys.modules, "common.constants", constants_mod)
 
     common_pkg = ModuleType("common")
@@ -362,6 +412,50 @@ def _load_dataset_module(monkeypatch):
         retriever=SimpleNamespace(search=lambda *_args, **_kwargs: _AwaitableValue(SimpleNamespace(ids=[], field={}))),
     )
     monkeypatch.setitem(sys.modules, "common", common_pkg)
+
+    misc_utils_mod = ModuleType("common.misc_utils")
+
+    async def _thread_pool_exec(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    misc_utils_mod.thread_pool_exec = _thread_pool_exec
+    monkeypatch.setitem(sys.modules, "common.misc_utils", misc_utils_mod)
+
+    rag_advanced_pkg = ModuleType("rag.advanced_rag")
+    rag_advanced_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "rag.advanced_rag", rag_advanced_pkg)
+    rag_compile_pkg = ModuleType("rag.advanced_rag.knowlege_compile")
+    rag_compile_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "rag.advanced_rag.knowlege_compile", rag_compile_pkg)
+    rag_wiki_mod = ModuleType("rag.advanced_rag.knowlege_compile.wiki")
+    rag_wiki_mod.WIKI_PAGE_COMPILE_KWD = "artifact_page"
+    monkeypatch.setitem(sys.modules, "rag.advanced_rag.knowlege_compile.wiki", rag_wiki_mod)
+
+    rag_nav_mod = ModuleType("rag.advanced_rag.knowlege_compile.dataset_nav")
+    rag_nav_mod.nav_cluster_id = lambda kb_id, name: f"cluster:{kb_id}:{name}"
+    rag_nav_mod.nav_doc_id = lambda name: f"doc:{name}"
+    rag_nav_mod.nav_lock_key = lambda kb_id: f"dataset_nav:{kb_id}"
+    monkeypatch.setitem(sys.modules, "rag.advanced_rag.knowlege_compile.dataset_nav", rag_nav_mod)
+
+    rag_utils_pkg = ModuleType("rag.utils")
+    rag_utils_pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "rag.utils", rag_utils_pkg)
+    redis_conn_mod = ModuleType("rag.utils.redis_conn")
+    redis_conn_mod.lock_events = []
+
+    class _RedisDistributedLock:
+        def __init__(self, key, **_kwargs):
+            self.key = key
+
+        def acquire(self):
+            redis_conn_mod.lock_events.append(("acquire", self.key))
+            return True
+
+        def release(self):
+            redis_conn_mod.lock_events.append(("release", self.key))
+
+    redis_conn_mod.RedisDistributedLock = _RedisDistributedLock
+    monkeypatch.setitem(sys.modules, "rag.utils.redis_conn", redis_conn_mod)
 
     api_utils_mod = ModuleType("api.utils.api_utils")
 
@@ -393,6 +487,7 @@ def _load_dataset_module(monkeypatch):
     api_utils_mod.get_error_argument_result = _get_error_argument_result
     api_utils_mod.get_error_data_result = _get_error_data_result
     api_utils_mod.get_error_permission_result = _get_error_permission_result
+    api_utils_mod.get_json_result = lambda *, data=None, **_kwargs: data
     api_utils_mod.get_parser_config = lambda _chunk_method, _unused: {"auto": True}
     api_utils_mod.get_result = _get_result
     api_utils_mod.remap_dictionary_keys = lambda data: data
@@ -607,14 +702,15 @@ def test_list_knowledge_graph_delete_kg_matrix_unit(monkeypatch):
     assert res["message"] == "Database operation failed", res
 
     monkeypatch.setattr(module.KnowledgebaseService, "accessible", lambda *_args, **_kwargs: False)
-    res = _run(inspect.unwrap(module.knowledge_graph)("tenant-1", "kb-1"))
+    res = _run(inspect.unwrap(module.get_knowledge_graph)("tenant-1", "kb-1"))
     assert res["code"] == module.RetCode.AUTHENTICATION_ERROR, res
+
 
     monkeypatch.setattr(module.KnowledgebaseService, "accessible", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(module.KnowledgebaseService, "get_by_id", lambda _kb_id: (True, _KB(tenant_id="tenant-1")))
     monkeypatch.setattr(module.search, "index_name", lambda _tenant_id: "idx")
     monkeypatch.setattr(module.settings, "docStoreConn", SimpleNamespace(index_exist=lambda *_args, **_kwargs: False))
-    res = _run(inspect.unwrap(module.knowledge_graph)("tenant-1", "kb-1"))
+    res = _run(inspect.unwrap(module.get_knowledge_graph)("tenant-1", "kb-1"))
     assert res["data"] == {"graph": {}, "mind_map": {}}, res
 
     monkeypatch.setattr(module.settings, "docStoreConn", SimpleNamespace(index_exist=lambda *_args, **_kwargs: True))
@@ -624,7 +720,7 @@ def test_list_knowledge_graph_delete_kg_matrix_unit(monkeypatch):
             return SimpleNamespace(ids=[], field={})
 
     monkeypatch.setattr(module.settings, "retriever", _EmptyRetriever())
-    res = _run(inspect.unwrap(module.knowledge_graph)("tenant-1", "kb-1"))
+    res = _run(inspect.unwrap(module.get_knowledge_graph)("tenant-1", "kb-1"))
     assert res["data"] == {"graph": {}, "mind_map": {}}, res
 
     class _BadRetriever:
@@ -632,7 +728,7 @@ def test_list_knowledge_graph_delete_kg_matrix_unit(monkeypatch):
             return SimpleNamespace(ids=["bad"], field={"bad": {"knowledge_graph_kwd": "graph", "content_with_weight": "{bad"}})
 
     monkeypatch.setattr(module.settings, "retriever", _BadRetriever())
-    res = _run(inspect.unwrap(module.knowledge_graph)("tenant-1", "kb-1"))
+    res = _run(inspect.unwrap(module.get_knowledge_graph)("tenant-1", "kb-1"))
     assert res["code"] == module.RetCode.SUCCESS, res
     assert res["data"]["graph"] == {}, res
 
@@ -650,15 +746,322 @@ def test_list_knowledge_graph_delete_kg_matrix_unit(monkeypatch):
             return SimpleNamespace(ids=["good"], field={"good": {"knowledge_graph_kwd": "graph", "content_with_weight": json.dumps(payload)}})
 
     monkeypatch.setattr(module.settings, "retriever", _GoodRetriever())
-    res = _run(inspect.unwrap(module.knowledge_graph)("tenant-1", "kb-1"))
+    res = _run(inspect.unwrap(module.get_knowledge_graph)("tenant-1", "kb-1"))
     assert res["code"] == module.RetCode.SUCCESS, res
     assert len(res["data"]["graph"]["nodes"]) == 2, res
     assert len(res["data"]["graph"]["edges"]) == 1, res
 
     monkeypatch.setattr(module.KnowledgebaseService, "accessible", lambda *_args, **_kwargs: False)
-    res = inspect.unwrap(module.delete_knowledge_graph)("tenant-1", "kb-1")
-    assert res["code"] == module.RetCode.AUTHENTICATION_ERROR, res
+    success, message = module.dataset_api_service.delete_knowledge_graph("kb-1", "tenant-1")
+    assert success is False
+    assert message == "No authorization."
 
+
+@pytest.mark.p3
+def test_navigation_tree_service_queries_and_shapes_nodes_unit(monkeypatch):
+    module = _load_dataset_module(monkeypatch)
+    _install_order_by_stub(monkeypatch)
+    search_calls = []
+
+    class _NavDocStore:
+        @staticmethod
+        def index_exist(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def search(**kwargs):
+            search_calls.append(kwargs)
+            return kwargs["condition"]
+
+        @staticmethod
+        def get_fields(result, _fields):
+            if result.get("parent_kwd") == ["root"]:
+                return {
+                    "cluster-1": {
+                        "name": "产品",
+                        "type_kwd": "nav_cluster",
+                        "content_with_weight": json.dumps({"description": "产品文档"}),
+                        "doc_count_int": 3,
+                    }
+                }
+            return {
+                "doc-1": {
+                    "name": "说明书.pdf",
+                    "type_kwd": "nav_doc",
+                    "content_with_weight": "{bad json",
+                    "doc_id": "doc-1",
+                }
+            }
+
+        @staticmethod
+        def get_total(_result):
+            return 1
+
+    monkeypatch.setattr(module.settings, "docStoreConn", _NavDocStore())
+
+    success, roots = _run(module.dataset_api_service.list_nav_clusters("kb-1", "tenant-1"))
+    assert success is True
+    assert roots == {
+        "total": 1,
+        "items": [
+            {
+                "name": "产品",
+                "description": "产品文档",
+                "doc_count": 3,
+                "type": "cluster",
+                "doc_id": None,
+                "has_children": True,
+            }
+        ],
+    }
+    assert search_calls[0]["condition"] == {
+        "compile_kwd": ["dataset_nav"],
+        "type_kwd": ["nav_cluster"],
+        "parent_kwd": ["root"],
+    }
+
+    success, children = _run(module.dataset_api_service.list_nav_children("kb-1", "tenant-1", " 产品 "))
+    assert success is True
+    assert children["items"] == [
+        {
+            "name": "说明书.pdf",
+            "description": "",
+            "doc_count": 1,
+            "type": "doc",
+            "doc_id": "doc-1",
+            "has_children": False,
+        }
+    ]
+    assert search_calls[1]["condition"] == {
+        "compile_kwd": ["dataset_nav"],
+        "parent_kwd": ["产品"],
+    }
+
+    success, empty = _run(module.dataset_api_service.list_nav_children("kb-1", "tenant-1", "  "))
+    assert success is True
+    assert empty == {"total": 0, "items": []}
+
+    monkeypatch.setattr(
+        module.settings,
+        "docStoreConn",
+        SimpleNamespace(index_exist=lambda *_args, **_kwargs: False),
+    )
+    success, no_index = _run(module.dataset_api_service.list_nav_clusters("kb-1", "tenant-1"))
+    assert success is True
+    assert no_index == {"total": 0, "items": []}
+
+
+@pytest.mark.p3
+def test_navigation_tree_service_deletes_subtree_and_handles_access_unit(monkeypatch):
+    module = _load_dataset_module(monkeypatch)
+    _install_order_by_stub(monkeypatch)
+    delete_calls = []
+
+    class _NavDocStore:
+        @staticmethod
+        def index_exist(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def search(**kwargs):
+            return kwargs["condition"]
+
+        @staticmethod
+        def get_fields(result, _fields):
+            parents = result.get("parent_kwd")
+            if parents == ["产品"]:
+                return {"child": {"id": "cluster:kb-1:手册", "name": "手册"}}
+            if parents == ["手册"]:
+                return {"leaf": {"id": "doc:说明书.pdf", "name": "说明书.pdf"}}
+            return {}
+
+        @staticmethod
+        def get_total(result):
+            return len(_NavDocStore.get_fields(result, ["name"]))
+
+        @staticmethod
+        def delete(condition, index_name, dataset_id):
+            delete_calls.append((condition, index_name, dataset_id))
+            return 3 if condition.get("id") else 7
+
+    monkeypatch.setattr(module.settings, "docStoreConn", _NavDocStore())
+
+    success, result = _run(module.dataset_api_service.delete_nav_node("kb-1", "tenant-1", "产品"))
+    assert success is True
+    assert result == {"deleted": 3}
+    assert set(delete_calls[0][0]["id"]) == {
+        "cluster:kb-1:产品",
+        "doc:产品",
+        "cluster:kb-1:手册",
+        "doc:说明书.pdf",
+    }
+    assert "name" not in delete_calls[0][0]
+
+    success, result = _run(module.dataset_api_service.delete_nav("kb-1", "tenant-1"))
+    assert success is True
+    assert result == {"deleted": 7}
+    assert delete_calls[1][0] == {"compile_kwd": ["dataset_nav"]}
+    assert sys.modules["rag.utils.redis_conn"].lock_events == [
+        ("acquire", "dataset_nav:kb-1"),
+        ("release", "dataset_nav:kb-1"),
+        ("acquire", "dataset_nav:kb-1"),
+        ("release", "dataset_nav:kb-1"),
+    ]
+
+    monkeypatch.setattr(module.KnowledgebaseService, "accessible", lambda *_args, **_kwargs: False)
+    success, message = _run(module.dataset_api_service.list_nav_clusters("kb-1", "tenant-1"))
+    assert success is False
+    assert message == "No authorization."
+
+
+@pytest.mark.p3
+def test_navigation_tree_subtree_delete_is_fail_safe_and_paginated_unit(monkeypatch):
+    module = _load_dataset_module(monkeypatch)
+    _install_order_by_stub(monkeypatch)
+    delete_calls = []
+
+    class _FailingScanStore:
+        @staticmethod
+        def index_exist(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def search(**_kwargs):
+            raise RuntimeError("scan failed")
+
+        @staticmethod
+        def delete(*args):
+            delete_calls.append(args)
+            return 1
+
+    monkeypatch.setattr(module.settings, "docStoreConn", _FailingScanStore())
+    success, message = _run(module.dataset_api_service.delete_nav_node("kb-1", "tenant-1", "产品"))
+    assert success is False
+    assert message == "Failed to scan the navigation subtree."
+    assert delete_calls == []
+
+    offsets = []
+
+    class _PaginatedStore:
+        @staticmethod
+        def index_exist(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def search(**kwargs):
+            offsets.append((tuple(kwargs["condition"]["parent_kwd"]), kwargs["offset"]))
+            return kwargs
+
+        @staticmethod
+        def get_fields(result, _fields):
+            parents = result["condition"]["parent_kwd"]
+            offset = result["offset"]
+            if parents == ["产品"] and offset == 0:
+                return {
+                    "1": {"id": "cluster:kb-1:手册一", "name": "手册一"},
+                    "2": {"id": "cluster:kb-1:手册二", "name": "手册二"},
+                }
+            if parents == ["产品"] and offset == 2:
+                return {"3": {"id": "cluster:kb-1:手册三", "name": "手册三"}}
+            return {}
+
+        @staticmethod
+        def get_total(result):
+            return 3 if result["condition"]["parent_kwd"] == ["产品"] else 0
+
+        @staticmethod
+        def delete(condition, index_name, dataset_id):
+            delete_calls.append((condition, index_name, dataset_id))
+            return 4
+
+    delete_calls.clear()
+    monkeypatch.setattr(module.settings, "docStoreConn", _PaginatedStore())
+    success, result = _run(module.dataset_api_service.delete_nav_node("kb-1", "tenant-1", "产品"))
+    assert success is True
+    assert result == {"deleted": 4}
+    assert (("产品",), 2) in offsets
+    assert set(delete_calls[0][0]["id"]) == {
+        "cluster:kb-1:产品",
+        "doc:产品",
+        "cluster:kb-1:手册一",
+        "cluster:kb-1:手册二",
+        "cluster:kb-1:手册三",
+    }
+
+    class _TooDeepStore:
+        @staticmethod
+        def index_exist(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def search(**kwargs):
+            return kwargs
+
+        @staticmethod
+        def get_fields(result, _fields):
+            parent = result["condition"]["parent_kwd"][0]
+            level = int(parent.removeprefix("node-")) if parent.startswith("node-") else 0
+            return {str(level + 1): {"id": f"cluster:kb-1:node-{level + 1}", "name": f"node-{level + 1}"}}
+
+        @staticmethod
+        def get_total(_result):
+            return 1
+
+        @staticmethod
+        def delete(*args):
+            delete_calls.append(args)
+            return 1
+
+    delete_calls.clear()
+    monkeypatch.setattr(module.settings, "docStoreConn", _TooDeepStore())
+    success, message = _run(module.dataset_api_service.delete_nav_node("kb-1", "tenant-1", "node-0"))
+    assert success is False
+    assert message == "Navigation subtree exceeds the maximum depth."
+    assert delete_calls == []
+
+
+@pytest.mark.p3
+def test_navigation_tree_routes_delegate_and_map_errors_unit(monkeypatch):
+    module = _load_dataset_module(monkeypatch)
+
+    async def _list_roots(dataset_id, tenant_id):
+        assert (dataset_id, tenant_id) == ("kb-1", "tenant-1")
+        return True, {"total": 1, "items": [{"name": "产品"}]}
+
+    monkeypatch.setattr(module.dataset_api_service, "list_nav_clusters", _list_roots)
+    response = _run(inspect.unwrap(module.list_dataset_nav)("tenant-1", "kb-1"))
+    assert response["code"] == module.RetCode.SUCCESS
+    assert response["data"] == {"total": 1, "items": [{"name": "产品"}]}
+
+    async def _no_access(*_args):
+        return False, "No authorization."
+
+    monkeypatch.setattr(module.dataset_api_service, "list_nav_children", _no_access)
+    response = _run(inspect.unwrap(module.list_dataset_nav_children)("tenant-1", "kb-1", "产品"))
+    assert response["code"] == module.RetCode.AUTHENTICATION_ERROR
+
+    async def _deleted(*_args):
+        return True, {"deleted": 2}
+
+    monkeypatch.setattr(module.dataset_api_service, "delete_nav", _deleted)
+    response = _run(inspect.unwrap(module.delete_dataset_nav)("tenant-1", "kb-1"))
+    assert response["data"] == {"deleted": 2}
+
+    async def _delete_failed(*_args):
+        return False, "Failed to delete the navigation tree."
+
+    monkeypatch.setattr(module.dataset_api_service, "delete_nav", _delete_failed)
+    response = _run(inspect.unwrap(module.delete_dataset_nav)("tenant-1", "kb-1"))
+    assert response["code"] == module.RetCode.DATA_ERROR
+    assert response["message"] == "Failed to delete the navigation tree."
+
+    async def _boom(*_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module.dataset_api_service, "delete_nav_node", _boom)
+    response = _run(inspect.unwrap(module.delete_dataset_nav_node)("tenant-1", "kb-1", "产品"))
+    assert response["code"] == module.RetCode.DATA_ERROR
+    assert response["message"] == "Internal server error"
 
 @pytest.mark.p3
 def test_run_index_matrix_unit(monkeypatch):

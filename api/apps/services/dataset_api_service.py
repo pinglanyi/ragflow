@@ -1957,6 +1957,272 @@ async def get_skill_page(dataset_id: str, tenant_id: str, skill_kwd: str):
     }
 
 
+_NAV_COMPILE_KWD = "dataset_nav"
+_NAV_ROOT_PARENT = "root"
+_NAV_FIELDS = [
+    "id",
+    "name",
+    "type_kwd",
+    "content_with_weight",
+    "doc_count_int",
+    "doc_ids_kwd",
+    "doc_id",
+    "depth_int",
+    "parent_kwd",
+]
+
+
+def _nav_item(row: dict) -> dict:
+    """Shape one nav row into a UI node: name, description, doc count, type."""
+    try:
+        payload = json.loads(row.get("content_with_weight") or "{}")
+    except Exception:
+        payload = {}
+    is_cluster = (row.get("type_kwd") or payload.get("type")) == "nav_cluster"
+    return {
+        "name": row.get("name") or "",
+        "description": payload.get("description") or "",
+        # doc_id count under this node: the cluster's tally, or 1 for a leaf.
+        "doc_count": int(row.get("doc_count_int") or 0) if is_cluster else 1,
+        "type": "cluster" if is_cluster else "doc",
+        "doc_id": None if is_cluster else (row.get("doc_id") or row.get("name")),
+        "has_children": is_cluster,
+    }
+
+
+async def _nav_search(dataset_id: str, tenant_id: str, condition: dict, page: int, page_size: int):
+    """Run one nav-tree search and shape the hits into UI nodes."""
+    if not KnowledgebaseService.accessible(dataset_id, tenant_id):
+        return False, "No authorization."
+    _, kb = KnowledgebaseService.get_by_id(dataset_id)
+
+    pack = _compiled_index_or_none(kb.tenant_id, dataset_id)
+    if pack is None:
+        return True, {"total": 0, "items": []}
+    index_nm, _ = pack
+
+    from common.doc_store.doc_store_base import OrderByExpr
+
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 1000), 2000))
+    offset = (page - 1) * page_size
+
+    order_by = OrderByExpr()
+    try:
+        # Biggest clusters first; leaves (no doc_count_int) fall to the end.
+        order_by.desc("doc_count_int")
+    except Exception:
+        order_by = OrderByExpr()
+
+    try:
+        res = settings.docStoreConn.search(
+            select_fields=_NAV_FIELDS,
+            highlight_fields=[],
+            condition=condition,
+            match_expressions=[],
+            order_by=order_by,
+            offset=offset,
+            limit=page_size,
+            index_names=index_nm,
+            knowledgebase_ids=[dataset_id],
+        )
+        field_map = settings.docStoreConn.get_fields(res, _NAV_FIELDS)
+    except Exception:
+        logging.exception("dataset_nav: docStore search failed for kb=%s", dataset_id)
+        return True, {"total": 0, "items": []}
+
+    total = settings.docStoreConn.get_total(res)
+    items = [_nav_item(row) for row in (field_map or {}).values()]
+    return True, {"total": int(total or 0), "items": items}
+
+
+async def list_nav_clusters(dataset_id: str, tenant_id: str, page: int = 1, page_size: int = 1000):
+    """First level of the nav tree: the clusters with no parent."""
+    condition = {
+        "compile_kwd": [_NAV_COMPILE_KWD],
+        "type_kwd": ["nav_cluster"],
+        "parent_kwd": [_NAV_ROOT_PARENT],
+    }
+    return await _nav_search(dataset_id, tenant_id, condition, page, page_size)
+
+
+async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: int = 1, page_size: int = 1000):
+    """Direct children of the node ``name`` — sub-clusters and document leaves.
+
+    One level at a time (lazy) so the tree loads hierarchically as the user
+    expands each node.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return True, {"total": 0, "items": []}
+    condition = {
+        "compile_kwd": [_NAV_COMPILE_KWD],
+        "parent_kwd": [name.strip()],
+    }
+    return await _nav_search(dataset_id, tenant_id, condition, page, page_size)
+
+
+async def _acquire_nav_lock(dataset_id: str):
+    """Acquire the same per-dataset lock used by navigation compilation."""
+    from rag.advanced_rag.knowlege_compile.dataset_nav import nav_lock_key
+    from rag.utils.redis_conn import RedisDistributedLock
+
+    lock = RedisDistributedLock(nav_lock_key(dataset_id), timeout=300, blocking_timeout=5)
+    try:
+        acquired = await thread_pool_exec(lock.acquire)
+    except Exception:
+        logging.exception("dataset_nav: lock acquire failed for kb=%s", dataset_id)
+        return None
+    return lock if acquired else None
+
+
+def _release_nav_lock(lock, dataset_id: str) -> None:
+    try:
+        lock.release()
+    except Exception:
+        logging.exception("dataset_nav: lock release failed for kb=%s", dataset_id)
+
+
+async def delete_nav(dataset_id: str, tenant_id: str):
+    """Delete the entire dataset navigation tree for a dataset.
+
+    Returns ``(True, {"deleted": <n>})``; succeeds with ``0`` when there is no
+    index yet.
+    """
+    if not KnowledgebaseService.accessible(dataset_id, tenant_id):
+        return False, "No authorization."
+    _, kb = KnowledgebaseService.get_by_id(dataset_id)
+
+    lock = await _acquire_nav_lock(dataset_id)
+    if lock is None:
+        return False, "Navigation tree is busy."
+    try:
+        pack = _compiled_index_or_none(kb.tenant_id, dataset_id)
+        if pack is None:
+            return True, {"deleted": 0}
+        index_nm, _ = pack
+        deleted = settings.docStoreConn.delete(
+            {"compile_kwd": [_NAV_COMPILE_KWD]},
+            index_nm,
+            dataset_id,
+        )
+    except Exception:
+        logging.exception("delete_nav: docStore delete failed for kb=%s", dataset_id)
+        return False, "Failed to delete the navigation tree."
+    finally:
+        _release_nav_lock(lock, dataset_id)
+
+    return True, {"deleted": int(deleted or 0)}
+
+
+async def delete_nav_node(dataset_id: str, tenant_id: str, name: str):
+    """Delete one navigation node (identified by ``name``) and its whole subtree.
+
+    Children reference their parent by ``name`` (``parent_kwd``), so removing a
+    cluster without its descendants would leave them orphaned in the tree view.
+    We therefore walk the subtree top-down and delete every node in it.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return True, {"deleted": 0}
+    name = name.strip()
+
+    if not KnowledgebaseService.accessible(dataset_id, tenant_id):
+        return False, "No authorization."
+    _, kb = KnowledgebaseService.get_by_id(dataset_id)
+
+    lock = await _acquire_nav_lock(dataset_id)
+    if lock is None:
+        return False, "Navigation tree is busy."
+    try:
+        pack = _compiled_index_or_none(kb.tenant_id, dataset_id)
+        if pack is None:
+            return True, {"deleted": 0}
+        index_nm, _ = pack
+        return await _delete_nav_node_locked(dataset_id, index_nm, name)
+    finally:
+        _release_nav_lock(lock, dataset_id)
+
+
+async def _delete_nav_node_locked(dataset_id: str, index_nm: str, name: str):
+    from common.doc_store.doc_store_base import OrderByExpr
+    from rag.advanced_rag.knowlege_compile.dataset_nav import nav_cluster_id, nav_doc_id
+
+    # Collect the node plus every descendant, level by level via parent_kwd.
+    # Deletion only starts after a complete scan, so a failed/truncated scan
+    # cannot leave descendants orphaned.
+    names: set[str] = {name}
+    node_ids: set[str] = {nav_cluster_id(dataset_id, name), nav_doc_id(name)}
+    frontier: list[str] = [name]
+    page_size = 10000
+    for _ in range(64):  # depth guard against a malformed tree
+        if not frontier:
+            break
+
+        rows_at_depth: list[dict] = []
+        offset = 0
+        try:
+            while True:
+                res = settings.docStoreConn.search(
+                    select_fields=["id", "name"],
+                    highlight_fields=[],
+                    condition={"compile_kwd": [_NAV_COMPILE_KWD], "parent_kwd": frontier},
+                    match_expressions=[],
+                    order_by=OrderByExpr(),
+                    offset=offset,
+                    limit=page_size,
+                    index_names=index_nm,
+                    knowledgebase_ids=[dataset_id],
+                )
+                page_rows = settings.docStoreConn.get_fields(res, ["id", "name"]) or {}
+                total = int(settings.docStoreConn.get_total(res) or 0)
+                rows_at_depth.extend(page_rows.values())
+                offset += len(page_rows)
+                if offset >= total:
+                    break
+                if not page_rows:
+                    logging.error(
+                        "delete_nav_node: incomplete subtree scan for kb=%s name=%s offset=%s total=%s",
+                        dataset_id,
+                        name,
+                        offset,
+                        total,
+                    )
+                    return False, "Failed to scan the navigation subtree."
+        except Exception:
+            logging.exception("delete_nav_node: subtree scan failed for kb=%s name=%s", dataset_id, name)
+            return False, "Failed to scan the navigation subtree."
+
+        nxt: list[str] = []
+        for row in rows_at_depth:
+            child = row.get("name")
+            child_id = row.get("id")
+            if not isinstance(child_id, str) or not child_id:
+                logging.error("delete_nav_node: child row without id for kb=%s name=%s", dataset_id, name)
+                return False, "Failed to scan the navigation subtree."
+            node_ids.add(child_id)
+            if isinstance(child, str) and child and child not in names:
+                names.add(child)
+                nxt.append(child)
+        frontier = nxt
+    else:
+        if frontier:
+            logging.error("delete_nav_node: subtree exceeds maximum depth for kb=%s name=%s", dataset_id, name)
+            return False, "Navigation subtree exceeds the maximum depth."
+
+    try:
+        deleted = settings.docStoreConn.delete(
+            {"compile_kwd": [_NAV_COMPILE_KWD], "id": list(node_ids)},
+            index_nm,
+            dataset_id,
+        )
+    except Exception:
+        logging.exception("delete_nav_node: docStore delete failed for kb=%s name=%s", dataset_id, name)
+        return False, "Failed to delete the navigation node."
+
+    return True, {"deleted": int(deleted or 0)}
+
+
+
+
 async def update_wiki_page(
     dataset_id: str,
     tenant_id: str,

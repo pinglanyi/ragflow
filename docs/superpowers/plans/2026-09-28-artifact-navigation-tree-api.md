@@ -28,7 +28,7 @@
 - Consumes: `_compiled_index_or_none(tenant_id: str, kb_id: str)`, `KnowledgebaseService.accessible`, `settings.docStoreConn`.
 - Produces: `list_nav_clusters(dataset_id, tenant_id, page=1, page_size=1000)`, `list_nav_children(dataset_id, tenant_id, name, page=1, page_size=1000)`, `delete_nav(dataset_id, tenant_id)`, and `delete_nav_node(dataset_id, tenant_id, name)` returning `(success: bool, result: dict | str)`.
 
-- [ ] **Step 1: Write failing service tests**
+- [x] **Step 1: Write failing service tests**
 
 Add tests that assert root and child filters, UI node shaping, empty-index behavior, authorization failure, whole-tree deletion, and recursive descendant deletion.
 
@@ -43,7 +43,7 @@ assert search_calls[0]["condition"] == {
 }
 ```
 
-- [ ] **Step 2: Run tests and verify the missing functions fail**
+- [x] **Step 2: Run tests and verify the missing functions fail**
 
 Run:
 
@@ -53,11 +53,11 @@ Run:
 
 Expected: FAIL because `list_nav_clusters`, `list_nav_children`, `delete_nav`, and `delete_nav_node` do not exist.
 
-- [ ] **Step 3: Implement the service functions**
+- [x] **Step 3: Implement the service functions**
 
 Add constants for `dataset_nav`, root parent, and selected fields; convert stored rows into `{name, description, doc_count, type, doc_id, has_children}`; query roots/children with paging; delete the full tree or a recursively discovered subtree.
 
-- [ ] **Step 4: Run service tests**
+- [x] **Step 4: Run service tests**
 
 Run the Step 2 command. Expected: all navigation service tests PASS.
 
@@ -71,7 +71,7 @@ Run the Step 2 command. Expected: all navigation service tests PASS.
 - Consumes: the four service functions from Task 1.
 - Produces: `GET /datasets/<dataset_id>/nav`, `GET /datasets/<dataset_id>/nav/<path:name>/children`, `DELETE /datasets/<dataset_id>/nav`, and `DELETE /datasets/<dataset_id>/nav/<path:name>`.
 
-- [ ] **Step 1: Write failing route tests**
+- [x] **Step 1: Write failing route tests**
 
 Add handler tests that unwrap the authentication decorators, stub each service call, and verify success, authorization error, and internal-error response envelopes.
 
@@ -81,15 +81,15 @@ assert res["code"] == module.RetCode.SUCCESS
 assert res["data"] == {"total": 1, "items": [{"name": "产品"}]}
 ```
 
-- [ ] **Step 2: Run route tests and verify missing handlers fail**
+- [x] **Step 2: Run route tests and verify missing handlers fail**
 
 Run the Task 1 pytest command. Expected: FAIL because the four route handlers do not exist.
 
-- [ ] **Step 3: Implement the four route handlers**
+- [x] **Step 3: Implement the four route handlers**
 
 Each handler awaits its matching service function, returns `get_result(data=result)` on success, maps service authorization failures to `RetCode.AUTHENTICATION_ERROR`, and maps unexpected exceptions to `get_error_data_result(message="Internal server error")`.
 
-- [ ] **Step 4: Run focused and full route tests**
+- [x] **Step 4: Run focused and full route tests**
 
 Run:
 
@@ -99,7 +99,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 5: Review, commit, and push**
+- [x] **Step 5: Review, commit, and push**
 
 ```powershell
 git diff --check

@@ -787,6 +787,106 @@ async def get_skill_page(tenant_id, dataset_id, skill_kwd):
         return get_error_data_result(message="Internal server error")
 
 
+@manager.route("/datasets/<dataset_id>/nav", methods=["GET"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def list_dataset_nav(tenant_id, dataset_id):
+    """First level of the dataset navigation tree — the top-level clusters.
+
+    GET /api/v1/datasets/<dataset_id>/nav
+    Success: {"code": 0, "data": {"total": <n>, "items": [{name, description, doc_count, type, has_children}, ...]}}
+    """
+    try:
+        success, result = await dataset_api_service.list_nav_clusters(
+            dataset_id,
+            tenant_id,
+        )
+        if success:
+            return get_result(data=result)
+        if result == "No authorization.":
+            return get_result(data=False, message=result, code=RetCode.AUTHENTICATION_ERROR)
+        return get_error_data_result(message=result)
+    except Exception as e:
+        logging.exception(e)
+        return get_error_data_result(message="Internal server error")
+
+
+@manager.route("/datasets/<dataset_id>/nav/<path:name>/children", methods=["GET"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def list_dataset_nav_children(tenant_id, dataset_id, name):
+    """Direct children of a navigation node (hierarchical, one level per call).
+
+    GET /api/v1/datasets/<dataset_id>/nav/<name>/children
+    Success: {"code": 0, "data": {"total": <n>, "items": [{name, description, doc_count, type, doc_id, has_children}, ...]}}
+    """
+    try:
+        success, result = await dataset_api_service.list_nav_children(
+            dataset_id,
+            tenant_id,
+            name,
+        )
+        if success:
+            return get_result(data=result)
+        if result == "No authorization.":
+            return get_result(data=False, message=result, code=RetCode.AUTHENTICATION_ERROR)
+        return get_error_data_result(message=result)
+    except Exception as e:
+        logging.exception(e)
+        return get_error_data_result(message="Internal server error")
+
+
+@manager.route("/datasets/<dataset_id>/nav", methods=["DELETE"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def delete_dataset_nav(tenant_id, dataset_id):
+    """Delete the entire dataset navigation tree.
+
+    DELETE /api/v1/datasets/<dataset_id>/nav
+    Success: {"code": 0, "data": {"deleted": <n>}}
+    """
+    try:
+        success, result = await dataset_api_service.delete_nav(
+            dataset_id,
+            tenant_id,
+        )
+        if success:
+            return get_result(data=result)
+        if result == "No authorization.":
+            return get_result(data=False, message=result, code=RetCode.AUTHENTICATION_ERROR)
+        return get_error_data_result(message=result)
+    except Exception as e:
+        logging.exception(e)
+        return get_error_data_result(message="Internal server error")
+
+
+@manager.route("/datasets/<dataset_id>/nav/<path:name>", methods=["DELETE"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def delete_dataset_nav_node(tenant_id, dataset_id, name):
+    """Delete one navigation node and its whole subtree.
+
+    DELETE /api/v1/datasets/<dataset_id>/nav/<name>
+    Success: {"code": 0, "data": {"deleted": <n>}}
+    """
+    try:
+        success, result = await dataset_api_service.delete_nav_node(
+            dataset_id,
+            tenant_id,
+            name,
+        )
+        if success:
+            return get_result(data=result)
+        if result == "No authorization.":
+            return get_result(data=False, message=result, code=RetCode.AUTHENTICATION_ERROR)
+        return get_error_data_result(message=result)
+    except Exception as e:
+        logging.exception(e)
+        return get_error_data_result(message="Internal server error")
+
+
+
+
 # The two artifact-commit endpoints
 #   GET /datasets/<dataset_id>/artifacts/<page_type>/<path:slug>/commits
 #   GET /datasets/<dataset_id>/artifacts/commits/<commit_id>
