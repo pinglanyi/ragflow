@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 export interface SelectedNavNode {
   parentName: string;
   name: string;
+  displayName: string;
   description: string;
   doc_count: number;
 }
@@ -93,6 +94,7 @@ export function useCompilationNav() {
       setSelectedNode({
         parentName,
         name: node.name,
+        displayName: node.display_name || node.name,
         description: node.description,
         doc_count: node.doc_count,
       });

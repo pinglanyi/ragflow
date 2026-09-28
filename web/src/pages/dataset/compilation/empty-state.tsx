@@ -14,7 +14,7 @@ import { useGenerateStatus } from '@/pages/dataset/dataset/generate-button/use-g
 import { replaceText } from '@/pages/dataset/process-log-modal';
 import { toFixed } from '@/utils/common-util';
 
-type EmptyStateType = 'llm-wiki' | 'skills';
+type EmptyStateType = 'llm-wiki' | 'skills' | 'tree';
 
 interface ICompilationEmptyStateProps {
   type: EmptyStateType;
@@ -25,16 +25,19 @@ interface ICompilationEmptyStateProps {
 const DefaultGenerateTypeMap: Record<EmptyStateType, GenerateType> = {
   'llm-wiki': GenerateType.Artifact,
   skills: GenerateType.ToSkills,
+  tree: GenerateType.ToSkills,
 };
 
 const TitleKeyMap: Record<EmptyStateType, string> = {
   'llm-wiki': 'knowledgeDetails.noWikiPages',
   skills: 'knowledgeDetails.noSkills',
+  tree: 'datasetNav.empty',
 };
 
 const LabelKeyMap: Record<EmptyStateType, string> = {
   'llm-wiki': 'knowledgeDetails.artifact',
   skills: 'knowledgeDetails.toSkills',
+  tree: 'knowledgeDetails.navTree',
 };
 
 export function CompilationEmptyState({

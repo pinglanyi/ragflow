@@ -806,6 +806,7 @@ def test_navigation_tree_service_queries_and_shapes_nodes_unit(monkeypatch):
         "items": [
             {
                 "name": "产品",
+                "display_name": "产品",
                 "description": "产品文档",
                 "doc_count": 3,
                 "type": "cluster",
@@ -825,6 +826,7 @@ def test_navigation_tree_service_queries_and_shapes_nodes_unit(monkeypatch):
     assert children["items"] == [
         {
             "name": "说明书.pdf",
+            "display_name": "说明书.pdf",
             "description": "",
             "doc_count": 1,
             "type": "doc",

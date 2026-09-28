@@ -28,7 +28,7 @@ export function buildNavTreeData(
   return items.map((node) => {
     const item: TreeDataItem = {
       id: node.name,
-      name: node.name,
+      name: node.display_name || node.name,
       actions: getActions?.(node, null),
       onClick: () => onParentClick(node),
     };
@@ -38,7 +38,7 @@ export function buildNavTreeData(
       if (children?.length) {
         item.children = children.map((child) => ({
           id: `${node.name}/${child.name}`,
-          name: child.name,
+          name: child.display_name || child.name,
           actions: getActions?.(child, node.name),
           onClick: () => onChildClick(child, node.name),
         }));

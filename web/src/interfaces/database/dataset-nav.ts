@@ -1,5 +1,6 @@
 export interface DatasetNavNode {
   name: string;
+  display_name?: string;
   description: string;
   doc_count: number;
   type: string;

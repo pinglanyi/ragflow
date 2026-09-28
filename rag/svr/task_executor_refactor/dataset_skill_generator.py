@@ -325,6 +325,62 @@ def skill_all_es_row(ctx: TaskContext, roots: list["SkillNode"]) -> Dict:
     }
 
 
+def nav_clusters_from_skill_roots(
+    roots: list["SkillNode"],
+    doc_names: dict[str, str],
+) -> list[dict]:
+    """Project the corpus skill result into the two-level dataset nav UI.
+
+    The skill generator already owns the expensive summaries and embeddings.
+    Each top-level skill becomes a navigation cluster and every document below
+    it becomes a direct leaf, matching the current Tree component's lazy
+    root/children contract.
+    """
+
+    def _vector(value) -> list[float]:
+        if value is None:
+            return []
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        return list(value or [])
+
+    def _leaves(node: "SkillNode") -> list["SkillNode"]:
+        if not node.children:
+            return [node]
+        out: list[SkillNode] = []
+        for child in node.children:
+            out.extend(_leaves(child))
+        return out
+
+    clusters: list[dict] = []
+    for root in roots:
+        documents: list[dict] = []
+        seen: set[str] = set()
+        for leaf in _leaves(root):
+            for doc_id in leaf.doc_ids:
+                if not doc_id or doc_id in seen:
+                    continue
+                seen.add(doc_id)
+                documents.append(
+                    {
+                        "doc_id": doc_id,
+                        "name": doc_names.get(doc_id) or doc_id,
+                        "description": leaf.summary,
+                        "embedding": _vector(leaf.vec),
+                    }
+                )
+        clusters.append(
+            {
+                "name": root.folder_name,
+                "description": root.summary,
+                "doc_ids": list(root.doc_ids),
+                "embedding": _vector(root.vec),
+                "documents": documents,
+            }
+        )
+    return clusters
+
+
 # ----- main entry ----------------------------------------------------
 
 
@@ -581,6 +637,29 @@ async def run_corpus2skill(
     except Exception:
         logging.exception("skill: bulk insert failed (rows=%d)", len(rows))
         return
+
+    # Tree is a second view over the same corpus clustering result. Persist a
+    # compact two-level projection so opening the Tree tab does not require
+    # documents to have been reparsed with a separate tree template first.
+    try:
+        from rag.advanced_rag.knowlege_compile.dataset_nav import (
+            replace_dataset_nav_from_clusters,
+        )
+
+        doc_names = {
+            str(doc["id"]): str(doc.get("name") or doc["id"])
+            for doc in eligible_docs
+        }
+        nav_count = await replace_dataset_nav_from_clusters(
+            ctx.tenant_id,
+            ctx.kb_id,
+            nav_clusters_from_skill_roots(roots, doc_names),
+        )
+        logging.info("skill: persisted %d dataset navigation row(s)", nav_count)
+    except Exception:
+        # Skill output remains useful even if the secondary Tree projection
+        # fails; surface the error in server logs and allow a retry.
+        logging.exception("skill: dataset navigation projection failed")
 
     progress(
         1.0,

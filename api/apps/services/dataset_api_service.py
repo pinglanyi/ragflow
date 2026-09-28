@@ -1981,6 +1981,7 @@ def _nav_item(row: dict) -> dict:
     is_cluster = (row.get("type_kwd") or payload.get("type")) == "nav_cluster"
     return {
         "name": row.get("name") or "",
+        "display_name": payload.get("display_name") or row.get("name") or "",
         "description": payload.get("description") or "",
         # doc_id count under this node: the cluster's tally, or 1 for a leaf.
         "doc_count": int(row.get("doc_count_int") or 0) if is_cluster else 1,

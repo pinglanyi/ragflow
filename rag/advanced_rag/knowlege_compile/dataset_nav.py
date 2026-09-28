@@ -313,6 +313,7 @@ def _make_nav_doc_row(
     depth_int: int,
     embd_mdl=None,
     embedding: list[float] | None = None,
+    display_name: str | None = None,
 ) -> dict:
     """Build a nav_doc ES/Infinity row dict for a single document leaf node."""
     row: dict = {
@@ -327,7 +328,11 @@ def _make_nav_doc_row(
         "depth_int": depth_int,
         "available_int": 0,
     }
-    payload = {"type": "nav_doc", "description": summary}
+    payload = {
+        "type": "nav_doc",
+        "description": summary,
+        "display_name": (display_name or "").strip(),
+    }
     row["content_with_weight"] = json.dumps(payload, ensure_ascii=False)
     ltks = _tokenize(summary)
     row["content_ltks"] = ltks
@@ -336,6 +341,93 @@ def _make_nav_doc_row(
         dim = len(embedding)
         row[_vec_field(dim)] = embedding
     return row
+
+
+async def replace_dataset_nav_from_clusters(
+    tenant_id: str,
+    kb_id: str,
+    clusters: list[dict],
+) -> int:
+    """Replace a dataset navigation tree from precomputed corpus clusters.
+
+    ``clusters`` is a two-level projection designed for the dataset Tree UI::
+
+        [{"name": str, "description": str, "doc_ids": [str],
+          "embedding": [float],
+          "documents": [{"doc_id": str, "name": str,
+                         "description": str, "embedding": [float]}]}]
+
+    Corpus-to-Skills already performs the expensive document summarization and
+    clustering work.  Reusing that output keeps Tree generation explicit and
+    avoids a second LLM pass.  The replace is protected by the same Redis lock
+    as incremental document updates, so readers see either the old tree or the
+    newly generated one.
+    """
+    if not tenant_id or not kb_id:
+        return 0
+
+    rows: list[dict] = []
+    seen_docs: set[str] = set()
+    for cluster in clusters or []:
+        name = str(cluster.get("name") or "").strip()
+        if not name:
+            continue
+        documents = [doc for doc in (cluster.get("documents") or []) if isinstance(doc, dict)]
+        doc_ids = [str(doc_id) for doc_id in (cluster.get("doc_ids") or []) if doc_id]
+        rows.append(
+            _make_nav_cluster_row(
+                kb_id,
+                name,
+                str(cluster.get("description") or ""),
+                "root",
+                0,
+                doc_ids,
+                list(cluster.get("embedding") or []),
+            )
+        )
+        for document in documents:
+            doc_id = str(document.get("doc_id") or "").strip()
+            if not doc_id or doc_id in seen_docs:
+                continue
+            seen_docs.add(doc_id)
+            rows.append(
+                _make_nav_doc_row(
+                    kb_id,
+                    doc_id,
+                    str(document.get("description") or ""),
+                    name,
+                    1,
+                    embedding=list(document.get("embedding") or []),
+                    display_name=str(document.get("name") or ""),
+                )
+            )
+
+    if not rows:
+        return 0
+
+    from common import settings
+
+    lock = RedisDistributedLock(
+        nav_lock_key(kb_id),
+        timeout=300,
+        blocking_timeout=_LOCK_BLOCKING_TIMEOUT_S,
+    )
+    try:
+        await lock.spin_acquire()
+        index = _index_name(tenant_id)
+        await thread_pool_exec(
+            settings.docStoreConn.delete,
+            {"compile_kwd": [_COMPILE_KWD]},
+            index,
+            kb_id,
+        )
+        await thread_pool_exec(settings.docStoreConn.insert, rows, index, kb_id)
+        return len(rows)
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            logging.exception("dataset_nav: replacement lock release failed for kb=%s", kb_id)
 
 
 def _make_nav_cluster_row(

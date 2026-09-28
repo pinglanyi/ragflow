@@ -660,10 +660,11 @@ async def run_wiki(
     kb_name = kb.name
     kb_description = kb.description
 
-    # 2. Pick docs eligible for artifact compilation (those whose
-    # configured template group resolves to at least one artifacts-kind
-    # child). The frontend Artifact button targets the KB, but the
-    # per-doc opt-in is what gates inclusion.
+    # 2. Prefer each document's configured artifacts template. If the whole
+    # KB has no such assignment, use the built-in Wiki template for every
+    # document. The Generate button is KB-scoped and is available whenever
+    # chunks exist, so silently completing with zero pages is not a useful or
+    # internally consistent fallback.
     all_docs, _ = await thread_pool_exec(
         DocumentService.get_by_kb_id,
         kb_id=ctx.kb_id,
@@ -676,7 +677,7 @@ async def run_wiki(
         types=[],
         suffix=[],
     )
-    eligible = []
+    eligible: list[tuple[dict, dict]] = []
     for d in all_docs or []:
         pc = d.get("parser_config") or {}
         for template_id in _parser_config_compilation_template_ids(pc, ctx.tenant_id):
@@ -684,11 +685,36 @@ async def run_wiki(
             config = template.get("config") if template else {}
             kind = _compilation_template_kind(config.get("kind") if isinstance(config, dict) else "")
             if kind == "artifacts":
-                eligible.append((d, template_id))
+                eligible.append((d, config))
                 break
     if not eligible:
-        progress(1.0, "No documents are configured for wiki compilation.")
-        return
+        builtin = next(
+            (
+                template
+                for template in CompilationTemplateService.load_builtins_from_files()
+                if _compilation_template_kind(template.get("kind") or "") == "artifacts"
+            ),
+            None,
+        )
+        fallback_config = dict((builtin or {}).get("config") or {})
+        if not fallback_config:
+            progress(-1, "Built-in Wiki compilation template is unavailable.")
+            return
+        fallback_config = CompilationTemplateService.fill_config_default_llm(
+            fallback_config,
+            ctx.tenant_id,
+        )
+        eligible = [
+            (doc, fallback_config)
+            for doc in (all_docs or [])
+            if doc.get("id")
+        ]
+        if not eligible:
+            progress(1.0, "No documents are available for wiki compilation.")
+            return
+        progress(
+            msg=f"No document-specific Wiki template found; using built-in Wiki template for {len(eligible)} document(s).",
+        )
 
     # 3. Resolve chat models. MAP is per-(doc, template) so each pair
     # uses its template's own ``llm_id``. REDUCE / PLAN / REFINE are
@@ -753,22 +779,12 @@ async def run_wiki(
     kb_chat_llm_id: Optional[str] = None
     kb_writer_example: Optional[str] = None
     n_docs = len(eligible)
-    for i, (doc, template_id) in enumerate(eligible):
+    for i, (doc, parser_cfg) in enumerate(eligible):
         doc_id = doc["id"]
         progress(
             0.05 + 0.6 * (i / n_docs),
             f"MAP {i + 1}/{n_docs}: {doc.get('name', doc_id)}",
         )
-
-        template = CompilationTemplateService.get_saved(template_id, ctx.tenant_id)
-        if not template:
-            logging.warning(
-                "artifact: template %s not found for doc %s; skipping",
-                template_id,
-                doc_id,
-            )
-            continue
-        parser_cfg = template.get("config") or {}
 
         map_llm_id = (parser_cfg.get("llm_id") or "").strip() if isinstance(parser_cfg, dict) else ""
         map_chat_mdl = _bundle_for(map_llm_id)
