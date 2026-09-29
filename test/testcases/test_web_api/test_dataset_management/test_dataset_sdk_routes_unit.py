@@ -854,6 +854,74 @@ def test_navigation_tree_service_queries_and_shapes_nodes_unit(monkeypatch):
 
 
 @pytest.mark.p3
+def test_skill_page_falls_back_to_aggregate_tree_unit(monkeypatch):
+    module = _load_dataset_module(monkeypatch)
+    _install_order_by_stub(monkeypatch)
+
+    aggregate_tree = [
+        {
+            "skill_kwd": "skill-00-products",
+            "md_with_weight": "---\nname: skill-00-products\n---\n\n产品总览",
+            "children_kwd": [
+                {
+                    "skill_kwd": "group-00-manuals",
+                    "md_with_weight": "---\nname: group-00-manuals\n---\n\n说明书摘要",
+                    "children_kwd": [],
+                }
+            ],
+        }
+    ]
+
+    class _SkillDocStore:
+        @staticmethod
+        def index_exist(*_args, **_kwargs):
+            return True
+
+        @staticmethod
+        def search(**kwargs):
+            return kwargs["condition"]
+
+        @staticmethod
+        def get_fields(result, _fields):
+            if result.get("compile_kwd") == ["skill"]:
+                # Reproduces the deployed state: aggregate tree exists while
+                # the per-node skill rows are absent.
+                return {}
+            if result.get("compile_kwd") == ["skill_all"]:
+                return {
+                    "all": {
+                        "id": "skill-all-row",
+                        "kb_id": "kb-1",
+                        "doc_id": "kb-1",
+                        "compile_kwd": "skill_all",
+                        "skill_with_weight": json.dumps(aggregate_tree),
+                    }
+                }
+            return {}
+
+    monkeypatch.setattr(module.settings, "docStoreConn", _SkillDocStore())
+
+    success, page = _run(
+        module.dataset_api_service.get_skill_page(
+            "kb-1", "tenant-1", "group-00-manuals"
+        )
+    )
+
+    assert success is True
+    assert page == {
+        "id": None,
+        "kb_id": "kb-1",
+        "doc_id": "kb-1",
+        "compile_kwd": "skill",
+        "skill_kwd": "group-00-manuals",
+        "depth_int": 1,
+        "children_kwd": [],
+        "source_doc_ids": [],
+        "md_with_weight": "---\nname: group-00-manuals\n---\n\n说明书摘要",
+    }
+
+
+@pytest.mark.p3
 def test_navigation_tree_children_fall_back_to_cluster_document_ids_unit(monkeypatch):
     module = _load_dataset_module(monkeypatch)
     _install_order_by_stub(monkeypatch)

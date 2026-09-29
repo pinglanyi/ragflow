@@ -1892,6 +1892,50 @@ async def get_skill_tree(dataset_id: str, tenant_id: str):
     }
 
 
+def _find_skill_page_in_tree(nodes: list[dict], skill_kwd: str, depth: int = 0) -> dict | None:
+    """Recover one skill page from the recursive ``skill_all`` payload."""
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        if node.get("skill_kwd") == skill_kwd:
+            children = node.get("children_kwd") or []
+            return {
+                "id": None,
+                "skill_kwd": skill_kwd,
+                "depth_int": depth,
+                "children_kwd": [
+                    child.get("skill_kwd")
+                    for child in children
+                    if isinstance(child, dict) and child.get("skill_kwd")
+                ],
+                "source_doc_ids": [],
+                "md_with_weight": node.get("md_with_weight") or "",
+            }
+        found = _find_skill_page_in_tree(
+            node.get("children_kwd") or [], skill_kwd, depth + 1
+        )
+        if found:
+            return found
+    return None
+
+
+async def _get_skill_page_from_tree(dataset_id: str, tenant_id: str, skill_kwd: str):
+    success, tree = await get_skill_tree(dataset_id, tenant_id)
+    if not success or not tree:
+        return success, tree
+    page = _find_skill_page_in_tree(tree.get("skill_with_weight") or [], skill_kwd)
+    if not page:
+        return True, None
+    page.update(
+        {
+            "kb_id": tree.get("kb_id") or dataset_id,
+            "doc_id": tree.get("doc_id") or dataset_id,
+            "compile_kwd": _SKILL_COMPILE_KWD,
+        }
+    )
+    return True, page
+
+
 async def get_skill_page(dataset_id: str, tenant_id: str, skill_kwd: str):
     """Fetch the full markdown body for a single skill node."""
     if not KnowledgebaseService.accessible(dataset_id, tenant_id):
@@ -1938,10 +1982,10 @@ async def get_skill_page(dataset_id: str, tenant_id: str, skill_kwd: str):
             dataset_id,
             skill_kwd,
         )
-        return True, None
+        field_map = {}
 
     if not field_map:
-        return True, None
+        return await _get_skill_page_from_tree(dataset_id, tenant_id, skill_kwd)
 
     _, row = next(iter(field_map.items()))
     return True, {
