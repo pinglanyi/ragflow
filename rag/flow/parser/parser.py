@@ -41,7 +41,7 @@ from api.db.services.tenant_model_provider_service import TenantModelProviderSer
 from rag.nlp.delim import DEFAULT_DELIMITER
 from api.db.services.tenant_model_service import TenantModelService
 from common import settings
-from common.constants import LLMType
+from common.constants import LLMType, MAXIMUM_PAGE_NUMBER
 from common.misc_utils import get_uuid, thread_pool_exec
 from deepdoc.parser import ExcelParser, HtmlParser, TxtParser
 from deepdoc.parser.docling_parser import DoclingParser
@@ -54,6 +54,7 @@ from rag.flow.parser.pdf_chunk_metadata import (
     normalize_pdf_items_metadata,
     reorder_multi_column_bboxes,
 )
+from rag.flow.parser.pdf_page_ranges import pdf_page_ranges
 from rag.flow.parser.schema import ParserFromUpstream
 from rag.flow.parser.spreadsheet_positions import TCADP_POSITION_TAG_RE, tcadp_spreadsheet_json_items
 from rag.flow.parser.utils import (
@@ -81,6 +82,8 @@ TABLE_NO_SPLIT_ROWS = 1 << 30
 class ParserParam(ProcessParamBase):
     def __init__(self):
         super().__init__()
+        self.enable_vision_enhancement = None
+        self.vlm = {}
         self.allowed_output_format = {
             "pdf": [
                 "json",
@@ -263,12 +266,16 @@ class ParserParam(ProcessParamBase):
         }
 
     def check(self):
+        if self.enable_vision_enhancement is not None and not isinstance(self.enable_vision_enhancement, bool):
+            raise ValueError("enable_vision_enhancement must be a boolean or null")
+        if not isinstance(self.vlm, dict) or not isinstance(self.vlm.get("llm_id", ""), str):
+            raise ValueError("vlm must be an object with a string llm_id")  # noqa: TRY004 - parser validation uses ValueError
         pdf_config = self.setups.get("pdf", {})
         if pdf_config:
             pdf_parse_method = pdf_config.get("parse_method", "")
             self.check_empty(pdf_parse_method, "Parse method abnormal.")
 
-            if pdf_parse_method.lower() not in ["deepdoc", "plain_text", "mineru", "docling", "opendataloader", "tcadp parser", "paddleocr", "somark", "mistral ocr"]:
+            if pdf_parse_method.lower() not in ["deepdoc", "plain_text", "plain text", "mineru", "docling", "opendataloader", "tcadp parser", "paddleocr", "somark", "mistral ocr"]:
                 self.check_empty(pdf_config.get("lang", ""), "PDF VLM language")
 
             pdf_output_format = pdf_config.get("output_format", "")
@@ -358,7 +365,9 @@ class Parser(ProcessBase):
         parse_method = parse_method or ""
         if isinstance(raw_parse_method, str):
             lowered = raw_parse_method.lower()
-            if lowered.endswith("@mineru"):
+            if lowered == "plain text":
+                parse_method = "plain_text"
+            elif lowered.endswith("@mineru"):
                 parser_model_name = raw_parse_method
                 parse_method = "MinerU"
             elif lowered.endswith("@paddleocr"):
@@ -375,17 +384,31 @@ class Parser(ProcessBase):
                 parser_model_name = raw_parse_method
                 parse_method = "Mistral OCR"
 
+        page_ranges = pdf_page_ranges(conf.get("pages"), kwargs.get("from_page", 0), kwargs.get("to_page", MAXIMUM_PAGE_NUMBER))
+        if not page_ranges:
+            self.set_output("file", {**kwargs.get("file", {}), "outlines": []})
+            self.set_output("json" if conf["output_format"] == "json" else "markdown", [] if conf["output_format"] == "json" else "")
+            return
+        if page_ranges != [(0, MAXIMUM_PAGE_NUMBER)] and parse_method.lower() in {"mineru", "paddleocr", "docling", "opendataloader", "tcadp parser", "somark", "mistral ocr"}:
+            raise ValueError(f"PDF page ranges are not supported by flow parser {parse_method}")
+
         # DeepDOC returns structured page boxes directly.
         if parse_method.lower() == "deepdoc":
             pdf_parser = RAGFlowPdfParser()
-            bboxes = pdf_parser.parse_into_bboxes(blob, callback=self.callback)
-            if conf.get("enable_multi_column"):
-                bboxes = reorder_multi_column_bboxes(pdf_parser, bboxes)
+            bboxes = []
+            for page_from, page_to in page_ranges:
+                boxes = pdf_parser.parse_into_bboxes(blob, callback=self.callback, from_page=page_from, to_page=page_to)
+                if conf.get("enable_multi_column"):
+                    boxes = reorder_multi_column_bboxes(pdf_parser, boxes)
+                bboxes.extend(boxes)
 
         # Plain text only keeps extracted text lines.
         elif parse_method.lower() == "plain_text":
             pdf_parser = PlainParser()
-            lines, _ = pdf_parser(blob)
+            lines = []
+            for page_from, page_to in page_ranges:
+                selected, _ = pdf_parser(blob, from_page=page_from, to_page=page_to)
+                lines.extend(selected)
             bboxes = [{"text": t, "layout_type": "text"} for t, _ in lines]
 
         # MinerU/PaddleOCR/Docling/TCADP all return line-like sections that need
@@ -707,7 +730,10 @@ class Parser(ProcessBase):
                 vision_model_config = get_tenant_default_model_by_type(self._canvas._tenant_id, LLMType.VISION)
             vision_model = LLMBundle(self._canvas._tenant_id, vision_model_config, lang=self._param.setups["pdf"].get("lang"))
             pdf_parser = VisionParser(vision_model=vision_model)
-            lines, _ = pdf_parser(blob, callback=self.callback)
+            lines = []
+            for page_from, page_to in page_ranges:
+                selected, _ = pdf_parser(blob, callback=self.callback, from_page=page_from, to_page=page_to)
+                lines.extend(selected)
             bboxes = []
             for t, poss in lines:
                 for pn, x0, x1, top, bott in RAGFlowPdfParser.extract_positions(poss):
@@ -774,6 +800,8 @@ class Parser(ProcessBase):
             bboxes,
             self._canvas._tenant_id,
             conf.get("vlm"),
+            enabled=getattr(self._param, "enable_vision_enhancement", None),
+            global_vlm=getattr(self._param, "vlm", None),
             callback=self.callback,
             lang=getattr(self._canvas, "_language", None) or conf.get("lang") or "English",
         )
@@ -980,6 +1008,8 @@ class Parser(ProcessBase):
                 sections,
                 self._canvas._tenant_id,
                 conf.get("vlm"),
+                enabled=getattr(self._param, "enable_vision_enhancement", None),
+                global_vlm=getattr(self._param, "vlm", None),
                 callback=self.callback,
                 lang=getattr(self._canvas, "_language", None) or conf.get("lang") or "English",
             )
@@ -1117,6 +1147,8 @@ class Parser(ProcessBase):
                 json_results,
                 self._canvas._tenant_id,
                 conf.get("vlm"),
+                enabled=getattr(self._param, "enable_vision_enhancement", None),
+                global_vlm=getattr(self._param, "vlm", None),
                 callback=self.callback,
                 lang=getattr(self._canvas, "_language", None) or conf.get("lang") or "English",
             )
@@ -1200,6 +1232,12 @@ class Parser(ProcessBase):
                 "doc_type_kwd": "image",
             }
         ]
+        if getattr(self._param, "enable_vision_enhancement", None) is True and conf["parse_method"] == "ocr":
+            enhance_media_sections_with_vision(
+                json_result, self._canvas.get_tenant_id(), enabled=True,
+                global_vlm=getattr(self._param, "vlm", None), callback=self.callback,
+                lang=getattr(self._canvas, "_language", None) or conf.get("lang") or "English",
+            )
         self.set_output("json", json_result)
 
     def _audio(self, name, blob, **kwargs):

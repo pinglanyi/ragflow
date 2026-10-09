@@ -119,9 +119,9 @@ def test_media_enhancement_forwards_language_to_model_and_parser(monkeypatch, la
 
 @pytest.mark.p1
 def test_all_flow_media_enhancement_callers_forward_language():
-    tree = ast.parse((REPO_ROOT / "rag/flow/parser/parser.py").read_text())
+    tree = ast.parse((REPO_ROOT / "rag/flow/parser/parser.py").read_text(encoding="utf-8"))
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "enhance_media_sections_with_vision"]
 
-    assert len(calls) == 3
+    assert len(calls) == 4
     for call in calls:
         assert any(keyword.arg == "lang" for keyword in call.keywords), f"parser.py:{call.lineno} does not forward lang"

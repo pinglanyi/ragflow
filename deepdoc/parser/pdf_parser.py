@@ -1790,7 +1790,7 @@ class RAGFlowPdfParser:
 
         if effective_to_page - from_page <= batch_size:
             self.__images__(fnm, zoomin, page_from=from_page, page_to=effective_to_page, callback=callback)
-            return self._parse_loaded_window_into_bboxes(zoomin, callback=callback)
+            return self._to_global_boxes(self._parse_loaded_window_into_bboxes(zoomin, callback=callback))
 
         logging.info(
             "parse_into_bboxes uses chunk mode: from_page=%s, effective_to_page=%s, batch_size=%s",

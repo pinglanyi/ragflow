@@ -165,16 +165,24 @@ def enhance_media_sections_with_vision(
     vlm_conf=None,
     callback=None,
     lang="English",
+    enabled=None,
+    global_vlm=None,
 ):
-    if not sections or not tenant_id:
+    if enabled is False or not sections or not tenant_id:
         return sections
 
     lang = lang or "English"
+    if enabled is True:
+        vlm_conf = global_vlm or {}
 
     try:
         try:
+            if not vlm_conf or not vlm_conf.get("llm_id"):
+                raise ValueError("Use tenant default vision model")
             vision_model_config = resolve_model_config(tenant_id, LLMType.VISION, vlm_conf["llm_id"])
         except Exception:
+            if enabled is True and vlm_conf.get("llm_id"):
+                return sections
             vision_model_config = get_tenant_default_model_by_type(tenant_id, LLMType.VISION)
         vision_model = LLMBundle(tenant_id, vision_model_config, lang=lang)
     except Exception:
