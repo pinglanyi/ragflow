@@ -989,7 +989,7 @@ async def get_skill_page(tenant_id, dataset_id, skill_kwd):
 @manager.route("/datasets/<dataset_id>/navigation", methods=["GET"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs
-async def list_dataset_nav(tenant_id, dataset_id):
+async def list_dataset_navigation(tenant_id, dataset_id):
     """First level of the dataset navigation tree — the top-level clusters.
 
     GET /api/v1/datasets/<dataset_id>/navigation
@@ -1085,7 +1085,7 @@ async def search_dataset_nav(tenant_id, dataset_id):
 @manager.route("/datasets/<dataset_id>/navigation/<path:name>/children", methods=["GET"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs
-async def list_dataset_nav_children(tenant_id, dataset_id, name):
+async def list_dataset_navigation_children(tenant_id, dataset_id, name):
     """Direct children of a navigation node (hierarchical, one level per call).
 
     GET /api/v1/datasets/<dataset_id>/navigation/<name>/children
@@ -1114,7 +1114,7 @@ async def list_dataset_nav_children(tenant_id, dataset_id, name):
 @manager.route("/datasets/<dataset_id>/navigation", methods=["DELETE"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs
-async def delete_dataset_nav(tenant_id, dataset_id):
+async def delete_dataset_navigation(tenant_id, dataset_id):
     """Delete the entire dataset navigation tree.
 
     DELETE /api/v1/datasets/<dataset_id>/navigation
@@ -1142,7 +1142,7 @@ async def delete_dataset_nav(tenant_id, dataset_id):
 @manager.route("/datasets/<dataset_id>/navigation/<path:name>", methods=["DELETE"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs
-async def delete_dataset_nav_node(tenant_id, dataset_id, name):
+async def delete_dataset_navigation_node(tenant_id, dataset_id, name):
     """Delete one navigation node and its whole subtree.
 
     DELETE /api/v1/datasets/<dataset_id>/navigation/<name>
