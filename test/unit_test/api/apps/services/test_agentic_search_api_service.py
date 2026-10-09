@@ -42,6 +42,7 @@ def test_build_stateless_dialog_uses_knowledge_prompt_and_overrides():
     assert dialog.kb_ids == ["kb-1"]
     assert dialog.llm_id == "model-1"
     assert dialog.top_n == 4
+    assert dialog.rerank_candidates_count >= dialog.top_n
     assert dialog.similarity_threshold == 0.35
     assert "{knowledge}" in dialog.prompt_config["system"]
 

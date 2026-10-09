@@ -193,6 +193,7 @@ def build_stateless_dialog(*, tenant_id: str, dataset_ids: list[str], model: str
         prompt_config=deepcopy(_STATELESS_PROMPT_CONFIG),
         kb_ids=list(dataset_ids),
         top_n=options.get("top_n", 6),
+        rerank_candidates_count=max(64, options.get("top_n", 6)),
         top_k=1024,
         rerank_id="",
         similarity_threshold=options.get("similarity_threshold", 0.1),
