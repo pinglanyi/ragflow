@@ -313,10 +313,16 @@ async def vector_search(tools, query: str, kb_ids: list[str] | None = None, top_
 async def bm25_search(tools, query: str, kb_ids: list[str] | None = None, top_n: int | None = None, keywords: str = "", retrieval_query: str = "", doc_scope: list[str] | None = None) -> dict:
     top_n = _resolve_top_n(tools, top_n)
     _LOG.info(f'[BM25 search] Searching by keyword for "{query}" (keywords: {keywords})')
-    target_ids = kb_ids or tools.kb_ids
+    target_ids = tools.kb_ids if kb_ids is None else kb_ids
+    if not set(target_ids).issubset(set(tools.kb_ids)):
+        return {"chunks": [], "doc_aggs": [], "error": "kb_ids exceed the authorized knowledge bases"}
+    if not target_ids or top_n <= 0 or doc_scope == []:
+        return {"chunks": [], "doc_aggs": []}
     effective_query = f"{query} {retrieval_query}".strip()[:400] if retrieval_query else f"{query} {keywords}".strip() if keywords else query
     if hasattr(tools, "scoped_doc_ids"):
         doc_scope = tools.scoped_doc_ids(doc_scope)
+    if doc_scope == []:
+        return {"chunks": [], "doc_aggs": []}
     knn_top_k = _resolve_top_k(tools)
     rerank_candidates_count = _resolve_rerank_candidates(tools, top_n)
     _LOG.debug("[BM25 search] top_n=%s knn_top_k=%s rerank_candidates_count=%s", top_n, knn_top_k, rerank_candidates_count)
