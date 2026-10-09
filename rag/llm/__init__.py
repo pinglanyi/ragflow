@@ -63,9 +63,11 @@ class SupportedLiteLLMProvider(StrEnum):
     Astraflow_CN = "Astraflow-CN"
     FuturMix = "FuturMix"
     AIMLAPI = "aimlapi.com"
+    Opper = "Opper"
 
 
 FACTORY_DEFAULT_BASE_URL = {
+    SupportedLiteLLMProvider.Opper: "https://api.opper.ai/v3/compat",
     SupportedLiteLLMProvider.Tongyi_Qianwen: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     SupportedLiteLLMProvider.Dashscope: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     SupportedLiteLLMProvider.DeepSeek: "https://api.deepseek.com/v1",
@@ -100,6 +102,7 @@ FACTORY_DEFAULT_BASE_URL = {
 
 
 LITELLM_PROVIDER_PREFIX = {
+    SupportedLiteLLMProvider.Opper: "openai/",
     SupportedLiteLLMProvider.Tongyi_Qianwen: "dashscope/",
     SupportedLiteLLMProvider.Dashscope: "dashscope/",
     SupportedLiteLLMProvider.Bedrock: "bedrock/",

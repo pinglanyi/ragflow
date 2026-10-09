@@ -50,11 +50,7 @@ def _factory_model_types(llm: dict) -> list[str]:
 
 
 def _lookup_factory_llm_info(provider_name: str, pure_model_name: str, extra_fields: dict) -> dict | None:
-    region = extra_fields.get("region", "default")
-    if region == "intl" and provider_name.lower() == "siliconflow":
-        target_factory_name = "siliconflow_intl"
-    else:
-        target_factory_name = provider_name
+    target_factory_name = provider_name
     fac_list = [f for f in settings.FACTORY_LLM_INFOS if f["name"] == target_factory_name]
     if not fac_list:
         return None

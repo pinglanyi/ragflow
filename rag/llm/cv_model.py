@@ -1479,3 +1479,10 @@ class CheaperInferenceCV(GptV4):
         self.model_name = model_name.split("___")[0]
         self.lang = lang
         Base.__init__(self, **kwargs)
+
+
+class OpperCV(GptV4):
+    _FACTORY_NAME = "Opper"
+
+    def __init__(self, key, model_name, base_url=None, **kwargs):
+        super().__init__(key, model_name, base_url=base_url or "https://api.opper.ai/v3/compat", **kwargs)

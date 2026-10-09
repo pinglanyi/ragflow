@@ -2132,6 +2132,7 @@ class ApiRouteChat(Base):
 
 class LiteLLMBase(ABC):
     _FACTORY_NAME = [
+        "Opper",
         "Tongyi-Qianwen",
         "Bedrock",
         "Moonshot",

@@ -1416,3 +1416,32 @@ class AIMLAPI(Base):
                 entry["model_types"].append(LLMType.VISION.value)
 
         return list(merged.values())
+
+
+class Opper(OpenAIAPICompatible):
+    _FACTORY_NAME = "Opper"
+    _CATALOG: ClassVar[dict] = {
+        "claude-sonnet-4-6": (["chat", "vision"], 1000000, True),
+        "gpt-5.5": (["chat", "vision"], 1050000, True),
+        "gpt-5.4-mini": (["chat", "vision"], 400000, True),
+        "gemini-3.8-flash": (["chat", "vision"], 1048576, True),
+        "deepseek-v4-pro": (["chat"], 1048576, True),
+        "text-embedding-3-small": (["embedding"], 8191, False),
+    }
+
+    def __init__(self, api_key, base_url=None):
+        super().__init__(api_key, base_url or "https://api.opper.ai/v3/compat")
+
+    def _get_model_list_url(self):
+        return self.base_url.rstrip("/") + "/models"
+
+    def _format_model_list(self, raw_model_list):
+        models = super()._format_model_list(raw_model_list)
+        for model in models:
+            metadata = self._CATALOG.get(model["name"])
+            if metadata:
+                types, limit, tools = metadata
+                model["model_types"] = list(types)
+                model["max_tokens"] = limit
+                model["features"] = ["is_tools"] if tools else []
+        return models

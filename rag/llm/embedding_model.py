@@ -1554,3 +1554,10 @@ class OpenRouterEmbed(Base):
     def encode_queries(self, text):
         vectors, token_count = self._batched_encode([text], self._call, batch_size=16, truncate_to=8191)
         return vectors[0], token_count
+
+
+class OpperEmbed(OpenAIEmbed):
+    _FACTORY_NAME = "Opper"
+
+    def __init__(self, key, model_name, base_url=None, **kwargs):
+        super().__init__(key, model_name, base_url=base_url or "https://api.opper.ai/v3/compat")

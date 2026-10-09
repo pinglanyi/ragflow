@@ -643,7 +643,7 @@ async def create_provider_instance(tenant_id: str, provider_id_or_name: str, ins
             return False, msg
     else:
         msg = ""
-        target_factory_name = "siliconflow_intl" if provider_name.lower() == "siliconflow" and region == "intl" else provider_name
+        target_factory_name = provider_name
         factory_info = [f for f in FACTORY_LLM_INFOS if f["name"] == target_factory_name]
         factory_llms = factory_info[0]["llm"]
         for llm in factory_llms:
@@ -782,10 +782,7 @@ async def verify_api_key(provider_id_or_name: str, api_key: str | dict, base_url
     base_url = _normalize_provider_base_url(provider_name, base_url)
     api_key = _normalize_provider_api_key(provider_name, api_key)
 
-    if region and region == "intl" and provider_name.lower() == "siliconflow":
-        target_factory_name = "siliconflow_intl"
-    else:
-        target_factory_name = provider_name
+    target_factory_name = provider_name
 
     factory_info = [f for f in FACTORY_LLM_INFOS if f["name"] == target_factory_name]
     if not factory_info:

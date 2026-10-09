@@ -758,3 +758,10 @@ class FunASRSeq2txt(GPTSeq2txt):
             base_url = "http://localhost:8000/v1"
         super().__init__(key=key or "funasr", model_name=model_name, base_url=base_url, **kwargs)
         logging.info("[FunASR] Speech2Text initialized with model %s at %s", model_name, self.base_url)
+
+
+class SiliconFlowSeq2txt(GPTSeq2txt):
+    _FACTORY_NAME = "SILICONFLOW"
+
+    def __init__(self, key, model_name, base_url=None, **kwargs):
+        super().__init__(key, model_name, base_url=base_url or "https://api.siliconflow.cn/v1", **kwargs)

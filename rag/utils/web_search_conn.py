@@ -18,6 +18,7 @@ import logging
 from typing import Protocol
 
 from rag.utils.querit_conn import Querit
+from rag.utils.search1api_conn import Search1API
 from rag.utils.serply_conn import Serply
 from rag.utils.tavily_conn import Tavily
 from rag.utils.youcom_conn import YouCom
@@ -25,6 +26,7 @@ from rag.utils.youcom_conn import YouCom
 WEB_SEARCH_PROVIDER_TAVILY = "tavily"
 WEB_SEARCH_PROVIDER_QUERIT = "querit"
 WEB_SEARCH_PROVIDER_SERPLY = "serply"
+WEB_SEARCH_PROVIDER_SEARCH1API = "search1api"
 WEB_SEARCH_PROVIDER_YOUCOM = "youcom"
 
 # You.com serves a keyless endpoint, so it is usable with no credentials at all.
@@ -54,6 +56,8 @@ def has_web_search_provider(prompt_config: dict | None) -> bool:
         return bool(_get_api_key(prompt_config, "tavily_api_key"))
     if provider == WEB_SEARCH_PROVIDER_QUERIT:
         return bool(_get_api_key(prompt_config, "querit_api_key"))
+    if provider == WEB_SEARCH_PROVIDER_SEARCH1API:
+        return bool(_get_api_key(prompt_config, "search1api_api_key"))
     if provider == WEB_SEARCH_PROVIDER_SERPLY:
         return bool(_get_api_key(prompt_config, "serply_api_key"))
     return False
@@ -69,6 +73,7 @@ def create_web_search_provider(prompt_config: dict | None) -> WebSearchProvider 
         WEB_SEARCH_PROVIDER_TAVILY,
         WEB_SEARCH_PROVIDER_QUERIT,
         WEB_SEARCH_PROVIDER_SERPLY,
+        WEB_SEARCH_PROVIDER_SEARCH1API,
         WEB_SEARCH_PROVIDER_YOUCOM,
     ):
         logger.debug("Web search provider resolution: provider=%s status=invalid", provider)
@@ -80,6 +85,8 @@ def create_web_search_provider(prompt_config: dict | None) -> WebSearchProvider 
     logger.debug("Web search provider resolution: provider=%s status=resolved", provider)
     if provider == WEB_SEARCH_PROVIDER_QUERIT:
         return Querit(_get_api_key(prompt_config, "querit_api_key"))
+    if provider == WEB_SEARCH_PROVIDER_SEARCH1API:
+        return Search1API(_get_api_key(prompt_config, "search1api_api_key"))
     if provider == WEB_SEARCH_PROVIDER_SERPLY:
         return Serply(_get_api_key(prompt_config, "serply_api_key"))
     if provider == WEB_SEARCH_PROVIDER_YOUCOM:
