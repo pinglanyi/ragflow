@@ -41,3 +41,15 @@ Overall status: NOT a complete acceptance pass. Worker recovery, successful full
 - Local focused verification: 121 tests passed, including routing, Agentic APIs/tools, multimodal archive/orchestration, legacy model resolution, and Wiki dataset template inheritance. Four changed frontend files transpile; actual Zod schema reproduces lost scalar/list template IDs before the fix and retains both after it. Full frontend dependency installation/build and deployed new UI behavior remain unverified.
 
 Pending: deploy the new fixes, verify smart parsing and SSE final event, test template selection/save in the deployed dataset UI and repeat Skill generation with its original embedding model. Overall acceptance remains incomplete.
+
+## Deployed acceptance checks (16:25-16:39 CST)
+
+- API reports deployed `c1ec3897e`. Nonstream Agentic Search returns an answer; SSE terminates with a nonempty final event rather than an error.
+- Smart PNG retry `badce883a1664cc7ba862a1abb103d93` completes with one chunk (archive reused). Both full/smart chunk APIs return the expected 128 Hz and 24 V. Agentic Search answers those parameters correctly and cites both image documents.
+- Browser verifies dataset template binding survives Save and reload, and its Edit button opens the selected template. Wiki global rules, a new entity specification, concept definition, and blueprint instruction were modified, saved and reopened with the expected values.
+- Created isolated Tree group `643866b2c3bb11f1a4265d989bff8df3`; edited Global rules, Summarization prompt and Claim extraction prompt, saved and reopened successfully. Bound Wiki and Tree together; both selections persist after reload. Template proof screenshots are saved in the local task artifacts.
+- Isolated Wiki task `7b2701b2c3bb11f1a4265d989bff8df3` finishes in 22.5 seconds with eight pages. Isolated Skill task `cc77b39ec3bc11f1a4265d989bff8df3` finishes in 21.6 seconds with three top-level skills from three synthetic documents.
+- User screenshot reports another Wiki task at 16:28:56 failing on an existing legacy suffixed model. The queried product KB still points to an older 15:38 task, so these task identities are not yet matched. Requested the failing page URL and worker traceback/executor status. Do not claim that screenshot's failure is resolved remotely.
+- Added a regression for an active original suffixed model under a renamed instance: resolve its unique original ID and validate normal model status/type instead of rejecting existence. Disabled, wrong-type or ambiguous originals still fail without switching to a bare model. Local focused suite: 124 passed. This follow-up compatibility change requires deployment before remote verification.
+
+Acceptance scope: template frontend editing/persistence, isolated Wiki/Skill generation, ordinary/full/smart parsing, and Agentic Search answer flow pass the checks above. The user's separate failing Wiki task, broad document-format coverage and disabled write tools remain unverified.

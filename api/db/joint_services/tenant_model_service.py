@@ -272,11 +272,12 @@ def _resolve_legacy_model_config(tenant_id, model_type, model_ref):
     if not provider or not bare_name:
         raise LookupError(f"Model {model_ref} not found for model {model_type}")
     matches = []
+    originals = []
     model_type_val = model_type if isinstance(model_type, str) else model_type.value
     for instance in TenantModelInstanceService.get_all_by_provider_id(provider.id):
         original = TenantModelService.get_by_provider_id_and_instance_id_and_model_name(provider.id, instance.id, pure_name)
         if original:
-            raise LookupError(f"Model {model_ref} exists and cannot be rebound")
+            originals.append((original, instance))
         if instance.status != ActiveStatusEnum.ACTIVE.value:
             continue
         model = TenantModelService.get_by_provider_id_and_instance_id_and_model_type_and_model_name(
@@ -284,6 +285,12 @@ def _resolve_legacy_model_config(tenant_id, model_type, model_ref):
         )
         if model:
             matches.append(model)
+    if originals:
+        # Keep the original model identity after an instance rename. A disabled,
+        # unsupported or ambiguous original must never fall back to a bare name.
+        if len(originals) != 1 or originals[0][1].status != ActiveStatusEnum.ACTIVE.value:
+            raise LookupError(f"Model {model_ref} has no unique active original binding")
+        return get_model_config_by_id(tenant_id, model_type, originals[0][0].id)
     if len(matches) != 1:
         raise LookupError(f"Model {model_ref} has no unique provider model binding")
     return get_model_config_by_id(tenant_id, model_type, matches[0].id)
