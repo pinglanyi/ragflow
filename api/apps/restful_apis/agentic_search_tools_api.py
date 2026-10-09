@@ -1,4 +1,4 @@
-"""Authenticated HTTP facade for the seven Mistral-style search tools."""
+"""Authenticated HTTP facade for Agentic Search and metadata selection tools."""
 
 import logging
 import uuid

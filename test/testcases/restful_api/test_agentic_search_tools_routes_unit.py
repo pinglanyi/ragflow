@@ -1,4 +1,4 @@
-"""Authenticated routing for seven independent Agentic Search tool URLs."""
+"""Authenticated routing for Agentic Search tool URLs."""
 
 import asyncio
 import importlib.util
@@ -47,6 +47,9 @@ def test_tool_route_uses_authenticated_user_and_tool_name(monkeypatch):
     assert ("/agentic-search/tools/<tool_name>", {"methods": ["POST"]}) in routes
     assert calls == [("search", {"query": "CAN"}, "user-1")]
     assert response["data"]["chunks"] == []
+    assert response["data"]["request_id"]
+    response = asyncio.run(inspect.unwrap(module.agentic_search_tool)("metadata_search"))
+    assert calls[-1] == ("metadata_search", {"query": "CAN"}, "user-1")
     assert response["data"]["request_id"]
 
 

@@ -62,7 +62,7 @@ this playbook covers only how to COMBINE tools and when to STOP.
 
 - **You already hold a `doc_id`** → `navigate_structure(doc_id, query)` to find the right passage, then `list_chunks(doc_id)` to read it. Do NOT call `navigate_tree` first.
 - **No `doc_id` yet, and the corpus is large** → `navigate_tree(query)` to route to candidate documents, take a `doc_id`, then `navigate_structure(doc_id, query)` → `list_chunks(doc_id)`.
-- **You can name the document / need to narrow the search** → `metadata_search(query[1-2], filters)` ONCE per direction to pre-filter by title, then `search_chunks` / `retrieve` INSIDE the returned documents.
+- **You can name the document / need to narrow the search** → `metadata_search(filters, query?)` ONCE per direction. Omit query to select documents by real metadata (title, author, year, model, etc.) without embeddings; use the returned doc_ids as `retrieve.doc_scope` or `list_chunks.doc_id`. Include query[1-2] to retrieve matching documents' content directly. Metadata selections are document handles, not cited passages; `truncated` means the result is not a full-corpus count.
 - **Exact term / short answer** → `retrieve(query[1-3])` first; if snippets are insufficient, `search_chunks(query[1-2])` (semantic, may find passages with NO shared surface words); if you need the full document, `list_chunks(doc_id)`.
 - **You must DERIVE a number** → first collect every needed number with any of the above, then `calculate(question, facts)` with the facts verbatim, and report the computed result as-is. If the answer is already one of the stated numbers, answer directly.
 - **Relational multi-hop (ultra only)** → get a start entity from `search_chunks` / `navigate_structure`, then `graph_explore(query, doc_scope)`.
@@ -88,5 +88,5 @@ Each tool returns a status. Act on it:
 
 Special case — `metadata_search` (at most ONCE per direction):
 - `ok` → continue with `search_chunks` / `retrieve` INSIDE the documents it returned; do NOT call it again this direction.
-- `miss` / `empty` → no title matched; drop the filter and fall back to `search_chunks` / `navigate_tree`.
+- `miss` / `empty` → inspect the reason: `unknown_field` lists available fields, `no_metadata` means use content search, and `no_match` means no document matched the filter in the current scope. `infra` is a backend failure, not zero matches. Fall back to `search_chunks` / `navigate_tree` as appropriate.
 - `poor` → the filter was too narrow; widen it once, or abandon it for plain retrieval.

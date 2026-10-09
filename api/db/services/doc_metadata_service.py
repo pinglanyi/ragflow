@@ -190,7 +190,7 @@ class DocMetadataService:
                     yield doc_id, doc
 
     @classmethod
-    def _search_metadata(cls, kb_id: str, condition: dict = None):
+    def _search_metadata(cls, kb_id: str, condition: dict | None = None, *, strict: bool = False):
         """
         Common search logic for metadata queries.
         Uses pagination internally to retrieve data from the index.
@@ -211,7 +211,7 @@ class DocMetadataService:
             for offset in range(0, len(doc_ids), METADATA_ID_BATCH_SIZE):
                 batch_condition = dict(condition)
                 batch_condition["id"] = doc_ids[offset : offset + METADATA_ID_BATCH_SIZE]
-                all_results.extend(cls._search_metadata(kb_id, condition=batch_condition))
+                all_results.extend(cls._search_metadata(kb_id, condition=batch_condition, strict=strict))
             return all_results
 
         kb = Knowledgebase.get_by_id(kb_id)
@@ -223,6 +223,8 @@ class DocMetadataService:
 
         # Check if metadata index exists, create if it doesn't
         if not settings.docStoreConn.index_exist(index_name, ""):
+            if strict:
+                return []
             logging.debug(f"Metadata index {index_name} does not exist, creating it")
             result = settings.docStoreConn.create_doc_meta_idx(index_name)
             if result is False:
@@ -254,6 +256,8 @@ class DocMetadataService:
 
             # Handle different result formats
             if results is None:
+                if strict:
+                    raise RuntimeError("Metadata search returned no backend response")
                 break
 
             # Extract docs from results
@@ -771,7 +775,7 @@ class DocMetadataService:
 
     @classmethod
     @DB.connection_context()
-    def get_flatted_meta_by_kbs(cls, kb_ids: list[str]) -> dict:
+    def get_flatted_meta_by_kbs(cls, kb_ids: list[str], *, strict: bool = False) -> dict:
         """
         Get flattened metadata for documents in knowledge bases.
 
@@ -818,6 +822,8 @@ class DocMetadataService:
                     knowledgebase_ids=kb_ids,
                 )
                 batch_docs = list(cls._iter_search_results(batch))
+                if strict and batch is None:
+                    raise RuntimeError("Metadata search returned no backend response")
                 if not batch_docs:
                     break
                 all_results.extend(batch_docs)
@@ -863,6 +869,8 @@ class DocMetadataService:
 
         except Exception as e:
             logging.error("Error getting flattened metadata for KBs %s: %s", kb_ids, e)
+            if strict:
+                raise
             return {}
 
     @classmethod
@@ -1073,7 +1081,7 @@ class DocMetadataService:
             return None
 
     @classmethod
-    def get_metadata_keys_by_kbs(cls, kb_ids: list[str]) -> list[str]:
+    def get_metadata_keys_by_kbs(cls, kb_ids: list[str], *, strict: bool = False) -> list[str]:
         """
         Get unique metadata field names across multiple knowledge bases.
 
@@ -1090,7 +1098,7 @@ class DocMetadataService:
         keys: set[str] = set()
         try:
             for kb_id in kb_ids:
-                results = cls._search_metadata(kb_id, condition={"kb_id": kb_id})
+                results = cls._search_metadata(kb_id, condition={"kb_id": kb_id}, strict=strict)
                 for _doc_id, doc in cls._iter_search_results(results):
                     doc_meta = cls._extract_metadata(doc)
                     if not isinstance(doc_meta, dict):
@@ -1100,10 +1108,12 @@ class DocMetadataService:
             return sorted(keys)
         except Exception as e:
             logging.error(f"Error getting metadata keys for KBs {kb_ids}: {e}")
+            if strict:
+                raise
             return []
 
     @classmethod
-    def get_metadata_for_documents(cls, doc_ids: list[str] | None, kb_id: str) -> dict[str, dict]:
+    def get_metadata_for_documents(cls, doc_ids: list[str] | None, kb_id: str, *, strict: bool = False) -> dict[str, dict]:
         """
         Get metadata fields for specific documents.
         Returns a mapping of doc_id -> meta_fields
@@ -1119,7 +1129,7 @@ class DocMetadataService:
             condition = {"kb_id": kb_id}
             if doc_ids:
                 condition["id"] = doc_ids
-            results = cls._search_metadata(kb_id, condition=condition)
+            results = cls._search_metadata(kb_id, condition=condition, strict=strict)
             if not results:
                 return {}
 
@@ -1138,6 +1148,8 @@ class DocMetadataService:
 
         except Exception as e:
             logging.error(f"Error getting metadata for documents: {e}")
+            if strict:
+                raise
             return {}
 
     @classmethod

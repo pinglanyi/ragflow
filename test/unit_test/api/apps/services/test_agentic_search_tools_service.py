@@ -1,13 +1,12 @@
 """Mistral-style Agentic Search tool contract without a running database."""
 
-import importlib.util
 import asyncio
+import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-
 
 MODULE_PATH = Path(__file__).resolve().parents[5] / "api/apps/services/agentic_search_tools_service.py"
 SPEC = importlib.util.spec_from_file_location("agentic_search_tools_service_under_test", MODULE_PATH)
@@ -26,6 +25,63 @@ def test_search_defaults_and_comma_separated_dataset_ids():
     request = MODULE.validate_tool_request("search", {"query": " CAN 接线 ", "dataset_ids": " a, b,a ", "exclude_ids": ["x", "x"]})
     assert request == {"query": "CAN 接线", "top_k": 5, "exclude_ids": ["x"], "dataset_ids": ["a", "b"],
                        "dataset_selection_mode": "all"}
+
+
+def test_metadata_tool_validates_filters_without_query_or_embedding():
+    options = MODULE.validate_tool_request("metadata_search", {
+        "dataset_ids": " a,b,a ", "filters": [{"key": "型号", "op": "=", "value": "X1"}]
+    })
+    assert options["dataset_ids"] == ["a", "b"]
+    assert options["limit"] == 50
+    assert "query" not in options
+    with pytest.raises(ValueError):
+        MODULE.validate_tool_request("metadata_search", {"filters": []})
+
+
+def test_metadata_api_dispatch_does_not_initialize_ragtools(monkeypatch):
+    selected = []
+
+    async def scope(user_id, requested):
+        assert user_id == "user" and requested == ["kb"]
+        return ["kb"]
+
+    async def selector(kb_ids, filters, logic, **kwargs):
+        selected.append((kb_ids, filters, logic, kwargs))
+        return {"doc_ids": ["d"], "documents": [{"doc_id": "d"}]}
+
+    mod = ModuleType("rag.advanced_rag.harness.tools.metadata")
+    mod.select_metadata_documents = selector
+    mod.validate_metadata_filters = lambda filters, logic: filters
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+    monkeypatch.setattr(MODULE, "_metadata_scope", scope, raising=False)
+    result = asyncio.run(MODULE.execute_tool("metadata_search", {
+        "dataset_ids": "kb", "filters": [{"key": "year", "op": "=", "value": "2026"}]
+    }, user_id="user"))
+    assert result["doc_ids"] == ["d"]
+    assert len(selected) == 1
+
+
+def test_metadata_scope_authorizes_unparsed_datasets_and_denies_guessed_ids(monkeypatch):
+    rows = [{"id": "kb", "name": "产品库", "chunk_num": 0}]
+
+    async def pool(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    kb = SimpleNamespace(get_by_tenant_ids=lambda *args: (rows, 1), accessible=lambda **kwargs: kwargs["kb_id"] == "kb")
+    for name, attrs in {
+        "api.db.services.knowledgebase_service": {"KnowledgebaseService": kb},
+        "api.db.services.user_service": {"TenantService": SimpleNamespace(get_joined_tenants_by_user_id=lambda _: [{"tenant_id": "tenant"}])},
+        "common.misc_utils": {"thread_pool_exec": pool},
+    }.items():
+        mod = ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+    assert asyncio.run(MODULE._metadata_scope("user", ["产品库"])) == ["kb"]
+    with pytest.raises(PermissionError):
+        asyncio.run(MODULE._metadata_scope("user", ["secret"]))
+    rows.append({"id": "kb2", "name": "产品库", "chunk_num": 2})
+    with pytest.raises(ValueError, match="ambiguous"):
+        asyncio.run(MODULE._metadata_scope("user", ["产品库"]))
 
 
 def test_search_accepts_comma_separated_dataset_names_or_ids():

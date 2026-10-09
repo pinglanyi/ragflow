@@ -202,7 +202,7 @@ _RETRIEVE_TOOL_SPEC = {
         "description": (
             "WHEN TO CALL: Use when you know or suspect exact surface terms or keywords in the corpus (names, titles, codes, phrases). Best as the first recall pass; send 1-3 queries covering different facets."
             "DO NOT CALL: When you already hold a doc_id and need to read it (use list_chunks); when the answer shares no surface words with any query (use search_chunks); for counting or enumerating a whole document."
-            "ARGUMENTS: query — array of 1-3 strings (natural-language queries). Note: doc_scope exists inside the executor but is NOT a declared parameter; do not pass it."
+            "ARGUMENTS: query — array of 1-3 strings. Optional doc_scope — document IDs returned by metadata_search to restrict retrieval."
             "OUTPUT: Short exact-term-matched snippets, each carrying its doc_id and chunk id. Status ok means new evidence entered the pool; redundant means everything was already there."
             "IF IT FAILS: miss (empty payload) means this query matched nothing — rephrase or switch to search_chunks; do not conclude the corpus lacks the fact. redundant means stop re-searching and emit a state patch."
         ),
@@ -214,7 +214,8 @@ _RETRIEVE_TOOL_SPEC = {
                     "items": {"type": "string"},
                     "minItems": 1,
                     "maxItems": 3,
-                }
+                },
+                "doc_scope": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 200},
             },
             "required": ["query"],
         },
@@ -412,12 +413,11 @@ _METADATA_SEARCH_TOOL_SPEC = {
     "function": {
         "name": "metadata_search",
         "description": (
-            "WHEN TO CALL: PRE-FILTER the document set by title BEFORE retrieving chunks — the question names a document by title or recognizable name; or you need a named document subset; or the corpus is large and a title filter would sharpen recall. Prefer 'contains' with a distinctive substring. "
-            "CALL AT MOST ONCE PER DIRECTION: then use search_chunks / retrieve inside those documents. "
-            "DO NOT CALL: nothing names a document/subset; you already hold a doc_id (use list_chunks); counting or enumerating. "
-            "ARGUMENTS: query — 1-2 strings. filters — [{key, value, op}]; key is only 'title'; op — see enum; logic 'and'|'or'. For the string ops the value MUST be ONE keyword, never a list — one call per keyword; 'in' takes a list; 'empty' takes no value. Example: [{key: 'title', op: 'contains', value: 'New York'}]. Titles use spaces, not underscores. "
-            "OUTPUT: ranked chunks from ONLY the matching documents. ok = new evidence; redundant = already seen; miss = nothing matched. "
-            "IF IT FAILS: 'no documents match' — shorten the substring, or drop the filter and use search_chunks. Do NOT retry the same filter."
+            "WHEN TO CALL: select documents by real metadata (title, author, year, model, or other configured fields), at most ONCE per direction. "
+            "DO NOT CALL: no metadata predicate; you already have a doc_id (use list_chunks); exact corpus counts (results are bounded). "
+            "ARGUMENTS: filters — 1-10 {key, op, value}; key must exist in dataset metadata. String operators take ONE string; in/not in take a list; empty/not empty take no value. logic is and/or. query is optional: omit to select documents without embeddings; supply 1-2 strings to retrieve their content. "
+            "OUTPUT: without query, doc_ids plus each document's metadata, available_fields and truncated; these are document handles, NOT cited passages. Pass doc_ids as retrieve.doc_scope or use list_chunks.doc_id. With query, ranked chunks from matching documents. "
+            "IF IT FAILS: unknown_field lists available fields; no_match means loosen the filter; no_metadata means use content search; infra means backend failure, not zero matches. Do not retry an identical filter."
         ),
         "parameters": {
             "type": "object",
@@ -431,19 +431,16 @@ _METADATA_SEARCH_TOOL_SPEC = {
                 "filters": {
                     "type": "array",
                     "minItems": 1,
+                    "maxItems": 10,
                     "items": {
                         "type": "object",
                         "properties": {
-                            # Only `title` is exposed for now. Extending to other
-                            # metadata fields is a matter of adding to this enum —
-                            # the executor below is already field-agnostic.
                             "key": {
                                 "type": "string",
-                                "enum": ["title"],
-                                "description": "the document title",
+                                "description": "A real metadata field; unknown fields return available_fields",
                             },
                             "value": {
-                                "type": ["string", "array", "null"],
+                                "type": ["string", "number", "array", "null"],
                                 "description": (
                                     "The keyword/value to match. For contains/=/start with/end with/not "
                                     "contains this MUST be a SINGLE string keyword (e.g. 'Bowling'), never "
@@ -454,7 +451,7 @@ _METADATA_SEARCH_TOOL_SPEC = {
                             },
                             "op": {
                                 "type": "string",
-                                "enum": ["=", "contains", "not contains", "start with", "end with", "in", "empty", "not empty"],
+                                "enum": ["=", "contains", "not contains", "start with", "end with", "in", "not in", "empty", "not empty"],
                             },
                         },
                         "required": ["key", "op"],
@@ -462,7 +459,7 @@ _METADATA_SEARCH_TOOL_SPEC = {
                 },
                 "logic": {"type": "string", "enum": ["and", "or"], "default": "and"},
             },
-            "required": ["query", "filters"],
+            "required": ["filters"],
         },
     },
 }
@@ -912,6 +909,8 @@ async def _exec_retrieve(tools, queries: list, doc_scope: list | None = None, na
     (BM25 keywords) — it boosts routed docs WITHOUT excluding the rest of the
     corpus, realising "nav is a hint, not a constraint".
     """
+    if doc_scope == []:
+        return ToolOutcome(payload=[], status=MISS, reason="no_doc")
     from rag.advanced_rag.harness.tools.search import grep_search
 
     out, ids, new_ev = await _run_search(
@@ -1008,6 +1007,33 @@ def _normalize_metadata_value(value, op):
 
 
 async def _exec_metadata_search(tools, args: dict) -> ToolOutcome:
+    """Select document handles without embeddings, or run existing query retrieval."""
+    if _arg_query_list(args, 2):
+        return await _exec_metadata_retrieval(tools, args)
+
+    from rag.advanced_rag.harness.tools.metadata import select_metadata_documents
+
+    try:
+        result = await select_metadata_documents(
+            _kb_ids(tools), args.get("filters"), args.get("logic", "and"),
+            doc_scope=getattr(tools, "doc_scope", None),
+        )
+    except ValueError as error:
+        return ToolOutcome(payload=[{"kind": "metadata_search", "note": str(error)}], status=ERROR, reason="bad_args")
+    except Exception:  # noqa: BLE001
+        _LOG.warning("[metadata selector] backend failed", exc_info=True)
+        return ToolOutcome(payload=[{"kind": "metadata_search", "note": "Metadata backend unavailable; this does not mean no documents match."}],
+                           status=ERROR, reason="infra")
+    notes = {"matched": "Use doc_ids with retrieve.doc_scope or list_chunks.doc_id; metadata is not a cited passage.",
+             "no_match": "No documents matched within the current scope; loosen the filter or use content search.",
+             "no_metadata": "No document metadata is configured; use content search.",
+             "unknown_field": "Choose keys from available_fields or use content search."}
+    result["note"] = notes[result["reason"]]
+    return ToolOutcome(payload=[result], status=OK if result["doc_ids"] else MISS, reason=result["reason"],
+                       metrics={"docs": len(result["doc_ids"]), "new_evidence": 0})
+
+
+async def _exec_metadata_retrieval(tools, args: dict) -> ToolOutcome:
     """Metadata-filtered hybrid retrieval (metadata_search tool).
 
     Pipeline: validate the requested metadata keys against the dataset's real
@@ -1015,9 +1041,7 @@ async def _exec_metadata_search(tools, args: dict) -> ToolOutcome:
     ``meta_filter`` fallback) -> hybrid_search scoped to exactly those
     documents.
 
-    The executor is field-agnostic: which keys are reachable is decided by the
-    ``key`` enum in :data:`_METADATA_SEARCH_TOOL_SPEC` (currently ``title``
-    only), so exposing another metadata field later needs no change here.
+    The executor validates keys against the dataset's actual metadata fields.
     """
     from api.db.services.doc_metadata_service import DocMetadataService
     from common.metadata_utils import meta_filter
@@ -1420,8 +1444,11 @@ async def execute_tool(tools, name: str, args: dict) -> ToolOutcome:
             reason="no_structure",
         )
     if name == "retrieve":
-        scope = [str(d) for d in (args.get("doc_scope") or []) if str(d).strip()]
-        return await _exec_retrieve(tools, _arg_query_list(args, 3), doc_scope=scope or None)
+        scope = args.get("doc_scope")
+        if "doc_scope" in args and (not isinstance(scope, list) or len(scope) > 200
+                                   or any(not isinstance(d, str) or not d.strip() for d in scope)):
+            return ToolOutcome(payload=[], status=ERROR, reason="bad_args")
+        return await _exec_retrieve(tools, _arg_query_list(args, 3), doc_scope=scope)
     if name == "search_chunks":
         # Compiled-structure expansion (page-index/tree/wiki/KG) inside
         # hybrid_search is enabled in ALL modes. Datasets with NO compiled
@@ -1680,6 +1707,39 @@ async def _run_action_node(state: _SessionState) -> dict:
     }
 
 
+def _metadata_tool_payload(chunks: list, keep: int) -> str:
+    """Trim metadata selection structurally without corrupting cached outcomes."""
+    copied = json.loads(json.dumps(chunks, ensure_ascii=False, default=str))
+
+    def encode():
+        return json.dumps({"passages": copied}, ensure_ascii=False, default=str)
+
+    payload = encode()
+    if len(payload) <= keep:
+        return payload
+    for item in copied:
+        item["truncated"] = True
+        if item.get("kind") != "metadata_search" or "documents" not in item:
+            continue
+        # Keep useful document handles before large metadata previews.
+        for document in item["documents"]:
+            document["metadata"] = {}
+            document["metadata_truncated"] = True
+        for key in ("available_fields", "filters", "note"):
+            item.pop(key, None)
+        payload = encode()
+        while len(payload) > keep and item["documents"]:
+            item["documents"].pop()
+            item["doc_ids"] = [doc["doc_id"] for doc in item["documents"]]
+            payload = encode()
+        if not item["documents"]:
+            item["reason"] = "budget_exhausted"
+    payload = encode()
+    if len(payload) > keep:
+        return json.dumps({"passages": [{"kind": "metadata_search", "truncated": True, "reason": "budget_exhausted"}]})
+    return payload
+
+
 async def _tool_node(state: _SessionState) -> dict:
     """Execute pending native tool calls via execute_tool; append ``tool``
     responses (DeepSearch ToolNode equivalent) with a context budget that keeps
@@ -1822,7 +1882,7 @@ async def _tool_node(state: _SessionState) -> dict:
         # if the session is already heavy, cut this payload proportionally
         if used + len(payload) > budget_chars:
             keep = max(800, budget_chars - used)
-            payload = payload[:keep]
+            payload = _metadata_tool_payload(chunks, keep) if c["name"] == "metadata_search" else payload[:keep]
         used += len(payload)
         tool_msgs.append(
             {

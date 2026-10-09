@@ -6,8 +6,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
-
-TOOL_NAMES = frozenset({"search", "open", "navigate", "read", "grep", "ingest", "delete"})
+TOOL_NAMES = frozenset({"search", "open", "navigate", "read", "grep", "metadata_search", "ingest", "delete"})
 _FIELDS = {
     "search": {"query", "top_k", "exclude_ids", "dataset_ids", "dataset_names", "dataset_selection_mode"},
     "open": {"chunk_id", "window"},
@@ -16,6 +15,7 @@ _FIELDS = {
     "grep": {"source_id", "pattern", "mode", "top_k"},
     "ingest": {"uri", "dataset_id"},
     "delete": {"source_id"},
+    "metadata_search": {"filters", "logic", "dataset_ids", "dataset_names", "limit"},
 }
 
 
@@ -40,6 +40,20 @@ def validate_tool_request(name: str, payload: dict) -> dict:
     unknown = set(payload) - _FIELDS[name]
     if unknown:
         raise ValueError(f"unknown fields: {', '.join(sorted(unknown))}")
+    if name == "metadata_search":
+        from rag.advanced_rag.harness.tools.metadata import validate_metadata_filters
+
+        if "dataset_ids" in payload and "dataset_names" in payload:
+            raise ValueError("Specify dataset_ids or dataset_names, not both")
+        raw_scope = payload.get("dataset_names", payload.get("dataset_ids", ""))
+        if not isinstance(raw_scope, str):
+            raise ValueError("dataset_ids/dataset_names must be a comma-separated string")
+        scope = list(dict.fromkeys(item.strip() for item in raw_scope.split(",") if item.strip()))
+        if not 1 <= len(scope) <= 10:
+            raise ValueError("metadata_search requires 1 to 10 explicit dataset IDs or names")
+        logic = payload.get("logic", "and")
+        return {"filters": validate_metadata_filters(payload.get("filters"), logic), "logic": logic,
+                "dataset_ids": scope, "limit": _number(payload.get("limit", 50), "limit", minimum=1, maximum=200)}
     if name == "search":
         query = _text(payload.get("query"), "query")
         top_k = _number(payload.get("top_k", 5), "top_k", minimum=1, maximum=20)
@@ -398,6 +412,11 @@ async def _search(user_id: str, options: dict) -> dict:
 async def _read_only_tool(name: str, user_id: str, options: dict) -> dict:
     if name == "search":
         return await _search(user_id, options)
+    if name == "metadata_search":
+        from rag.advanced_rag.harness.tools.metadata import select_metadata_documents
+
+        ids = await _metadata_scope(user_id, options["dataset_ids"])
+        return await select_metadata_documents(ids, options["filters"], options["logic"], limit=options["limit"])
     source_id = options.get("source_id")
     if name == "open":
         source_id = await _source_for_chunk(user_id, options["chunk_id"])
@@ -412,6 +431,27 @@ async def _read_only_tool(name: str, user_id: str, options: dict) -> dict:
     else:
         selected = select_grep_chunks(chunks, options["pattern"], options["mode"], options["top_k"])
     return {"chunks": selected, "source_id": source_id, "coordinate": "visible_chunk_ordinal"}
+
+
+async def _metadata_scope(user_id: str, requested: list[str]) -> list[str]:
+    """Authorize explicit metadata scopes, including datasets without chunks."""
+    from api.db.services.knowledgebase_service import KnowledgebaseService
+    from api.db.services.user_service import TenantService
+    from common.misc_utils import thread_pool_exec
+
+    joined = await thread_pool_exec(TenantService.get_joined_tenants_by_user_id, user_id)
+    rows, _ = await thread_pool_exec(KnowledgebaseService.get_by_tenant_ids,
+                                    [row["tenant_id"] for row in joined], user_id, 0, 0, "update_time", True, "")
+    catalog = {row["id"]: row for row in rows}
+    resolved = []
+    for token in requested:
+        matches = [token] if token in catalog else [row["id"] for row in rows if row["name"] == token]
+        if len(matches) > 1:
+            raise ValueError(f"ambiguous dataset name: {token}")
+        if not matches or not await thread_pool_exec(KnowledgebaseService.accessible, kb_id=matches[0], user_id=user_id):
+            raise PermissionError("Dataset not found or not authorized")
+        resolved.append(matches[0])
+    return list(dict.fromkeys(resolved))
 
 
 async def _ingest_blobs(uri: str) -> list[tuple[str, bytes]]:
