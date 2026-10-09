@@ -14,9 +14,12 @@
 #  limitations under the License.
 #
 import logging
+
 from tavily import TavilyClient
+
 from common.misc_utils import get_uuid
 from rag.nlp import rag_tokenizer
+from rag.utils.web_evidence import normalize_web_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -63,4 +66,4 @@ class Tavily:
             aggs.append({"doc_name": r["title"], "doc_id": id, "count": 1, "url": r["url"]})
         # Counts only: the query and the retrieved page text are user data.
         logger.info("Tavily search returned %d chunks", len(chunks))
-        return {"chunks": chunks, "doc_aggs": aggs}
+        return normalize_web_evidence({"chunks": chunks, "doc_aggs": aggs})

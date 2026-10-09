@@ -22,6 +22,7 @@ import requests
 from common.http_client import DEFAULT_TIMEOUT
 from common.misc_utils import get_uuid
 from rag.nlp import rag_tokenizer
+from rag.utils.web_evidence import normalize_web_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ class YouCom:
         # Deliberately logs counts only: the query and the retrieved page text
         # are user data and must not reach the logs.
         logger.info("[YouCom] retrieved %s chunks (keyed=%s)", len(chunks), bool(self.api_key))
-        return {"chunks": chunks, "doc_aggs": doc_aggs}
+        return normalize_web_evidence({"chunks": chunks, "doc_aggs": doc_aggs})
 
 
 def _youcom_content(result: dict[str, Any]) -> str:

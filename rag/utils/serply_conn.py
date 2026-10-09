@@ -22,6 +22,7 @@ import requests
 from common.http_client import DEFAULT_TIMEOUT
 from common.misc_utils import get_uuid
 from rag.nlp import rag_tokenizer
+from rag.utils.web_evidence import normalize_web_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ class Serply:
                     "url": result["url"],
                 }
             )
-        return {"chunks": chunks, "doc_aggs": doc_aggs}
+        return normalize_web_evidence({"chunks": chunks, "doc_aggs": doc_aggs})
 
 
 def _serply_text(value: Any) -> str:

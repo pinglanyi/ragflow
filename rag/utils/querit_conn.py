@@ -22,6 +22,7 @@ import requests
 from common.http_client import DEFAULT_TIMEOUT
 from common.misc_utils import get_uuid
 from rag.nlp import rag_tokenizer
+from rag.utils.web_evidence import normalize_web_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ class Querit:
             )
         # Counts only: the query and the retrieved page text are user data.
         logger.info("Querit search returned %d chunks", len(chunks))
-        return {"chunks": chunks, "doc_aggs": doc_aggs}
+        return normalize_web_evidence({"chunks": chunks, "doc_aggs": doc_aggs})
 
 
 def _querit_text(value: Any) -> str:
