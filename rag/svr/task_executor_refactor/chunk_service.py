@@ -40,7 +40,8 @@ from common.misc_utils import thread_pool_exec
 from common.float_utils import normalize_overlapped_percent
 from api.db.services.document_service import DocumentService
 from api.db.services.task_service import TaskService
-from rag.nlp import search, DEFAULT_DELIMITER
+from rag.nlp import search, DEFAULT_DELIMITER, rag_tokenizer
+from rag.nlp.declared_title import enrich_declared_titles
 from rag.svr.task_executor_refactor.constants import GRAPH_RAPTOR_FAKE_DOC_ID
 from rag.svr.task_executor_refactor.task_context import TaskContext
 from rag.utils.base64_image import image2id
@@ -181,6 +182,10 @@ class ChunkService:
 
         # Run chunking (delegated)
         cks = await run_chunking(chunker, storage_binary, ctx, on_chunking_start)
+        # Later PDF tasks begin mid-document; their header-like body labels
+        # must not be mistaken for the document's declared title.
+        if ctx.from_page == 0:
+            enrich_declared_titles(cks, rag_tokenizer)
 
         # Record raw chunks
         self._task_context.recording_context.record("raw_chunks", cks)
