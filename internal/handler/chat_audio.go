@@ -16,6 +16,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"ragflow/internal/common"
 	"ragflow/internal/entity"
 	modelModule "ragflow/internal/entity/models"
+	"ragflow/internal/service"
 )
 
 const (
@@ -58,6 +60,7 @@ func (h *ChatHandler) ChatAudioSpeech(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, chatAudioSpeechMaxBodyBytes)
 
 	var req chatAudioSpeechRequest
@@ -71,21 +74,45 @@ func (h *ChatHandler) ChatAudioSpeech(c *gin.Context) {
 		return
 	}
 
-	driver, modelName, apiConfig, _, err := h.llm.GetTenantDefaultModelByType(user.ID, entity.ModelTypeTTS)
+	target, err := service.NewModelSolver().ResolveDefaultModelConfig(ctx, user.ID, entity.ModelTypeTTS)
 	if err != nil {
 		common.ErrorWithCode(c, common.CodeDataError, err.Error())
 		return
 	}
+	driver := target.Driver
+	modelName := target.ModelName
+	apiConfig := target.APIConfig
+
+	writeAudioHeaders := func(mediaType string) {
+		c.Header("Content-Type", mediaType)
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+		c.Writer.WriteHeader(http.StatusOK)
+	}
 
 	segments := ttsSegmentSplitRegex.Split(req.Text, -1)
 	headerWritten := false
+	// mediaType locks the media type of the first successfully synthesized
+	// segment; later segments of a different type are skipped so the
+	// response never mixes encodings under a single Content-Type.
+	mediaType := ""
+	// WAV segments cannot be concatenated byte-wise (each carries its own
+	// RIFF header), so they are accumulated as raw PCM and re-wrapped into
+	// a single WAV before being written.
+	var wavFmt *wavFormat
+	var wavPCM []byte
+	var firstSynthErr error
 	for i, seg := range segments {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
 			continue
 		}
-		resp, err := driver.AudioSpeech(&modelName, &seg, apiConfig, &modelModule.TTSConfig{Format: "mp3"}, nil)
+		resp, err := driver.AudioSpeech(ctx, &modelName, &seg, apiConfig, &modelModule.TTSConfig{Format: "mp3"}, nil)
 		if err != nil {
+			if firstSynthErr == nil {
+				firstSynthErr = err
+			}
 			common.Warn("chat TTS synthesis failed",
 				zap.Int("segmentIndex", i),
 				zap.Int("segmentLen", len(seg)),
@@ -95,14 +122,41 @@ func (h *ChatHandler) ChatAudioSpeech(c *gin.Context) {
 		if resp == nil || len(resp.Audio) == 0 {
 			continue
 		}
+		segMediaType := resp.MediaType
+		if segMediaType == "" {
+			segMediaType = "audio/mpeg"
+		}
+		if mediaType == "" {
+			mediaType = segMediaType
+		} else if segMediaType != mediaType {
+			common.Warn("chat TTS segment media type differs from the first segment, skipping",
+				zap.Int("segmentIndex", i),
+				zap.String("segmentMediaType", segMediaType),
+				zap.String("mediaType", mediaType))
+			continue
+		}
+		if segMediaType == "audio/wav" {
+			format, pcm, werr := splitWAV(resp.Audio)
+			if werr != nil {
+				common.Warn("chat TTS wav segment unparsable",
+					zap.Int("segmentIndex", i),
+					zap.Error(werr))
+				continue
+			}
+			if wavFmt == nil {
+				wavFmt = format
+			} else if !bytes.Equal(wavFmt.fmtChunk, format.fmtChunk) {
+				common.Warn("chat TTS wav segment format differs from the first segment, skipping",
+					zap.Int("segmentIndex", i))
+				continue
+			}
+			wavPCM = append(wavPCM, pcm...)
+			continue
+		}
 		if !headerWritten {
 			// Commit the audio headers only once the first chunk is available,
 			// so a fully failed synthesis can still return a JSON error status.
-			c.Header("Content-Type", "audio/mpeg")
-			c.Header("Cache-Control", "no-cache")
-			c.Header("Connection", "keep-alive")
-			c.Header("X-Accel-Buffering", "no")
-			c.Writer.WriteHeader(http.StatusOK)
+			writeAudioHeaders(mediaType)
 			headerWritten = true
 		}
 		if _, werr := c.Writer.Write(resp.Audio); werr != nil {
@@ -110,8 +164,22 @@ func (h *ChatHandler) ChatAudioSpeech(c *gin.Context) {
 		}
 		c.Writer.Flush()
 	}
+	if wavFmt != nil && !headerWritten {
+		writeAudioHeaders("audio/wav")
+		headerWritten = true
+		if _, werr := c.Writer.Write(buildWAV(wavFmt, wavPCM)); werr != nil {
+			return
+		}
+		c.Writer.Flush()
+	}
 	if !headerWritten {
-		common.ErrorWithCode(c, common.CodeServerError, "TTS synthesis produced no audio")
+		if firstSynthErr != nil {
+			common.ErrorWithCode(c, common.CodeServerError,
+				fmt.Sprintf("TTS synthesis failed for model %s (%s)", modelName, driver.Name()))
+			return
+		}
+		common.ErrorWithCode(c, common.CodeServerError,
+			fmt.Sprintf("TTS synthesis produced no audio for model %s (%s)", modelName, driver.Name()))
 	}
 }
 
@@ -154,6 +222,7 @@ func (h *ChatHandler) ChatAudioTranscription(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	// Cap the body before any multipart parsing so an oversized upload is
 	// rejected instead of being drained into memory or spooled to disk.
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, chatAudioUploadMaxBytes)
@@ -199,15 +268,18 @@ func (h *ChatHandler) ChatAudioTranscription(c *gin.Context) {
 		return
 	}
 
-	driver, modelName, apiConfig, _, err := h.llm.GetTenantDefaultModelByType(user.ID, entity.ModelTypeSpeech2Text)
+	target, err := service.NewModelSolver().ResolveDefaultModelConfig(ctx, user.ID, entity.ModelTypeSpeech2Text)
 	if err != nil {
 		common.ErrorWithCode(c, common.CodeDataError, err.Error())
 		return
 	}
+	driver := target.Driver
+	modelName := target.ModelName
+	apiConfig := target.APIConfig
 
 	streamMode := strings.ToLower(c.PostForm("stream")) == "true"
 	if streamMode {
-		disableWriteDeadlineForSSE(c)
+		clearResponseWriteDeadline(c)
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
@@ -234,7 +306,7 @@ func (h *ChatHandler) ChatAudioTranscription(c *gin.Context) {
 			return nil
 		}
 
-		if err = driver.TranscribeAudioWithSender(&modelName, &tmpPath, apiConfig, &modelModule.ASRConfig{}, nil, sender); err != nil {
+		if err = driver.TranscribeAudioWithSender(ctx, &modelName, &tmpPath, apiConfig, &modelModule.ASRConfig{}, nil, sender); err != nil {
 			errEvent := map[string]interface{}{"event": "error", "text": err.Error()}
 			data, _ := json.Marshal(errEvent)
 			_, _ = c.Writer.WriteString(fmt.Sprintf("data: %s\n\n", data))
@@ -252,7 +324,7 @@ func (h *ChatHandler) ChatAudioTranscription(c *gin.Context) {
 		return
 	}
 
-	resp, err := driver.TranscribeAudio(&modelName, &tmpPath, apiConfig, &modelModule.ASRConfig{}, nil)
+	resp, err := driver.TranscribeAudio(ctx, &modelName, &tmpPath, apiConfig, &modelModule.ASRConfig{}, nil)
 	if err != nil {
 		common.ErrorWithCode(c, common.CodeServerError, err.Error())
 		return

@@ -8,6 +8,7 @@ import {
 } from '@/components/ui/popover';
 import { Switch } from '@/components/ui/switch';
 import { IChunk } from '@/interfaces/database/dataset';
+import { sanitizeHtmlWithImagesAsText } from '@/utils/dom-util';
 import { CheckedState } from '@radix-ui/react-checkbox';
 import classNames from 'classnames';
 import { ChunkMarkdown } from '@/components/chunk-markdown';
@@ -77,7 +78,11 @@ const ChunkCard = ({
               onMouseLeave={() => setOpen(false)}
             >
               <div>
-                <Image id={item.image_id} className={styles.image}></Image>
+                <Image
+                  id={item.image_id}
+                  documentId={item.doc_id}
+                  className={styles.image}
+                ></Image>
               </div>
             </PopoverTrigger>
             <PopoverContent
@@ -89,6 +94,7 @@ const ChunkCard = ({
               <div>
                 <Image
                   id={item.image_id}
+                  documentId={item.doc_id}
                   className={styles.imagePreview}
                 ></Image>
               </div>

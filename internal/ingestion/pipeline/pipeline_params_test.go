@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"ragflow/internal/entity"
@@ -41,6 +43,77 @@ func generalDSL(t *testing.T) []byte {
 	}
 	return raw
 }
+
+func TestCleanComponentParamsNormalizesGeneralLegacyDelimiter(t *testing.T) {
+	dsl := map[string]any{
+		"components": map[string]any{
+			"GeneralChunker:Legacy": map[string]any{
+				"obj": map[string]any{
+					"component_name": "GeneralChunker",
+					"params": map[string]any{
+						"delimiters": []any{"\n"},
+					},
+				},
+			},
+		},
+	}
+	dslJSON, err := json.Marshal(dsl)
+	if err != nil {
+		t.Fatalf("marshal dsl: %v", err)
+	}
+	result := CleanComponentParams(dslJSON, map[string]any{
+		"GeneralChunker:Legacy": map[string]any{
+			"delimiter": "\n!?;。；！？",
+		},
+	})
+	params, ok := result["GeneralChunker:Legacy"].(map[string]any)
+	if !ok {
+		t.Fatalf("normalized component params = %#v", result)
+	}
+	want := []string{"\n", "!", "?", ";", "。", "；", "！", "？"}
+	if !reflect.DeepEqual(params["delimiters"], want) {
+		t.Fatalf("delimiters = %#v, want %#v", params["delimiters"], want)
+	}
+	if _, ok := params["delimiter"]; ok {
+		t.Fatal("legacy delimiter key survived normalization")
+	}
+}
+
+func TestCleanComponentParamsNormalizesDelimiterWhenDSLDeclaresOnlyLegacyKey(t *testing.T) {
+	dsl := map[string]any{
+		"components": map[string]any{
+			"GeneralChunker:Custom": map[string]any{
+				"obj": map[string]any{
+					"component_name": "GeneralChunker",
+					"params": map[string]any{
+						"delimiter": "\n",
+					},
+				},
+			},
+		},
+	}
+	dslJSON, err := json.Marshal(dsl)
+	if err != nil {
+		t.Fatalf("marshal DSL: %v", err)
+	}
+	result := CleanComponentParams(dslJSON, map[string]any{
+		"GeneralChunker:Custom": map[string]any{
+			"delimiter": "\n!?",
+		},
+	})
+	params, ok := result["GeneralChunker:Custom"].(map[string]any)
+	if !ok {
+		t.Fatalf("normalized component params = %#v", result)
+	}
+	want := []string{"\n", "!", "?"}
+	if !reflect.DeepEqual(params["delimiters"], want) {
+		t.Fatalf("delimiters = %#v, want %#v", params["delimiters"], want)
+	}
+	if _, ok := params["delimiter"]; ok {
+		t.Fatal("legacy delimiter key survived normalization")
+	}
+}
+
 func TestCleanComponentParams_DropsLegacyFlatFields(t *testing.T) {
 	dslJSON := generalDSL(t)
 	raw := map[string]any{
@@ -214,6 +287,54 @@ func TestBuildParserConfig_AllComponentsPresent(t *testing.T) {
 	}
 }
 
+func TestBuildParserConfig_BuiltinExtractorKeepsTagFileID(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	checked := 0
+	for _, ref := range registry.Refs() {
+		tpl, ok := registry.Get(ref)
+		if !ok {
+			t.Fatalf("registry.Get(%q) failed", ref)
+		}
+		dslJSON, err := json.Marshal(tpl.DSL)
+		if err != nil {
+			t.Fatalf("marshal DSL %q: %v", ref, err)
+		}
+		schemas, err := ExtractAllComponentParams(dslJSON)
+		if err != nil {
+			t.Fatalf("ExtractAllComponentParams %q: %v", ref, err)
+		}
+		for _, s := range schemas {
+			if s.ComponentName != "Extractor" {
+				continue
+			}
+			checked++
+			overrides := map[string]any{
+				s.CpnID: map[string]any{
+					"tags": map[string]any{"top_n": 5, "tag_file_id": "file-123"},
+				},
+			}
+			result := BuildParserConfig(dslJSON, overrides)
+			params, ok := result[s.CpnID].(map[string]any)
+			if !ok {
+				t.Fatalf("template %q: expected component %q in result", ref, s.CpnID)
+			}
+			var tagFileID any
+			if tags, ok := params["tags"].(map[string]any); ok {
+				tagFileID = tags["tag_file_id"]
+			}
+			if tagFileID != "file-123" {
+				t.Errorf("template %q: expected tag_file_id to survive BuildParserConfig, got %v", ref, tagFileID)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("expected at least one builtin template with an Extractor component")
+	}
+}
+
 // --- ResolveComponentParamsDefaults ---
 
 func TestResolveComponentParamsDefaults_Basic(t *testing.T) {
@@ -266,3 +387,661 @@ func TestResolveComponentParamsDefaults_ResultIsMutable(t *testing.T) {
 
 // ensure entity.JSONMap is used (import used).
 var _ entity.JSONMap
+
+func TestBuildParserConfig_BuiltinExtractorKeepsBuiltInMetadata(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	checked := 0
+	for _, ref := range registry.Refs() {
+		tpl, ok := registry.Get(ref)
+		if !ok {
+			t.Fatalf("registry.Get(%q) failed", ref)
+		}
+		dslJSON, err := json.Marshal(tpl.DSL)
+		if err != nil {
+			t.Fatalf("marshal DSL %q: %v", ref, err)
+		}
+		schemas, err := ExtractAllComponentParams(dslJSON)
+		if err != nil {
+			t.Fatalf("ExtractAllComponentParams %q: %v", ref, err)
+		}
+		for _, s := range schemas {
+			if s.ComponentName != "Extractor" {
+				continue
+			}
+			checked++
+			overrides := map[string]any{
+				s.CpnID: map[string]any{
+					"metadata": map[string]any{
+						"enabled": true,
+						"built_in_metadata": []any{
+							map[string]any{"key": "update_time", "type": "time"},
+						},
+					},
+				},
+			}
+			result := BuildParserConfig(dslJSON, overrides)
+			params, ok := result[s.CpnID].(map[string]any)
+			if !ok {
+				t.Fatalf("template %q: expected component %q in result", ref, s.CpnID)
+			}
+			if _, ok := params["metadata"]; !ok {
+				t.Errorf("template %q: metadata dropped by CleanComponentParams", ref)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("expected at least one builtin template with an Extractor component")
+	}
+}
+
+func TestApplyParentChildChunkerConfig(t *testing.T) {
+	config := entity.JSONMap{
+		"GeneralChunker:one": map[string]interface{}{"chunk_token_num": 256, "children_delimiters": []string{"wrong"}},
+		"TokenChunker:two":   map[string]interface{}{"chunk_token_num": 128, "children_delimiters": []string{"wrong"}},
+		"Extractor:three":    map[string]interface{}{"llm_id": "llm-1"},
+	}
+
+	ApplyParentChildChunkerConfig(config, map[string]interface{}{
+		"parent_child": map[string]interface{}{
+			"use_parent_child":   true,
+			"children_delimiter": "|",
+		},
+	})
+
+	for _, componentID := range []string{"GeneralChunker:one", "TokenChunker:two"} {
+		params := config[componentID].(map[string]interface{})
+		got, ok := params["children_delimiters"].([]string)
+		if !ok || len(got) != 1 || got[0] != "|" {
+			t.Fatalf("%s children_delimiters = %#v, want [|]", componentID, params["children_delimiters"])
+		}
+	}
+	if _, ok := config["Extractor:three"].(map[string]interface{})["children_delimiters"]; ok {
+		t.Fatal("non-chunker component was modified")
+	}
+}
+
+func TestCleanComponentParams_KeepsModularExtractorParams(t *testing.T) {
+	// Builtin template with empty Extractor params: {}
+	dsl := map[string]any{
+		"components": map[string]any{
+			"Extractor:AutoExtractDefault": map[string]any{
+				"obj": map[string]any{
+					"component_name": "Extractor",
+					"params":         map[string]any{},
+				},
+			},
+		},
+	}
+	dslJSON, err := json.Marshal(dsl)
+	if err != nil {
+		t.Fatalf("marshal dsl: %v", err)
+	}
+
+	overrides := map[string]any{
+		"Extractor:AutoExtractDefault": map[string]any{
+			"summary": map[string]any{
+				"enabled":       true,
+				"system_prompt": "summary prompt",
+			},
+			"metadata": map[string]any{
+				"enabled": true,
+				"metadata": []any{
+					map[string]any{"key": "category", "type": "string"},
+				},
+			},
+			"keywords": map[string]any{
+				"top_n": 5,
+			},
+			"llm_id":         "gpt-4",
+			"temperature":    0.7,
+			"enable_summary": 1, // legacy flat param should be dropped
+		},
+	}
+
+	result := CleanComponentParams(dslJSON, overrides)
+	ext, ok := result["Extractor:AutoExtractDefault"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected Extractor:AutoExtractDefault in result, got: %v", result)
+	}
+
+	if sum, ok := ext["summary"].(map[string]any); !ok || sum["enabled"] != true {
+		t.Errorf("expected summary.enabled == true, got: %v", ext["summary"])
+	}
+	if meta, ok := ext["metadata"].(map[string]any); !ok || meta["enabled"] != true {
+		t.Errorf("expected metadata.enabled == true, got: %v", ext["metadata"])
+	}
+	if kw, ok := ext["keywords"].(map[string]any); !ok || kw["top_n"] != 5 {
+		t.Errorf("expected keywords.top_n == 5, got: %v", ext["keywords"])
+	}
+	if ext["llm_id"] != "gpt-4" {
+		t.Errorf("expected llm_id == gpt-4, got: %v", ext["llm_id"])
+	}
+	if _, ok := ext["enable_summary"]; ok {
+		t.Errorf("expected legacy flat field enable_summary to be dropped, got: %v", ext["enable_summary"])
+	}
+}
+
+func TestCleanComponentParams_ExtractorBuiltInMetadataRetained(t *testing.T) {
+	dslJSON := []byte(`{
+		"components": {
+			"Extractor:AutoExtractDefault": {
+				"obj": {
+					"component_name": "Extractor",
+					"params": {
+						"outputs": {},
+						"metadata": {}
+					}
+				}
+			}
+		}
+	}`)
+
+	rawConfig := map[string]any{
+		"Extractor:AutoExtractDefault": map[string]any{
+			"metadata": map[string]any{
+				"enabled": true,
+				"metadata": []map[string]any{
+					{"key": "custom_field", "type": "string"},
+				},
+				"built_in_metadata": []map[string]any{
+					{"key": "doc_name", "type": "string"},
+				},
+			},
+		},
+	}
+
+	result := CleanComponentParams(dslJSON, rawConfig)
+	ext, ok := result["Extractor:AutoExtractDefault"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected Extractor:AutoExtractDefault in result, got: %v", result)
+	}
+
+	meta, ok := ext["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata object, got: %#v", ext["metadata"])
+	}
+	if meta["enabled"] != true {
+		t.Errorf("expected enabled == true, got: %#v", meta["enabled"])
+	}
+	mFields, ok := meta["metadata"].([]map[string]any)
+	if !ok || len(mFields) != 1 {
+		t.Errorf("expected 1 metadata field, got: %#v", meta["metadata"])
+	}
+	bFields, ok := meta["built_in_metadata"].([]map[string]any)
+	if !ok || len(bFields) != 1 {
+		t.Errorf("expected 1 built_in_metadata field, got: %#v", meta["built_in_metadata"])
+	}
+}
+
+func TestNormalizeExtractorParams_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    map[string]any
+		validate func(t *testing.T, out map[string]any)
+	}{
+		{
+			name:  "nil input returns empty map",
+			input: nil,
+			validate: func(t *testing.T, out map[string]any) {
+				if len(out) != 0 {
+					t.Errorf("expected empty map for nil input, got %#v", out)
+				}
+			},
+		},
+		{
+			name: "modular keywords preserved",
+			input: map[string]any{
+				"keywords": map[string]any{
+					"top_n":         5,
+					"system_prompt": "custom kw prompt",
+				},
+			},
+			validate: func(t *testing.T, out map[string]any) {
+				kw, ok := out["keywords"].(map[string]any)
+				if !ok || kw["top_n"] != 5 || kw["system_prompt"] != "custom kw prompt" {
+					t.Errorf("keywords mismatch: %#v", out["keywords"])
+				}
+			},
+		},
+		{
+			name: "modular questions preserved",
+			input: map[string]any{
+				"questions": map[string]any{
+					"top_n":         3,
+					"system_prompt": "custom q prompt",
+				},
+			},
+			validate: func(t *testing.T, out map[string]any) {
+				q, ok := out["questions"].(map[string]any)
+				if !ok || q["top_n"] != 3 || q["system_prompt"] != "custom q prompt" {
+					t.Errorf("questions mismatch: %#v", out["questions"])
+				}
+			},
+		},
+		{
+			name: "modular tags preserved",
+			input: map[string]any{
+				"tags": map[string]any{
+					"top_n":       7,
+					"tag_file_id": "file-123",
+				},
+			},
+			validate: func(t *testing.T, out map[string]any) {
+				tag, ok := out["tags"].(map[string]any)
+				if !ok || tag["top_n"] != 7 || tag["tag_file_id"] != "file-123" {
+					t.Errorf("tags mismatch: %#v", out["tags"])
+				}
+			},
+		},
+		{
+			name: "modular summary preserved",
+			input: map[string]any{
+				"summary": map[string]any{
+					"enabled":       true,
+					"system_prompt": "summary prompt",
+				},
+			},
+			validate: func(t *testing.T, out map[string]any) {
+				sum, ok := out["summary"].(map[string]any)
+				if !ok || sum["enabled"] != true || sum["system_prompt"] != "summary prompt" {
+					t.Errorf("summary mismatch: %#v", out["summary"])
+				}
+			},
+		},
+		{
+			name: "modular metadata preserved",
+			input: map[string]any{
+				"metadata": map[string]any{
+					"enabled": true,
+					"metadata": []map[string]any{
+						{"key": "cat", "type": "string"},
+					},
+					"built_in_metadata": []map[string]any{
+						{"key": "file_name", "type": "string"},
+					},
+				},
+			},
+			validate: func(t *testing.T, out map[string]any) {
+				meta, ok := out["metadata"].(map[string]any)
+				if !ok || meta["enabled"] != true {
+					t.Fatalf("expected enabled == true, got %#v", out["metadata"])
+				}
+				mList, ok := meta["metadata"].([]map[string]any)
+				if !ok || len(mList) != 1 {
+					t.Errorf("metadata slice mismatch: %#v", meta["metadata"])
+				}
+				bList, ok := meta["built_in_metadata"].([]map[string]any)
+				if !ok || len(bList) != 1 {
+					t.Errorf("built_in_metadata slice mismatch: %#v", meta["built_in_metadata"])
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := NormalizeExtractorParams(tc.input)
+			tc.validate(t, out)
+		})
+	}
+}
+
+// compilerDSL mirrors the compiler pipeline template's component structure.
+func compilerDSL(t *testing.T) []byte {
+	t.Helper()
+	dsl := map[string]any{
+		"components": map[string]any{
+			"Compiler:NewBoxesLove": map[string]any{
+				"obj": map[string]any{
+					"component_name": "Compiler",
+					"params": map[string]any{
+						"outputs":                       map[string]any{},
+						"compilation_template_group_id": "",
+						"llm_id":                        "",
+						"plan":                          false,
+					},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(dsl)
+	if err != nil {
+		t.Fatalf("marshal dsl fixture: %v", err)
+	}
+	return raw
+}
+
+func TestCleanComponentParams_CompilerKeepsLLMRuntimeParams(t *testing.T) {
+	dslJSON := compilerDSL(t)
+	raw := map[string]any{
+		"Compiler:NewBoxesLove": map[string]any{
+			"compilation_template_group_id": "group-1",
+			"llm_id":                        "model-1",
+			"temperature":                   0.7,
+			"temperatureEnabled":            true,
+			"top_p":                         0.9,
+			"topPEnabled":                   true,
+			"presence_penalty":              0.2,
+			"presencePenaltyEnabled":        true,
+			"frequency_penalty":             0.3,
+			"frequencyPenaltyEnabled":       true,
+			"max_tokens":                    1024.0,
+			"maxTokensEnabled":              true,
+			"parameter":                     "Custom",
+			"thinking":                      "enabled",
+			"mode":                          "structure",
+		},
+	}
+	result := CleanComponentParams(dslJSON, raw)
+	params, ok := result["Compiler:NewBoxesLove"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected Compiler params to survive, got %#v", result)
+	}
+	for _, key := range []string{
+		"compilation_template_group_id", "llm_id",
+		"temperature", "temperatureEnabled",
+		"top_p", "topPEnabled",
+		"presence_penalty", "presencePenaltyEnabled",
+		"frequency_penalty", "frequencyPenaltyEnabled",
+		"max_tokens", "maxTokensEnabled",
+		"parameter", "thinking",
+	} {
+		if _, ok := params[key]; !ok {
+			t.Errorf("expected LLM runtime param %q to be kept, got %#v", key, params)
+		}
+	}
+	if _, ok := params["mode"]; ok {
+		t.Error("expected unknown param key 'mode' to be dropped")
+	}
+	for _, key := range []string{"keywords", "questions", "tags", "summary", "metadata"} {
+		if _, ok := params[key]; ok {
+			t.Errorf("expected no extractor group %q on Compiler params", key)
+		}
+	}
+}
+
+func TestBuildParserConfig_CompilerRuntimeParamsSurvive(t *testing.T) {
+	dslJSON := compilerDSL(t)
+	raw := map[string]any{
+		"Compiler:NewBoxesLove": map[string]any{
+			"compilation_template_group_id": "group-1",
+			"llm_id":                        "model-1",
+			"temperature":                   0.7,
+			"temperatureEnabled":            true,
+			"thinking":                      "disabled",
+		},
+	}
+	result := BuildParserConfig(dslJSON, raw)
+	params, ok := result["Compiler:NewBoxesLove"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected Compiler entry in built parser_config, got %#v", result)
+	}
+	if params["compilation_template_group_id"] != "group-1" || params["llm_id"] != "model-1" {
+		t.Errorf("compiler overrides mismatch: %#v", params)
+	}
+	if params["temperature"] != 0.7 || params["temperatureEnabled"] != true {
+		t.Errorf("expected LLM runtime overrides to survive, got %#v", params)
+	}
+	if params["thinking"] != "disabled" {
+		t.Errorf("expected thinking override to survive, got %#v", params)
+	}
+	if plan, ok := params["plan"].(bool); !ok || plan {
+		t.Errorf("expected DSL default plan=false to be baked in, got %#v", params["plan"])
+	}
+}
+
+// --- componentParamSchemaKeys (schema-derived component param whitelist) ---
+
+// titleFamilyDSL mirrors a canvas snapshot saved before chunk_token_cap /
+// root_chunk_as_heading existed: the title-chunker node bakes only the older
+// params.
+func titleFamilyDSL(t *testing.T) []byte {
+	t.Helper()
+	dsl := map[string]any{
+		"components": map[string]any{
+			"TitleChunker:StaleSnapshot": map[string]any{
+				"obj": map[string]any{
+					"component_name": "TitleChunker",
+					"params": map[string]any{
+						"outputs":   map[string]any{},
+						"method":    "hierarchy",
+						"hierarchy": float64(3),
+						"levels":    []any{[]any{"^#[^#]"}},
+					},
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(dsl)
+	if err != nil {
+		t.Fatalf("marshal dsl fixture: %v", err)
+	}
+	return raw
+}
+
+func TestCleanComponentParams_TitleFamilyKeepsSchemaParamsWithoutBakedKeys(t *testing.T) {
+	dslJSON := titleFamilyDSL(t)
+	raw := map[string]any{
+		"TitleChunker:StaleSnapshot": map[string]any{
+			"chunk_token_cap":       256,
+			"root_chunk_as_heading": true,
+		},
+	}
+	result := CleanComponentParams(dslJSON, raw)
+	params, ok := result["TitleChunker:StaleSnapshot"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected TitleChunker params to survive, got %#v", result)
+	}
+	if _, ok := params["chunk_token_cap"]; !ok {
+		t.Errorf("chunk_token_cap dropped although the component schema declares it: %#v", params)
+	}
+	if _, ok := params["root_chunk_as_heading"]; !ok {
+		t.Errorf("root_chunk_as_heading dropped although the component schema declares it: %#v", params)
+	}
+}
+
+// TestBuildParserConfig_TitleFamilyParamsSurviveBuiltinTemplates locks the
+// dataset/document save path for the title-chunker family: both params must
+// survive BuildParserConfig for every builtin template that carries a
+// TitleChunker or ManualChunker node, none of which bake the two keys in their
+// DSL params.
+func TestBuildParserConfig_TitleFamilyParamsSurviveBuiltinTemplates(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	tested := 0
+	for _, ref := range registry.Refs() {
+		tpl, ok := registry.Get(ref)
+		if !ok {
+			continue
+		}
+		dslJSON, err := json.Marshal(tpl.DSL)
+		if err != nil {
+			t.Fatalf("marshal DSL %q: %v", ref, err)
+		}
+		schemas, err := ExtractAllComponentParams(dslJSON)
+		if err != nil {
+			t.Fatalf("ExtractAllComponentParams %q: %v", ref, err)
+		}
+		for _, s := range schemas {
+			if s.ComponentName != "TitleChunker" && s.ComponentName != "ManualChunker" {
+				continue
+			}
+			tested++
+			overrides := map[string]interface{}{
+				s.CpnID: map[string]any{
+					"chunk_token_cap":       256,
+					"root_chunk_as_heading": true,
+				},
+			}
+			params, ok := BuildParserConfig(dslJSON, overrides)[s.CpnID].(map[string]any)
+			if !ok {
+				t.Fatalf("template %q: component %q missing from built parser_config", ref, s.CpnID)
+			}
+			if !reflect.DeepEqual(params["chunk_token_cap"], 256) {
+				t.Errorf("template %q %s: chunk_token_cap = %#v, want 256", ref, s.CpnID, params["chunk_token_cap"])
+			}
+			if !reflect.DeepEqual(params["root_chunk_as_heading"], true) {
+				t.Errorf("template %q %s: root_chunk_as_heading = %#v, want true", ref, s.CpnID, params["root_chunk_as_heading"])
+			}
+		}
+	}
+	if tested == 0 {
+		t.Fatal("expected at least one builtin template with a TitleChunker/ManualChunker component")
+	}
+}
+
+// operatorFormParamKeys mirrors the params the dataset/document pipeline
+// operator forms submit (transformFormConfigToApi in
+// web/src/utils/pipeline-operator.ts). Every key listed for a component must be
+// accepted by CleanComponentParams for that component in every builtin
+// template; otherwise a user edit is silently dropped.
+var operatorFormParamKeys = map[string][]string{
+	"TitleChunker": {
+		"method", "levels", "hierarchy", "include_heading_content",
+		"root_chunk_as_heading", "chunk_token_cap",
+	},
+	"ManualChunker": {"method", "levels", "hierarchy", "root_chunk_as_heading"},
+	"TokenChunker": {
+		"chunk_token_size", "overlapped_percent", "delimiters", "delimiter_mode",
+		"children_delimiters", "enable_children", "table_context_size", "image_context_size",
+	},
+	"GeneralChunker": {
+		"chunk_token_size", "overlapped_percent", "delimiters", "children_delimiters",
+		"enable_children", "table_context_size", "image_context_size",
+	},
+	"Tokenizer": {"search_method", "filename_embd_weight", "fields"},
+	"Extractor": {"llm_id", "keywords", "questions", "tags", "summary", "metadata"},
+}
+
+func TestCleanComponentParams_AcceptsOperatorFormParams(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	checked := 0
+	for _, ref := range registry.Refs() {
+		tpl, ok := registry.Get(ref)
+		if !ok {
+			continue
+		}
+		dslJSON, err := json.Marshal(tpl.DSL)
+		if err != nil {
+			t.Fatalf("marshal DSL %q: %v", ref, err)
+		}
+		schemas, err := ExtractAllComponentParams(dslJSON)
+		if err != nil {
+			t.Fatalf("ExtractAllComponentParams %q: %v", ref, err)
+		}
+		for _, s := range schemas {
+			expected, ok := operatorFormParamKeys[s.ComponentName]
+			if !ok {
+				continue
+			}
+			checked++
+			params := make(map[string]any, len(expected))
+			for _, key := range expected {
+				params[key] = "probe"
+			}
+			cleaned := CleanComponentParams(dslJSON, map[string]interface{}{s.CpnID: params})
+			got, ok := cleaned[s.CpnID].(map[string]any)
+			if !ok {
+				t.Fatalf("template %q: component %q missing from cleaned result", ref, s.CpnID)
+			}
+			for _, key := range expected {
+				if _, ok := got[key]; !ok {
+					t.Errorf("template %q component %s: operator-form param %q is silently dropped", ref, s.CpnID, key)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("expected at least one builtin template component matched by operatorFormParamKeys")
+	}
+}
+
+// componentParamWhitelistExemptions lists the builtin template component names
+// that intentionally have no entry in componentParamSchemaKeys, with the reason.
+// The inventory test below fails on any component that is neither derived nor
+// exempt, so a renamed or newly added component cannot silently lose its
+// whitelist coverage.
+var componentParamWhitelistExemptions = map[string]string{
+	"File":           "no user-editable params",
+	"Parser":         "accepted keys are the DSL's file families",
+	"GeneralChunker": "param struct lives in the chunker package without json tags; template keys + the delimiters exception cover it",
+	"QAChunker":      "no operator form; param struct is not in the schema package",
+	"OneChunker":     "no user-editable params",
+	"PageChunker":    "no user-editable params",
+	"TableChunker":   "no user-editable params",
+	"Extractor":      "covered by the cpnID-prefixed dynamic whitelist",
+	"Compiler":       "covered by the cpnID-prefixed dynamic whitelist",
+}
+
+// TestBuiltinTemplateComponentsHaveWhitelistCoverage pins the component-name
+// inventory of the builtin templates: every name must either derive its param
+// whitelist from a schema (componentParamSchemaKeys) or be exempted above. It
+// guards the operator-form test against becoming a no-op: that test matches by
+// component name, so a rename would otherwise silently skip it.
+func TestBuiltinTemplateComponentsHaveWhitelistCoverage(t *testing.T) {
+	registry, err := DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	seen := make(map[string]string)
+	for _, ref := range registry.Refs() {
+		tpl, ok := registry.Get(ref)
+		if !ok {
+			continue
+		}
+		dslJSON, err := json.Marshal(tpl.DSL)
+		if err != nil {
+			t.Fatalf("marshal DSL %q: %v", ref, err)
+		}
+		schemas, err := ExtractAllComponentParams(dslJSON)
+		if err != nil {
+			t.Fatalf("ExtractAllComponentParams %q: %v", ref, err)
+		}
+		for _, s := range schemas {
+			seen[s.ComponentName] = ref
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("expected builtin templates to contain components")
+	}
+	for name, ref := range seen {
+		if _, ok := componentParamSchemaKeys[strings.ToLower(name)]; ok {
+			continue
+		}
+		if _, ok := componentParamWhitelistExemptions[name]; ok {
+			continue
+		}
+		t.Errorf("component %q (template %q) is neither schema-derived nor exempt: add it to componentParamSchemaKeys or exempt it with a reason", name, ref)
+	}
+}
+
+// TestCleanComponentParams_TitleFamilyStillDropsUnknownKeys keeps the union
+// honest: a key the component schema does not declare is still dropped.
+func TestCleanComponentParams_TitleFamilyStillDropsUnknownKeys(t *testing.T) {
+	dslJSON := titleFamilyDSL(t)
+	raw := map[string]any{
+		"TitleChunker:StaleSnapshot": map[string]any{
+			"chunk_token_cap_typo": 256,
+			"method":               "hierarchy",
+		},
+	}
+	result := CleanComponentParams(dslJSON, raw)
+	params, ok := result["TitleChunker:StaleSnapshot"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected TitleChunker params to survive, got %#v", result)
+	}
+	if _, ok := params["chunk_token_cap_typo"]; ok {
+		t.Errorf("unknown key must still be dropped, got %#v", params)
+	}
+	if _, ok := params["method"]; !ok {
+		t.Errorf("declared key must survive, got %#v", params)
+	}
+}

@@ -369,6 +369,10 @@ func (l *Lexer) lookupIdent(ident string) Token {
 		return Token{Type: TokenSearch, Value: ident}
 	case "AGENT":
 		return Token{Type: TokenAgent, Value: ident}
+	case "CORES":
+		return Token{Type: TokenCores, Value: ident}
+	case "CONCURRENCY":
+		return Token{Type: TokenConcurrency, Value: ident}
 	case "MEMORY":
 		return Token{Type: TokenMemory, Value: ident}
 	case "MEMORIES":
@@ -377,6 +381,8 @@ func (l *Lexer) lookupIdent(ident string) Token {
 		return Token{Type: TokenRetrieve, Value: ident}
 	case "CURRENT":
 		return Token{Type: TokenCurrent, Value: ident}
+	case "SOFT":
+		return Token{Type: TokenSoft, Value: ident}
 	case "FINGERPRINT":
 		return Token{Type: TokenFingerprint, Value: ident}
 	case "LICENSE":
@@ -409,6 +415,8 @@ func (l *Lexer) lookupIdent(ident string) Token {
 		return Token{Type: TokenAsync, Value: ident}
 	case "SYNC":
 		return Token{Type: TokenSync, Value: ident}
+	case "SYNC_LOGS":
+		return Token{Type: TokenSyncLogs, Value: ident}
 	case "BENCHMARK":
 		return Token{Type: TokenBenchmark, Value: ident}
 	case "PING":
@@ -443,8 +451,6 @@ func (l *Lexer) lookupIdent(ident string) Token {
 		return Token{Type: TokenDisable, Value: ident}
 	case "ENABLE":
 		return Token{Type: TokenEnable, Value: ident}
-	case "INSERT":
-		return Token{Type: TokenInsert, Value: ident}
 	case "FILE":
 		return Token{Type: TokenFile, Value: ident}
 	case "USE":
@@ -477,8 +483,6 @@ func (l *Lexer) lookupIdent(ident string) Token {
 		return Token{Type: TokenDocument, Value: ident}
 	case "DOCUMENTS":
 		return Token{Type: TokenDocuments, Value: ident}
-	case "TAGS":
-		return Token{Type: TokenTag, Value: ident}
 	case "REGION":
 		return Token{Type: TokenRegion, Value: ident}
 	case "URL":
@@ -535,6 +539,8 @@ func (l *Lexer) lookupIdent(ident string) Token {
 		return Token{Type: TokenWindow, Value: ident}
 	case "ACTIVITY":
 		return Token{Type: TokenActivity, Value: ident}
+	case "HARDWARE":
+		return Token{Type: TokenHardware, Value: ident}
 	case "PURGE":
 		return Token{Type: TokenPurge, Value: ident}
 	case "PREVIEW":

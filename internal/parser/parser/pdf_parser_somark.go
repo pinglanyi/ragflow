@@ -11,8 +11,6 @@ import (
 	"net/url"
 	"ragflow/internal/common"
 	"strings"
-
-	models "ragflow/internal/entity/models"
 )
 
 func parsePDFWithSoMark(filename string, data []byte, parser *PDFParser) ParseResult {
@@ -28,7 +26,7 @@ func parsePDFWithSoMark(filename string, data []byte, parser *PDFParser) ParseRe
 	}
 	apiKey := parser.SoMarkAPIKey
 	if strings.TrimSpace(apiKey) == "" {
-		apiKey = strings.TrimSpace(common.GetEnv(common.EnvSOMarkApiKey))
+		apiKey = strings.TrimSpace(common.GetEnv(common.EnvSOMarkAPIKey))
 	}
 	taskID, err := soMarkSubmit(strings.TrimRight(baseURL, "/"), filename, data, parser, apiKey)
 	if err != nil {
@@ -84,7 +82,7 @@ func soMarkSubmit(baseURL, filename string, data []byte, parser *PDFParser, apiK
 		return "", fmt.Errorf("parser: SoMark request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	resp, err := models.NewDriverHTTPClient().Do(req)
+	resp, err := common.GetSSRFHTTPClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("parser: SoMark submit: %w", err)
 	}
@@ -122,7 +120,7 @@ func soMarkPoll(baseURL, taskID, apiKey string) (map[string]any, error) {
 		return nil, fmt.Errorf("parser: SoMark poll request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := models.NewDriverHTTPClient().Do(req)
+	resp, err := common.GetSSRFHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("parser: SoMark poll: %w", err)
 	}
@@ -198,7 +196,7 @@ func soMarkBlockToItem(block map[string]any, keepHeaderFooter bool) map[string]a
 		if content == "" {
 			return nil
 		}
-		return map[string]any{"text": content, "doc_type_kwd": "table", "layout": "table"}
+		return map[string]any{"text": content, "doc_type_kwd": pdfTableDocType(content), "layout": "table"}
 	case "equation":
 		if content == "" {
 			return nil

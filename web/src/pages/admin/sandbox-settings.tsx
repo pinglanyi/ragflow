@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   LucideChevronDown,
   LucideCloud,
+  LucideCloudLightning,
   LucideLink,
   LucideLoader2,
   LucideMonitor,
@@ -62,7 +63,12 @@ const PROVIDER_ICONS: Record<string, React.ElementType> = {
   ssh: LucideTerminal,
   aliyun_codeinterpreter: LucideCloud,
   e2b: LucideZap,
+  tenki: LucideCloudLightning,
+  ucloud_agent_sandbox: LucideCloud,
 };
+
+// Local executes code on the host process without isolation; hide it from selection.
+const HiddenProviders = ['local'];
 
 function AdminSandboxSettings() {
   const { t } = useTranslation();
@@ -90,6 +96,8 @@ function AdminSandboxSettings() {
   const { data: providers = [], isLoading: providersLoading } = useQuery({
     queryKey: ['admin/listSandboxProviders'],
     queryFn: async () => (await listSandboxProviders()).data.data,
+    select: (data) =>
+      data.filter((provider) => !HiddenProviders.includes(provider.id)),
   });
 
   // Fetch current config

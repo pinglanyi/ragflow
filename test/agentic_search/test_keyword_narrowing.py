@@ -10,7 +10,7 @@ from unittest.mock import patch
 def _load_search():
     common = ModuleType("common")
     common.settings = SimpleNamespace()
-    path = Path(__file__).resolve().parents[2] / "rag/advanced_rag/harness/tools/search.py"
+    path = Path(__file__).resolve().parents[2] / "rag/advanced_rag/harness/tools/text_processing.py"
     spec = importlib.util.spec_from_file_location("keyword_search_under_test", path)
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, {"common": common}):

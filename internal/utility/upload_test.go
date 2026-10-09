@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"ragflow/internal/common"
 	"strings"
 	"testing"
 	"time"
@@ -42,20 +43,21 @@ func TestFetchRemoteFileSafely_PDFAddsExtension(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origAssert := AssertURLSafe
+	origAssert := common.AssertURLSafe
 	origPinned := PinnedHTTPClient
-	AssertURLSafe = func(rawURL string) (string, string, error) {
+	common.AssertURLSafe = func(rawURL string) (string, string, error) {
 		return "127.0.0.1", "127.0.0.1", nil
 	}
 	PinnedHTTPClient = func(hostname, resolvedIP string, timeout time.Duration) *http.Client {
 		return server.Client()
 	}
 	t.Cleanup(func() {
-		AssertURLSafe = origAssert
+		common.AssertURLSafe = origAssert
 		PinnedHTTPClient = origPinned
 	})
 
-	data, headers, _, err := FetchRemoteFileSafely(server.URL+"/report", 100<<20)
+	ctx := t.Context()
+	data, headers, _, err := FetchRemoteFileSafely(ctx, server.URL+"/report", 100<<20)
 	if err != nil {
 		t.Fatalf("FetchRemoteFileSafely failed: %v", err)
 	}
@@ -74,20 +76,21 @@ func TestFetchRemoteFileSafely_ReturnsContentAndHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origAssert := AssertURLSafe
+	origAssert := common.AssertURLSafe
 	origPinned := PinnedHTTPClient
-	AssertURLSafe = func(rawURL string) (string, string, error) {
+	common.AssertURLSafe = func(rawURL string) (string, string, error) {
 		return "127.0.0.1", "127.0.0.1", nil
 	}
 	PinnedHTTPClient = func(hostname, resolvedIP string, timeout time.Duration) *http.Client {
 		return server.Client()
 	}
 	t.Cleanup(func() {
-		AssertURLSafe = origAssert
+		common.AssertURLSafe = origAssert
 		PinnedHTTPClient = origPinned
 	})
 
-	data, headers, finalURL, err := FetchRemoteFileSafely(server.URL+"/page", 100<<20)
+	ctx := t.Context()
+	data, headers, finalURL, err := FetchRemoteFileSafely(ctx, server.URL+"/page", 100<<20)
 	if err != nil {
 		t.Fatalf("FetchRemoteFileSafely failed: %v", err)
 	}

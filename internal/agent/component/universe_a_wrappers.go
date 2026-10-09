@@ -21,9 +21,11 @@ package component
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,7 +35,9 @@ import (
 	"ragflow/internal/common"
 	"ragflow/internal/dao"
 	"ragflow/internal/entity"
+	"ragflow/internal/storage"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -65,13 +69,21 @@ func anySlice(v any) []any {
 // defaults to the per-invocation RetrievalRequest. The fields are
 // the same the Python agent/component/retrieval.py exposes.
 type retrievalParams struct {
+	Query                    string
 	KbIDs                    []string
+	MemoryIDs                []string
+	UserID                   string
 	TopN                     int
 	TopK                     int
-	SimilarityThreshold      float64
-	KeywordsSimilarityWeight float64
+	SimilarityThreshold      *float64
+	KeywordsSimilarityWeight *float64
 	RerankID                 string
 	EmptyResponse            string
+	CrossLanguages           []string
+	TOCEnhance               bool
+	UseKG                    bool
+	MetaDataFilter           map[string]any
+	RetrievalFrom            string
 }
 
 // parseRetrievalParams reads the v1 DSL node params for Retrieval.
@@ -80,11 +92,15 @@ type retrievalParams struct {
 // "default everything". This matches Python's
 // component.retrieval.RetrievalParam.__init__ tolerance.
 func parseRetrievalParams(params map[string]any) retrievalParams {
-	out := retrievalParams{
-		EmptyResponse: "Sorry, no relevant content was found in the knowledge base.",
-	}
+	out := retrievalParams{}
 	if params == nil {
 		return out
+	}
+	if ids, ok := params["dataset_ids"]; ok {
+		params["kb_ids"] = ids
+	}
+	if v, ok := params["query"].(string); ok {
+		out.Query = v
 	}
 	if v, ok := params["kb_ids"].([]any); ok {
 		for _, x := range v {
@@ -96,6 +112,10 @@ func parseRetrievalParams(params map[string]any) retrievalParams {
 	if v, ok := params["kb_ids"].([]string); ok {
 		out.KbIDs = append(out.KbIDs, v...)
 	}
+	out.MemoryIDs = toStringSlice(params["memory_ids"])
+	if v, ok := params["user_id"].(string); ok {
+		out.UserID = v
+	}
 	if v, ok := params["top_n"]; ok {
 		out.TopN = toIntParam(v)
 	}
@@ -103,10 +123,12 @@ func parseRetrievalParams(params map[string]any) retrievalParams {
 		out.TopK = toIntParam(v)
 	}
 	if v, ok := params["similarity_threshold"]; ok {
-		out.SimilarityThreshold = toFloatParam(v)
+		value := toFloatParam(v)
+		out.SimilarityThreshold = &value
 	}
 	if v, ok := params["keywords_similarity_weight"]; ok {
-		out.KeywordsSimilarityWeight = toFloatParam(v)
+		value := toFloatParam(v)
+		out.KeywordsSimilarityWeight = &value
 	}
 	if v, ok := params["rerank_id"].(string); ok {
 		out.RerankID = v
@@ -114,19 +136,32 @@ func parseRetrievalParams(params map[string]any) retrievalParams {
 	if v, ok := params["empty_response"].(string); ok {
 		out.EmptyResponse = v
 	}
+	out.CrossLanguages = toStringSlice(params["cross_languages"])
+	if v, ok := params["toc_enhance"].(bool); ok {
+		out.TOCEnhance = v
+	}
+	if v, ok := params["use_kg"].(bool); ok {
+		out.UseKG = v
+	}
+	if v, ok := params["meta_data_filter"].(map[string]any); ok {
+		out.MetaDataFilter = cloneAnyMap(v)
+	}
+	if v, ok := params["retrieval_from"].(string); ok {
+		out.RetrievalFrom = v
+	}
 	return out
 }
 
 // retrievalComponent delegates to internal/agent/tool/RetrievalTool.
-// The wrapper captures the v1 DSL node params (kb_ids, top_n,
-// top_k, similarity_threshold, keywords_similarity_weight,
-// rerank_id, empty_response) at build time and applies them as
-// defaults to each invocation. Per-call inputs override the
+// The wrapper captures the Retrieval node's DSL params at build time and
+// applies them as defaults to each invocation. Per-call inputs override the
 // defaults.
 type retrievalComponent struct {
 	inner  *agenttool.RetrievalTool
 	params retrievalParams
 }
+
+const componentNameRetrieval = "Retrieval"
 
 var legacyRetrievalQueryPattern = regexp.MustCompile(`(?s)^\s*UserFillUp:\s*(.*?)\s+Input\s+(.*?)\s*$`)
 
@@ -164,9 +199,28 @@ func (c *retrievalComponent) Outputs() map[string]string {
 	}
 }
 
-func (c *retrievalComponent) Invoke(ctx context.Context, inputs map[string]any) (map[string]any, error) {
+func (c *retrievalComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[string]any) (map[string]any, error) {
 	merged := c.applyDefaults(inputs)
-	normalizeLegacyRetrievalInputs(ctx, merged)
+	normalizeLegacyRetrievalInputs(ctx, db, merged)
+	query, _ := merged["query"].(string)
+	if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
+		if resolved, err := runtime.ResolveTemplateAuto(query, state); err == nil {
+			query = resolved
+		}
+	}
+	if query != "" && merged["retrieval_from"] == "dataset" {
+		rawIDs, present := merged["dataset_ids"]
+		emptySelection := !present || rawIDs == nil
+		switch ids := rawIDs.(type) {
+		case []string:
+			emptySelection = len(ids) == 0
+		case []any:
+			emptySelection = len(ids) == 0
+		}
+		if emptySelection {
+			return map[string]any{"_ERROR": "No dataset is selected."}, nil
+		}
+	}
 	common.Debug("agent retrieval component: invoke",
 		zap.Any("inputs", inputs),
 		zap.Any("merged", merged),
@@ -182,7 +236,7 @@ func (c *retrievalComponent) Invoke(ctx context.Context, inputs map[string]any) 
 	return parseToolEnvelope(out), nil
 }
 
-func (c *retrievalComponent) Stream(_ context.Context, _ map[string]any) (<-chan map[string]any, error) {
+func (c *retrievalComponent) Stream(_ context.Context, _ *gorm.DB, _ map[string]any) (<-chan map[string]any, error) {
 	// V1: retrieval is a non-streaming node (the Python
 	// Retrieval component also blocks on Dealer.search). A
 	// streaming retrieval lands with the streaming-dealer
@@ -215,6 +269,9 @@ func (c *retrievalComponent) applyDefaults(inputs map[string]any) map[string]any
 	for k, v := range inputs {
 		out[k] = v
 	}
+	if _, ok := out["query"]; !ok && c.params.Query != "" {
+		out["query"] = c.params.Query
+	}
 	if _, ok := out["kb_ids"]; !ok && len(c.params.KbIDs) > 0 {
 		ids := make([]any, len(c.params.KbIDs))
 		for i, s := range c.params.KbIDs {
@@ -228,17 +285,38 @@ func (c *retrievalComponent) applyDefaults(inputs map[string]any) map[string]any
 	if _, ok := out["top_k"]; !ok && c.params.TopK > 0 {
 		out["top_k"] = c.params.TopK
 	}
-	if _, ok := out["similarity_threshold"]; !ok && c.params.SimilarityThreshold > 0 {
-		out["similarity_threshold"] = c.params.SimilarityThreshold
+	if _, ok := out["similarity_threshold"]; !ok && c.params.SimilarityThreshold != nil {
+		out["similarity_threshold"] = *c.params.SimilarityThreshold
 	}
-	if _, ok := out["keywords_similarity_weight"]; !ok && c.params.KeywordsSimilarityWeight > 0 {
-		out["keywords_similarity_weight"] = c.params.KeywordsSimilarityWeight
+	if _, ok := out["keywords_similarity_weight"]; !ok && c.params.KeywordsSimilarityWeight != nil {
+		out["keywords_similarity_weight"] = *c.params.KeywordsSimilarityWeight
 	}
 	if _, ok := out["rerank_id"]; !ok && c.params.RerankID != "" {
 		out["rerank_id"] = c.params.RerankID
 	}
 	if _, ok := out["empty_response"]; !ok && c.params.EmptyResponse != "" {
 		out["empty_response"] = c.params.EmptyResponse
+	}
+	if _, ok := out["memory_ids"]; !ok && len(c.params.MemoryIDs) > 0 {
+		out["memory_ids"] = append([]string(nil), c.params.MemoryIDs...)
+	}
+	if _, ok := out["user_id"]; !ok && c.params.UserID != "" {
+		out["user_id"] = c.params.UserID
+	}
+	if _, ok := out["cross_languages"]; !ok && len(c.params.CrossLanguages) > 0 {
+		out["cross_languages"] = append([]string(nil), c.params.CrossLanguages...)
+	}
+	if _, ok := out["toc_enhance"]; !ok && c.params.TOCEnhance {
+		out["toc_enhance"] = true
+	}
+	if _, ok := out["use_kg"]; !ok && c.params.UseKG {
+		out["use_kg"] = true
+	}
+	if _, ok := out["meta_data_filter"]; !ok && c.params.MetaDataFilter != nil {
+		out["meta_data_filter"] = cloneAnyMap(c.params.MetaDataFilter)
+	}
+	if _, ok := out["retrieval_from"]; !ok && c.params.RetrievalFrom != "" {
+		out["retrieval_from"] = c.params.RetrievalFrom
 	}
 	// Translate v1 DSL name `kb_ids` to the tool's expected
 	// name `dataset_ids`. dataset_ids already-set wins; kb_ids
@@ -255,8 +333,8 @@ func (c *retrievalComponent) applyDefaults(inputs map[string]any) map[string]any
 	return out
 }
 
-func normalizeLegacyRetrievalInputs(ctx context.Context, out map[string]any) {
-	if normalizeStructuredRetrievalInputs(ctx, out) {
+func normalizeLegacyRetrievalInputs(ctx context.Context, db *gorm.DB, out map[string]any) {
+	if normalizeStructuredRetrievalInputs(ctx, db, out) {
 		return
 	}
 	rawQuery, _ := out["query"].(string)
@@ -279,12 +357,12 @@ func normalizeLegacyRetrievalInputs(ctx context.Context, out map[string]any) {
 	if kbName == "" {
 		return
 	}
-	if datasetID := resolveRetrievalDatasetID(ctx, kbName); datasetID != "" {
+	if datasetID := resolveRetrievalDatasetID(ctx, db, kbName); datasetID != "" {
 		out["dataset_ids"] = []string{datasetID}
 	}
 }
 
-func normalizeStructuredRetrievalInputs(ctx context.Context, out map[string]any) bool {
+func normalizeStructuredRetrievalInputs(ctx context.Context, db *gorm.DB, out map[string]any) bool {
 	_, hasDatasetIDs := out["dataset_ids"]
 	candidateMaps := []map[string]any{}
 	if stateMap, ok := out["state"].(map[string]any); ok {
@@ -309,7 +387,7 @@ func normalizeStructuredRetrievalInputs(ctx context.Context, out map[string]any)
 			out["query"] = queryText
 		}
 		if kbName != "" && !hasDatasetIDs {
-			if datasetID := resolveRetrievalDatasetID(ctx, strings.TrimSpace(kbName)); datasetID != "" {
+			if datasetID := resolveRetrievalDatasetID(ctx, db, strings.TrimSpace(kbName)); datasetID != "" {
 				out["dataset_ids"] = []string{datasetID}
 				common.Debug("agent retrieval component: resolved dataset id")
 			}
@@ -324,21 +402,21 @@ func normalizeStructuredRetrievalInputs(ctx context.Context, out map[string]any)
 	return consumed
 }
 
-func resolveRetrievalDatasetID(ctx context.Context, kbName string) string {
+func resolveRetrievalDatasetID(ctx context.Context, db *gorm.DB, kbName string) string {
 	if kbName == "" {
 		return ""
 	}
-	if kb, err := dao.NewKnowledgebaseDAO().GetByID(kbName); err == nil && kb != nil {
+	if kb, err := dao.NewKnowledgebaseDAO().GetByID(ctx, db, kbName); err == nil && kb != nil {
 		common.Debug("agent retrieval component: resolved dataset id by direct id")
 		return kb.ID
 	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		common.Warn("agent retrieval component: resolve dataset id by id failed",
 			zap.Error(err))
 	}
-	if state, _, err := runtime.GetStateFromContext[*runtime.CanvasState](ctx); err == nil && state != nil {
+	if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
 		common.Debug("agent retrieval component: resolve dataset id context")
 		if tenantID, _ := state.Sys["tenant_id"].(string); tenantID != "" {
-			if kb, lookupErr := dao.NewKnowledgebaseDAO().GetByName(kbName, tenantID); lookupErr == nil && kb != nil {
+			if kb, lookupErr := dao.NewKnowledgebaseDAO().GetByName(ctx, db, kbName, tenantID); lookupErr == nil && kb != nil {
 				common.Debug("agent retrieval component: resolved dataset id by tenant")
 				return kb.ID
 			} else if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
@@ -349,7 +427,7 @@ func resolveRetrievalDatasetID(ctx context.Context, kbName string) string {
 			}
 		}
 		if userID, _ := state.Sys["user_id"].(string); userID != "" {
-			if kbs, lookupErr := dao.NewKnowledgebaseDAO().GetKBByNameAndUserID(kbName, userID); lookupErr == nil && len(kbs) > 0 {
+			if kbs, lookupErr := dao.NewKnowledgebaseDAO().GetKBByNameAndUserID(ctx, db, kbName, userID); lookupErr == nil && len(kbs) > 0 {
 				for _, kb := range kbs {
 					if kb == nil || kb.Status == nil || *kb.Status != string(entity.StatusValid) {
 						continue
@@ -382,6 +460,8 @@ type codeExecComponent struct {
 	params  map[string]any
 	outputs map[string]any
 }
+
+const componentNameCodeExec = "CodeExec"
 
 func newCodeExecComponent(params map[string]any) (Component, error) {
 	cloned := make(map[string]any, len(params))
@@ -429,7 +509,7 @@ func (c *codeExecComponent) Outputs() map[string]string {
 	}
 }
 
-func (c *codeExecComponent) Invoke(ctx context.Context, inputs map[string]any) (map[string]any, error) {
+func (c *codeExecComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[string]any) (map[string]any, error) {
 	merged := make(map[string]any, len(c.params)+len(inputs))
 	for k, v := range c.params {
 		merged[k] = v
@@ -438,7 +518,7 @@ func (c *codeExecComponent) Invoke(ctx context.Context, inputs map[string]any) (
 		merged[k] = v
 	}
 	if rawArgs, ok := merged["arguments"].(map[string]any); ok {
-		state, _, _ := runtime.GetStateFromContext[*runtime.CanvasState](ctx)
+		state, _ := runtime.GetStateFromContext(ctx)
 		merged["arguments"] = resolveCodeExecArguments(rawArgs, merged, state)
 	}
 	common.Debug("CodeExec wrapper invoke",
@@ -462,13 +542,21 @@ func (c *codeExecComponent) Invoke(ctx context.Context, inputs map[string]any) (
 			decoded["_ERROR"] = ""
 		}
 	}
+	// Upload sandbox-returned artifacts to object storage and surface
+	// them as message attachments. Without this the tool's base64
+	// `_ARTIFACTS` payload never reaches the UI: the canvas message
+	// shows an empty `attachments` list even though the sandbox
+	// collected files. Mirrors the Python code_exec tool
+	// (_upload_artifacts / _build_attachment_markdown_list).
+	attachCodeExecArtifacts(ctx, decoded)
+
 	if err != nil {
 		return decoded, fmt.Errorf("canvas: CodeExec: %w", err)
 	}
 	return decoded, nil
 }
 
-func (c *codeExecComponent) Stream(_ context.Context, _ map[string]any) (<-chan map[string]any, error) {
+func (c *codeExecComponent) Stream(_ context.Context, _ *gorm.DB, _ map[string]any) (<-chan map[string]any, error) {
 	return nil, nil
 }
 
@@ -680,3 +768,178 @@ var (
 
 // Compile-time check that the eino InvokableTool methods we call
 // are reachable (catches a future refactor that renames them).
+
+// attachCodeExecArtifacts uploads the `_ARTIFACTS` produced by the
+// CodeExec tool to object storage and populates the message-facing
+// `attachments` / `_ATTACHMENT_CONTENT` outputs plus a content
+// appendix. It is a no-op when the tool returned no artifacts.
+func attachCodeExecArtifacts(ctx context.Context, decoded map[string]any) {
+	raw, ok := decoded["_ARTIFACTS"].([]any)
+	if !ok || len(raw) == 0 {
+		return
+	}
+	sessionID := ""
+	if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
+		sessionID = state.SessionID
+	}
+	// The CodeExec tool already hosts sandbox artifacts and surfaces
+	// them as `_ARTIFACTS` entries carrying a `url`; storage is only
+	// needed for the legacy content_b64 fallback below.
+	uploaded, markdown, attachmentContent := uploadCodeExecArtifacts(ctx, raw, sessionID, storage.GetStorageFactory().GetStorage())
+	if len(uploaded) == 0 {
+		return
+	}
+	decoded["_ARTIFACTS"] = uploaded
+	decoded["attachments"] = markdown
+	decoded["_ATTACHMENT_CONTENT"] = attachmentContent
+	// Append the attachment sections to content, mirroring the Python
+	// code_exec tool (content = "\"\n\n\"".join(content_parts)); when the
+	// tool produced no base content the attachment text becomes the
+	// content itself.
+	if content, ok := decoded["content"].(string); ok && strings.TrimSpace(content) != "" {
+		decoded["content"] = strings.TrimSpace(content + "\n\n" + attachmentContent)
+	} else {
+		decoded["content"] = strings.TrimSpace(attachmentContent)
+	}
+}
+
+// codeExecArtifactBucket returns the object-storage bucket used for
+// CodeExec sandbox artifacts. Mirrors the Python
+// `SANDBOX_ARTIFACT_BUCKET` setting and the document service's
+// default ("sandbox-artifacts").
+func codeExecArtifactBucket() string {
+	if bucket := common.GetEnv(common.EnvSandboxArtifactBucket); bucket != "" {
+		return bucket
+	}
+	return "sandbox-artifacts"
+}
+
+// uploadCodeExecArtifacts uploads sandbox-returned artifacts to object
+// storage and returns the attachment-facing payloads, mirroring the
+// Python code_exec tool (_upload_artifacts / _build_attachment_markdown_list
+// / _build_attachment_content):
+//
+//   - uploaded: `_ARTIFACTS` entries with a downloadable url
+//   - markdown: `attachments` list (image preview / download links)
+//   - attachmentContent: `_ATTACHMENT_CONTENT` text (attachment_count + sections)
+//
+// Entries that cannot be decoded or stored are skipped with a warning,
+// matching the Python "skip on failure" semantics.
+func uploadCodeExecArtifacts(ctx context.Context, artifacts []any, sessionID string, st storage.Storage) (uploaded []map[string]any, markdown []string, attachmentContent string) {
+	bucket := codeExecArtifactBucket()
+	sections := make([]string, 0, len(artifacts))
+	for _, raw := range artifacts {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := codeExecArtifactString(m["name"])
+		if name == "" {
+			continue
+		}
+		mimeType := codeExecArtifactString(m["mime_type"])
+		size := codeExecArtifactInt64(m["size"])
+		url := codeExecArtifactString(m["url"])
+		if url == "" {
+			// Legacy / direct-producer envelopes still carry the
+			// base64 blob (content_b64) instead of a hosted url.
+			contentB64 := codeExecArtifactString(m["content_b64"])
+			if contentB64 == "" {
+				continue
+			}
+			binary, err := base64.StdEncoding.DecodeString(contentB64)
+			if err != nil || len(binary) == 0 {
+				common.Warn("CodeExec: skip artifact with undecodable content_b64", zap.String("name", name))
+				continue
+			}
+			if st == nil {
+				common.Warn("CodeExec: storage not initialized; cannot upload artifact", zap.String("name", name))
+				continue
+			}
+			storageName := uuid.NewString() + strings.ToLower(filepath.Ext(name))
+			if err := st.Put(ctx, bucket, storageName, binary); err != nil {
+				common.Warn("CodeExec: failed to upload artifact", zap.String("name", name), zap.String("storage", storageName), zap.Error(err))
+				continue
+			}
+			url = fmt.Sprintf("/api/v1/documents/artifact/%s?session_id=%s", storageName, sessionID)
+		}
+		uploaded = append(uploaded, map[string]any{
+			"name":      name,
+			"url":       url,
+			"mime_type": mimeType,
+			"size":      size,
+		})
+		markdown = append(markdown, codeExecArtifactMarkdown(name, mimeType, url))
+		sections = append(sections, codeExecAttachmentSection(len(sections)+1, name, mimeType, url))
+	}
+	if len(sections) > 0 {
+		attachmentContent = fmt.Sprintf("attachment_count: %d\n\n%s", len(sections), strings.Join(sections, "\n\n"))
+	} else {
+		attachmentContent = "attachment_count: 0"
+	}
+	return uploaded, markdown, attachmentContent
+}
+
+// codeExecArtifactMarkdown renders one uploaded artifact as a Markdown
+// link: image artifacts become inline images, everything else becomes a
+// download link.
+func codeExecArtifactMarkdown(name, mimeType, url string) string {
+	if strings.HasPrefix(strings.ToLower(mimeType), "image/") && url != "" {
+		return fmt.Sprintf("![%s](%s)", name, url)
+	}
+	if url != "" {
+		return fmt.Sprintf("[Download %s](%s)", name, url)
+	}
+	return name
+}
+
+// codeExecAttachmentSection renders the `attachmentN (type): name`
+// section used by _ATTACHMENT_CONTENT.
+func codeExecAttachmentSection(idx int, name, mimeType, url string) string {
+	title := fmt.Sprintf("attachment%d (%s): %s", idx, codeExecAttachmentType(name, mimeType), name)
+	return title + "\n" + codeExecArtifactMarkdown(name, mimeType, url)
+}
+
+// codeExecAttachmentType mirrors Python's _normalize_attachment_type.
+func codeExecAttachmentType(name, mimeType string) string {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		return "image"
+	case mimeType == "application/pdf":
+		return "pdf"
+	case mimeType == "text/csv":
+		return "csv"
+	case mimeType == "application/json":
+		return "json"
+	case mimeType == "text/html":
+		return "html"
+	}
+	if ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."); ext != "" {
+		return ext
+	}
+	return "file"
+}
+
+func codeExecArtifactString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func codeExecArtifactInt64(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case float64:
+		return int64(x)
+	case json.Number:
+		if n, err := x.Int64(); err == nil {
+			return n
+		}
+	}
+	return 0
+}

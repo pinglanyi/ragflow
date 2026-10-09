@@ -5,6 +5,11 @@ SHELL ["/bin/bash", "-c"]
 
 ARG NEED_MIRROR=0
 
+#Optional parameter
+# If set NEED_MIRROR=1 and GITEE_TOKEN="xxxxx", download the source from Gitee.
+#If don't set GITEE_TOKEN , download from github
+ARG GITEE_TOKEN=""
+
 WORKDIR /ragflow
 
 # copy models downloaded via download_deps.py
@@ -21,6 +26,29 @@ RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/,target=/deps 
     cp -r /deps/nltk_data /root/ && \
     cp /deps/tika-server-standard-3.3.0.jar /deps/tika-server-standard-3.3.0.jar.md5 /ragflow/ && \
     cp /deps/cl100k_base.tiktoken /ragflow/9b5ad71b2ce5302211f9c61530b329a4922fc6a4
+
+# Embedding tokenizer assets (internal/tokenizer/embedding_token_limits.md). The Go
+# counters load them from ragflow_deps/huggingface.co/<repo>/<file>; an image without them
+# counts every tagged model with the calibrated cl100k estimate, which is the less precise
+# path these counters exist to replace (cl100k under-counts XLM-R on some content, and an
+# under-count is what makes a provider answer 400) - so a missing asset FAILS THE BUILD
+# instead of shipping a degraded counter nobody notices.
+# The tokenizer.json files that download_deps.py fetches as cross-check oracles are
+# test-only and deliberately not shipped here.
+RUN --mount=type=bind,from=infiniflow/ragflow_deps:latest,source=/huggingface.co,target=/huggingface.co \
+    for asset in \
+        BAAI/bge-m3/sentencepiece.bpe.model \
+        BAAI/bge-large-en-v1.5/vocab.txt \
+        Qwen/Qwen3-Embedding-0.6B/tokenizer.json \
+        intfloat/e5-mistral-7b-instruct/tokenizer.json ; do \
+        if [ -f "/huggingface.co/$asset" ]; then \
+            mkdir -p "/ragflow/ragflow_deps/huggingface.co/$(dirname "$asset")" && \
+            cp "/huggingface.co/$asset" "/ragflow/ragflow_deps/huggingface.co/$asset" ; \
+        else \
+            echo "ERROR: tokenizer asset $asset is missing from the infiniflow/ragflow_deps image; this image would count with the calibrated estimate instead of the model's own tokenizer" >&2 ; \
+            exit 1 ; \
+        fi ; \
+    done
 
 ENV TIKA_SERVER_JAR="file:///ragflow/tika-server-standard-3.3.0.jar"
 ENV DEBIAN_FRONTEND=noninteractive
@@ -46,14 +74,18 @@ RUN --mount=type=cache,id=ragflow_apt,target=/var/cache/apt,sharing=locked \
     apt --no-install-recommends install -y ca-certificates \
     libglib2.0-0 libglx-mesa0 libgl1 pkg-config libgdiplus default-jdk libatk-bridge2.0-0 \
     libgtk-4-1 libnss3 xdg-utils libjemalloc-dev gnupg unzip curl wget git vim less \
-    ghostscript pandoc texlive texlive-latex-extra texlive-xetex texlive-lang-chinese \
+    ghostscript pandoc lmodern texlive texlive-latex-extra texlive-xetex texlive-lang-chinese \
     fonts-freefont-ttf fonts-noto-cjk postgresql-client \
     libreoffice-core libreoffice-common libreoffice-writer libreoffice-calc libreoffice-impress
 
 # Download resource from GitHub to /usr/share/infinity
 RUN mkdir -p /usr/share/infinity/resource && \
     if [ "$NEED_MIRROR" == "1" ]; then \
-        git clone --depth 1 --single-branch https://gitee.com/infiniflow/resource /tmp/resource; \
+        if [ -n "$GITEE_TOKEN" ]; then \
+            git clone --depth 1 --single-branch "https://oauth2:${GITEE_TOKEN}@gitee.com/infiniflow/resource" /tmp/resource; \
+        else \
+            git clone --depth 1 --single-branch https://github.com/infiniflow/resource.git /tmp/resource; \
+        fi; \
     else \
         git clone --depth 1 --single-branch https://github.com/infiniflow/resource.git /tmp/resource; \
     fi && \
@@ -90,13 +122,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
     UV_HTTP_RETRIES=3
 ENV PATH=/root/.local/bin:$PATH
 
-# nodejs 12.22 on Ubuntu 22.04 is too old
+# Install Node.js 22.x (Ubuntu 24.04's Node.js is too old)
 RUN --mount=type=cache,id=ragflow_apt,target=/var/cache/apt,sharing=locked \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt purge -y nodejs npm && \
-    apt autoremove -y && \
-    apt update && \
-    apt install -y nodejs
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get purge -y nodejs npm && \
+    apt-get autoremove -y && \
+    apt-get update && \
+    apt-get install -y nodejs
 
 # stagehand-server-v3 (Node.js SEA binary used by Browser component
 # in local mode).
@@ -250,6 +282,21 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 ENV PYTHONPATH=/ragflow/
 
+COPY docker/service_conf.yaml.template ./conf/service_conf.yaml.template
+COPY docker/entrypoint*.sh ./
+RUN chmod +x ./entrypoint*.sh
+
+# Copy nginx configuration for frontend serving
+RUN mkdir -p /etc/nginx/conf.d /var/log/nginx
+
+COPY docker/nginx/nginx.conf docker/nginx/proxy.conf /etc/nginx/
+COPY docker/nginx/ragflow.conf.golang \
+     docker/nginx/ragflow.conf.python \
+     docker/nginx/ragflow.conf.hybrid \
+     /etc/nginx/conf.d/
+
+RUN rm -f /etc/nginx/sites-enabled/default
+
 COPY admin admin
 COPY api api
 COPY conf conf
@@ -263,19 +310,13 @@ COPY memory memory
 COPY bin bin
 COPY tools/scripts tools/scripts
 
-COPY docker/service_conf.yaml.template ./conf/service_conf.yaml.template
-COPY docker/entrypoint.sh ./
-RUN chmod +x ./entrypoint*.sh
-
-# Copy nginx configuration for frontend serving
-COPY docker/nginx/ragflow.conf.golang docker/nginx/ragflow.conf.python docker/nginx/ragflow.conf.hybrid docker/nginx/nginx.conf docker/nginx/proxy.conf /etc/nginx/
-RUN mv /etc/nginx/ragflow.conf.golang /etc/nginx/conf.d/ragflow.conf.golang && \
-    mv /etc/nginx/ragflow.conf.python /etc/nginx/conf.d/ragflow.conf.python && \
-    mv /etc/nginx/ragflow.conf.hybrid /etc/nginx/conf.d/ragflow.conf.hybrid && \
-    rm -f /etc/nginx/sites-enabled/default
-
 # Copy compiled web pages
 COPY --from=builder /ragflow/web/dist /ragflow/web/dist
 
+# Copy version info
 COPY --from=builder /ragflow/VERSION /ragflow/VERSION
+
+# Set environment variables
+ENV HF_ENDPOINT=https://hf-mirror.com
+
 ENTRYPOINT ["./entrypoint.sh"]

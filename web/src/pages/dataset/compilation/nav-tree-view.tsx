@@ -1,65 +1,66 @@
+import { useFetchKnowledgeBaseConfiguration } from '@/hooks/use-knowledge-request';
+import CompilationEmptyState from './empty-state';
+import { ViewMode } from './constants';
 import { Card } from '@/components/ui/card';
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from '@/components/ui/resizable';
+import { GenerateStatus } from '@/constants/knowledge';
+import { useIsGoBackend } from '@/utils/backend-variant';
 import { useTranslation } from 'react-i18next';
-import { DatasetNavKeys } from '@/hooks/use-dataset-nav-request';
-import { useFetchKnowledgeBaseConfiguration } from '@/hooks/use-knowledge-request';
-import {
-  GenerateStatus,
-  GenerateType,
-} from '@/pages/dataset/dataset/generate-button/constants';
-import { useTraceRunData } from '@/pages/dataset/dataset/generate-button/hook';
-import { useGenerateStatus } from '@/pages/dataset/dataset/generate-button/use-generate-status';
-import { useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
-import { useParams } from 'react-router';
 
-import CompilationEmptyState from './empty-state';
 import { useCompilationNav } from './hooks/use-compilation-nav';
-import { CompilationLoadingCard } from './loading-card';
+import { NavCompilingState } from './nav-compiling-state';
 import { NavTreeLeftPanel } from './nav-tree-left-panel';
 
 export function NavTreeView() {
   const { t } = useTranslation();
-  const { id } = useParams();
-  const queryClient = useQueryClient();
+  const isGo = useIsGoBackend();
   const { data: knowledgeBase } = useFetchKnowledgeBaseConfiguration();
-  const { data: skillRunData } = useTraceRunData(GenerateType.ToSkills);
-  const { status: skillStatus } = useGenerateStatus(skillRunData);
   const {
     navList,
     navLoading,
+    navError,
+    keywords,
+    activeKeywords,
     childrenMap,
+    childrenErrorParents,
+    structureMap,
     selectedNode,
     deleteNavLoading,
     deleteNodeLoading,
-    handleParentClick,
-    handleChildClick,
+    navRunData,
+    navStatus,
+    handleKeywordsChange,
+    handleNodeClick,
+    handleNodeExpand,
+    handleEntityClick,
     handleDeleteAll,
     handleDeleteNode,
   } = useCompilationNav();
 
-  useEffect(() => {
-    if (skillStatus === GenerateStatus.completed && id) {
-      queryClient.invalidateQueries({ queryKey: DatasetNavKeys.list(id) });
-    }
-  }, [skillStatus, queryClient, id]);
+  const compiling =
+    isGo &&
+    (navStatus === GenerateStatus.Running ||
+      navStatus === GenerateStatus.Failed);
+  // First compile: no tree content to show yet, so replace the panels with
+  // the progress board. A keywords-filtered empty result keeps the panels so
+  // the user can keep editing the filter.
+  const firstCompileRunning =
+    compiling &&
+    !navLoading &&
+    !navError &&
+    !activeKeywords &&
+    (navList?.total ?? 0) === 0;
 
-  if (navLoading && navList === null) {
-    return <CompilationLoadingCard />;
+  if (firstCompileRunning) {
+    return <NavCompilingState status={navStatus} data={navRunData} />;
   }
 
-  if (!navLoading && (navList?.total ?? 0) === 0) {
-    return (
-      <CompilationEmptyState
-        type="tree"
-        disabled={(knowledgeBase?.chunk_count ?? 0) === 0}
-        data={skillRunData}
-      />
-    );
+  if (!isGo && !navLoading && !navError && !activeKeywords && (navList?.total ?? 0) === 0) {
+    return <CompilationEmptyState type={ViewMode.Tree} disabled={(knowledgeBase?.chunk_count ?? 0) === 0} data={navRunData} />;
   }
 
   return (
@@ -69,11 +70,19 @@ export function NavTreeView() {
           <NavTreeLeftPanel
             navList={navList}
             navLoading={navLoading}
+            navError={navError}
+            keywords={keywords}
+            activeKeywords={activeKeywords}
             childrenMap={childrenMap}
+            childrenErrorParents={childrenErrorParents}
+            structureMap={structureMap}
             deleteNavLoading={deleteNavLoading}
             deleteNodeLoading={deleteNodeLoading}
-            onParentClick={handleParentClick}
-            onChildClick={handleChildClick}
+            traceData={navRunData}
+            onKeywordsChange={handleKeywordsChange}
+            onNodeClick={handleNodeClick}
+            onNodeExpand={handleNodeExpand}
+            onEntityClick={handleEntityClick}
             onDeleteAll={handleDeleteAll}
             onDeleteNode={handleDeleteNode}
           />
@@ -84,19 +93,75 @@ export function NavTreeView() {
             <section className="flex flex-col h-full">
               <header className="px-4 py-3 border-b border-border-button space-y-1">
                 <h3 className="text-sm font-medium text-text-primary">
-                  {selectedNode.displayName}
+                  {selectedNode.displayName || selectedNode.name}
                 </h3>
-                <span className="text-xs text-text-secondary">
-                  {t('datasetNav.docCount', { count: selectedNode.doc_count })}
-                </span>
+                {selectedNode.doc_count !== undefined && (
+                  <span className="text-xs text-text-secondary">
+                    {t('knowledgeCompilation.navDocCount', {
+                      count: selectedNode.doc_count,
+                    })}
+                  </span>
+                )}
               </header>
-              <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 text-sm text-text-primary whitespace-pre-wrap">
-                {selectedNode.description || t('datasetNav.noDescription')}
+              <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 text-sm text-text-primary space-y-4">
+                <div>
+                  <h4 className="text-xs font-medium text-text-secondary mb-1">
+                    {t('knowledgeCompilation.description')}
+                  </h4>
+                  <p className="whitespace-pre-wrap">
+                    {selectedNode.description ||
+                      t('knowledgeCompilation.navNoDescription')}
+                  </p>
+                </div>
+                {selectedNode.keywords && selectedNode.keywords.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-medium text-text-secondary mb-1">
+                      {t('knowledgeCompilation.navKeywords')}
+                    </h4>
+                    <div className="flex flex-wrap gap-1">
+                      {selectedNode.keywords.map((kw, i) => (
+                        <span
+                          key={i}
+                          className="inline-block px-2 py-0.5 rounded text-xs bg-fill-quaternary text-text-secondary"
+                        >
+                          {kw}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {selectedNode.entities && selectedNode.entities.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-medium text-text-secondary mb-1">
+                      {t('knowledgeCompilation.navEntities')}
+                    </h4>
+                    <div className="flex flex-wrap gap-1">
+                      {selectedNode.entities.map((entity, i) => (
+                        <span
+                          key={i}
+                          className="inline-block px-2 py-0.5 rounded text-xs bg-fill-quaternary text-text-secondary"
+                        >
+                          {entity}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {selectedNode.graph_content && (
+                  <div>
+                    <h4 className="text-xs font-medium text-text-secondary mb-1">
+                      {t('knowledgeCompilation.navGraphContent')}
+                    </h4>
+                    <p className="whitespace-pre-wrap text-xs text-text-secondary">
+                      {selectedNode.graph_content}
+                    </p>
+                  </div>
+                )}
               </div>
             </section>
           ) : (
             <div className="flex-1 flex items-center justify-center text-sm text-text-secondary">
-              {t('datasetNav.selectNode')}
+              {t('knowledgeCompilation.navSelectNode')}
             </div>
           )}
         </ResizablePanel>

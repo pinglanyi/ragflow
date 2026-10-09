@@ -36,22 +36,26 @@ package canvas
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 
+	"ragflow/internal/agent/runtime"
 	"ragflow/internal/agent/workflowx"
 
 	"github.com/cloudwego/eino/compose"
 )
 
-// loopExpansion holds the two artefacts produced by buildLoopExpansion
+// loopExpansion holds the two artifacts produced by buildLoopExpansion
 // and consumed by BuildWorkflow to install the loop node.
 type loopExpansion struct {
 	Sub        *compose.Workflow[map[string]any, map[string]any]
 	ShouldQuit workflowx.LoopCondition[map[string]any]
 	MaxIters   int
 	Members    map[string]bool // cpn_ids consumed by the sub-graph; caller skips these in the main pass.
+	snapshot   func(context.Context) ([]byte, error)
+	restore    func(context.Context, []byte) error
 }
 
 // buildLoopExpansion constructs the sub-workflow + termination condition
@@ -106,6 +110,12 @@ func buildLoopExpansion(ctx context.Context, c *Canvas, loopID string) (*loopExp
 		ShouldQuit: shouldQuit,
 		MaxIters:   maxIters,
 		Members:    members,
+		snapshot: func(ctx context.Context) ([]byte, error) {
+			return snapshotLoopVariables(ctx, loopID)
+		},
+		restore: func(ctx context.Context, data []byte) error {
+			return restoreLoopVariables(ctx, loopID, data)
+		},
 	}, nil
 }
 
@@ -123,7 +133,7 @@ func collectLoopMembers(c *Canvas, loopID string) map[string]bool {
 
 func collectDescendants(c *Canvas, root string) map[string]bool {
 	visited := make(map[string]bool)
-	queue := []string{}
+	var queue []string
 	for _, child := range c.Components[root].Downstream {
 		if child == root {
 			continue
@@ -178,8 +188,7 @@ func buildSubWorkflow(
 	// body's mutations accumulate across iterations — otherwise a
 	// VariableAssigner that increments `counter` would be clobbered
 	// back to its initial value at the top of every iteration and
-	// the loop could never terminate on a condition that watches the
-	// counter.
+	// the loop could never terminate on a condition that watches the counter.
 	//
 	// "First time" is detected by checking whether the loop's state
 	// bucket already holds the variable: a missing bucket entry
@@ -199,7 +208,7 @@ func buildSubWorkflow(
 	//                 build time by resolveLoopVarValue)
 	initNode := sub.AddLambdaNode(loopInitKey,
 		compose.InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
-			state, _, err := GetStateFromContext[*CanvasState](ctx)
+			state, err := GetStateFromContext(ctx)
 			if err != nil || state == nil {
 				return in, nil
 			}
@@ -241,7 +250,12 @@ func buildSubWorkflow(
 		if name == "" {
 			return nil, fmt.Errorf("canvas: loop %q member %q has empty component_name", loopID, cpnID)
 		}
-		body, err := buildNodeBody(ctx, cpnID, name, c.Components[cpnID].Obj.Params)
+		deferToMessage := directMessageDownstream(c, cpnID)
+		nodeOpts := runtime.ComponentExecutionOptions{
+			DeferAgentToMessage:        deferToMessage,
+			SuppressAgentMessageEvents: strings.EqualFold(name, "Agent") && !deferToMessage,
+		}
+		body, err := buildNodeBodyWithOptions(ctx, cpnID, name, c.Components[cpnID].Obj.Params, nodeOpts)
 		if err != nil {
 			return nil, err
 		}
@@ -332,6 +346,29 @@ func buildSubWorkflow(
 	initNode.AddInput(compose.START)
 
 	return sub, nil
+}
+
+func snapshotLoopVariables(ctx context.Context, loopID string) ([]byte, error) {
+	state, err := GetStateFromContext(ctx)
+	if err != nil || state == nil {
+		return nil, err
+	}
+	return json.Marshal(state.Snapshot()[loopID])
+}
+
+func restoreLoopVariables(ctx context.Context, loopID string, data []byte) error {
+	state, err := GetStateFromContext(ctx)
+	if err != nil || state == nil {
+		return err
+	}
+	var values map[string]any
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	for name, value := range values {
+		state.SetVar(loopID, name, value)
+	}
+	return nil
 }
 
 func subCanvasForMembers(c *Canvas, members map[string]bool) *Canvas {
@@ -524,12 +561,12 @@ func translateLoopCondition(loopID string, params map[string]any) (workflowx.Loo
 		// and other DSL variables. The workflowx lambda passes the
 		// loop's outer context into this closure, so
 		// canvas.GetStateFromContext works.
-		state, _, err := GetStateFromContext[*CanvasState](ctx)
+		state, err := GetStateFromContext(ctx)
 		if err != nil || state == nil {
 			return false, fmt.Errorf("loop %q: condition eval: no canvas state in context", loopID)
 		}
 		if len(conditions) == 0 {
-			// No conditions means the loop only stops at max count
+			// No conditions mean the loop only stops at max count
 			// — never quit on conditions. Mirrors Python fallback.
 			return false, nil
 		}

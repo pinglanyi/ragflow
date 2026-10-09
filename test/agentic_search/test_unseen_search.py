@@ -13,7 +13,7 @@ def load_search():
     common = types.ModuleType("common")
     common.settings = types.SimpleNamespace()
     path = Path(__file__).resolve().parents[2] / "rag/advanced_rag/harness/tools/search.py"
-    spec = importlib.util.spec_from_file_location("unseen_search_under_test", path)
+    spec = importlib.util.spec_from_file_location("rag.advanced_rag.harness.tools.unseen_search_under_test", path)
     module = importlib.util.module_from_spec(spec)
     with patch.dict(sys.modules, {"common": common}):
         spec.loader.exec_module(module)

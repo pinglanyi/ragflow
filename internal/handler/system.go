@@ -21,6 +21,7 @@ import (
 	"ragflow/internal/common"
 	"ragflow/internal/server"
 	"ragflow/internal/service"
+	"ragflow/internal/utility"
 
 	"github.com/gin-gonic/gin"
 )
@@ -72,7 +73,7 @@ func (h *SystemHandler) Healthz(c *gin.Context) {
 // @Accept json
 // @Produce json
 // @Success 200 {object} map[string]interface{}
-// @Router /v1/system/config [get]
+// @Router /api/v1/system/config [get]
 func (h *SystemHandler) GetConfig(c *gin.Context) {
 	config, err := h.systemService.GetConfig()
 	if err != nil {
@@ -109,7 +110,8 @@ func (h *SystemHandler) GetStatus(c *gin.Context) {
 		return
 	}
 
-	status, err := h.systemService.GetStatus()
+	ctx := c.Request.Context()
+	status, err := h.systemService.GetStatus(ctx)
 	if err != nil {
 		jsonInternalError(c, err)
 		return
@@ -144,7 +146,7 @@ func (h *SystemHandler) GetVersion(c *gin.Context) {
 // table carried (e.g. "peewee", "pdfminer") were inert for the Go
 // side and are no longer returned.
 func (h *SystemHandler) GetLogLevel(c *gin.Context) {
-	common.SuccessWithData(c, gin.H{"level": common.GetLevel()}, "success")
+	common.SuccessWithData(c, gin.H{"level": common.GetLogLevel()}, "success")
 }
 
 // SetLogLevelRequest set log level request. PkgName is accepted for
@@ -172,13 +174,13 @@ func (h *SystemHandler) SetLogLevel(c *gin.Context) {
 		return
 	}
 
-	if err := common.SetLevel(req.Level); err != nil {
+	if err := common.SetLogLevel(req.Level); err != nil {
 		common.ErrorWithCode(c, common.CodeDataError, "Invalid log level: "+req.Level)
 		return
 	}
 
 	if config := server.GetConfig(); config != nil {
-		config.Log.Level = common.GetLevel()
+		config.SetLogLevel(req.Level)
 	}
 
 	common.SuccessWithData(c, gin.H{"level": req.Level}, "SUCCESS")
@@ -186,7 +188,9 @@ func (h *SystemHandler) SetLogLevel(c *gin.Context) {
 
 // ListVariables handle list variables
 func (h *SystemHandler) ListVariables(c *gin.Context) {
-	variables, err := h.systemService.ListAllVariables()
+	ctx := c.Request.Context()
+
+	variables, err := h.systemService.ListAllVariables(ctx)
 	if err != nil {
 		common.ErrorWithCode(c, common.CodeServerError, err.Error())
 		return
@@ -220,7 +224,9 @@ func (h *SystemHandler) SetVariable(c *gin.Context) {
 		return
 	}
 
-	if err := h.systemService.SetVariable(req.VarName, req.VarValue); err != nil {
+	ctx := c.Request.Context()
+
+	if err := h.systemService.SetVariable(ctx, req.VarName, req.VarValue); err != nil {
 		common.ErrorWithCode(c, common.CodeServerError, err.Error())
 		return
 	}
@@ -241,7 +247,9 @@ func (h *SystemHandler) ShowVariable(c *gin.Context) {
 		return
 	}
 
-	variable, err := h.systemService.ShowVariable(varName)
+	ctx := c.Request.Context()
+
+	variable, err := h.systemService.ShowVariable(ctx, varName)
 	if err != nil {
 		common.ErrorWithCode(c, common.CodeServerError, err.Error())
 		return
@@ -265,4 +273,13 @@ func (h *SystemHandler) ListEnvironments(c *gin.Context) {
 // choose the appropriate code path (Go vs Python).
 func (h *SystemHandler) Language(c *gin.Context) {
 	common.SuccessWithData(c, map[string]string{"language": "go"}, "success")
+}
+
+func (h *SystemHandler) GetHardwareInfo(c *gin.Context) {
+	hardwareInfo, err := utility.GetHardwareInfo()
+	if err != nil {
+		common.ErrorWithCode(c, common.CodeServerError, err.Error())
+		return
+	}
+	common.SuccessWithData(c, hardwareInfo, "SUCCESS")
 }

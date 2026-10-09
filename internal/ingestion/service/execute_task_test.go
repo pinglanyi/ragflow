@@ -12,63 +12,6 @@ import (
 	"ragflow/internal/ingestion/testutil"
 )
 
-// TestExecuteTask_CheckpointParseFailureDoesNotKillProcess verifies that checkpoint
-// parse failures do not call fatal exit (which would kill the whole worker process).
-// Instead, the task should be marked as FAILED and return gracefully.
-// This tests the fix for issue 1 from the code review.
-func TestExecuteTask_CheckpointParseFailureDoesNotKillProcess(t *testing.T) {
-	db := testutil.SetupTestDB(t)
-	cleanup := testutil.ReplaceDBForTest(t, db)
-	defer cleanup()
-
-	_, _, docID, taskID := testutil.SeedTestData(t, db,
-		testutil.WithPipelineID("flow-1"),
-		testutil.WithTenantID("tenant-1"),
-	)
-
-	// Create a task log with invalid checkpoint (run_count is a string instead of number)
-	err := db.Create(&entity.IngestionTaskLog{
-		TaskID: taskID,
-		Checkpoint: entity.JSONMap{
-			"run_count": "not-a-number", // intentionally wrong type
-		},
-	}).Error
-	if err != nil {
-		t.Fatalf("create bad task log: %v", err)
-	}
-
-	ingestor := NewIngestor("test", 1, []string{"pdf"})
-	// Replace runDocumentTask to ensure it doesn't get called
-	var runDocumentTaskCalled bool
-	ingestor.runDocumentTask = func(ctx context.Context, ingestionTask *entity.IngestionTask) error {
-		runDocumentTaskCalled = true
-		return nil
-	}
-
-	taskCtx := taskpkg.NewTaskContextForScheduling(
-		context.Background(),
-		&entity.IngestionTask{ID: taskID, DocumentID: docID, DatasetID: "kb-1", Status: common.RUNNING},
-	)
-
-	// Execute the task - this should NOT panic or fatal exit (this is our main validation!)
-	ingestor.executeTask(taskCtx)
-
-	// Corrupted run_count values are skipped by IncrementRunCount, so the task
-	// proceeds to runDocumentTask and completes normally.
-	if !runDocumentTaskCalled {
-		t.Fatal("expected runDocumentTask to be called (bad run_count is skipped, not fatal)")
-	}
-
-	// Verify task status was set to COMPLETED
-	finalTask, err := dao.NewIngestionTaskDAO().GetByID(taskID)
-	if err != nil {
-		t.Fatalf("load final ingestion task: %v", err)
-	}
-	if finalTask.Status != common.COMPLETED {
-		t.Fatalf("final status = %s, want %s", finalTask.Status, common.COMPLETED)
-	}
-}
-
 func TestDefaultRunDocumentTask_BothPipelineAndParserMissing(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	cleanup := testutil.ReplaceDBForTest(t, db)
@@ -88,7 +31,7 @@ func TestDefaultRunDocumentTask_BothPipelineAndParserMissing(t *testing.T) {
 		t.Fatalf("clear parser_id: %v", err)
 	}
 
-	ingestor := NewIngestor("test", 1, []string{"pdf"})
+	ingestor := newUnitIngestor("test", 1, []string{"pdf"})
 	err := ingestor.defaultRunDocumentTask(context.Background(), &entity.IngestionTask{
 		ID:         taskID,
 		DocumentID: docID,
@@ -121,7 +64,7 @@ func TestDefaultRunDocumentTask_ParserIDWithoutPipelineID(t *testing.T) {
 		testutil.WithTaskID("task-1"),
 	)
 
-	ingestor := NewIngestor("test", 1, []string{"pdf"})
+	ingestor := newUnitIngestor("test", 1, []string{"pdf"})
 	err := ingestor.defaultRunDocumentTask(context.Background(), &entity.IngestionTask{
 		ID:         taskID,
 		DocumentID: docID,
@@ -150,8 +93,7 @@ func TestExecuteTask_RunsDocumentTask(t *testing.T) {
 		testutil.WithPipelineID("flow-1"),
 		testutil.WithTenantID("tenant-1"),
 	)
-
-	ingestor := NewIngestor("test", 1, []string{"pdf"})
+	ingestor := newUnitIngestor("test", 1, []string{"pdf"})
 	var runDocumentTaskCalled bool
 	var gotTaskID string
 	var gotProgress []float64
@@ -173,7 +115,8 @@ func TestExecuteTask_RunsDocumentTask(t *testing.T) {
 		&entity.IngestionTask{ID: taskID, DocumentID: docID, DatasetID: "kb-1", Status: common.RUNNING},
 	)
 
-	ingestor.executeTask(taskCtx)
+	ctx := t.Context()
+	ingestor.executeTask(ctx, taskCtx)
 
 	if !runDocumentTaskCalled {
 		t.Fatal("expected executeTask to run runDocumentTask")
@@ -181,7 +124,7 @@ func TestExecuteTask_RunsDocumentTask(t *testing.T) {
 	if gotTaskID != taskID {
 		t.Fatalf("runDocumentTask got task ID %q, want %q", gotTaskID, taskID)
 	}
-	finalTask, err := dao.NewIngestionTaskDAO().GetByID(taskID)
+	finalTask, err := dao.NewIngestionTaskDAO().GetByID(ctx, db, taskID)
 	if err != nil {
 		t.Fatalf("load final ingestion task: %v", err)
 	}
@@ -197,10 +140,8 @@ func TestExecuteTask_RunsDocumentTask(t *testing.T) {
 }
 
 // TestExecuteTask_CancelBeforePipeline verifies that when cancelCheck returns
-// true at task start, the task is cancelled before AdvanceStep,
-// runDocumentTask is never called, and document progress is set to -1 with a
-// cancel marker. Mirrors Python's cancel flow where has_canceled() returns
-// true in Pipeline.callback().
+// true at task start, the task is cancelled before the pipeline runs and the
+// legacy document progress message remains untouched.
 func TestExecuteTask_CancelBeforePipeline(t *testing.T) {
 	db := testutil.SetupTestDB(t)
 	cleanup := testutil.ReplaceDBForTest(t, db)
@@ -209,9 +150,13 @@ func TestExecuteTask_CancelBeforePipeline(t *testing.T) {
 		testutil.WithPipelineID("flow-1"),
 		testutil.WithTenantID("tenant-1"),
 	)
+	const progressMessage = "Queued before cancellation"
+	if err := db.Model(&entity.Document{}).Where("id = ?", docID).Update("progress_msg", progressMessage).Error; err != nil {
+		t.Fatalf("seed document progress message: %v", err)
+	}
 
-	ingestor := NewIngestor("test", 1, []string{"pdf"})
-	ingestor.cancelCheck = func(taskID string) bool { return true }
+	ingestor := newUnitIngestor("test", 1, []string{"pdf"})
+	ingestor.cancelCheck = func(ctx context.Context, taskID string) bool { return true }
 
 	var runDocumentTaskCalled bool
 	ingestor.runDocumentTask = func(ctx context.Context, ingestionTask *entity.IngestionTask) error {
@@ -223,23 +168,21 @@ func TestExecuteTask_CancelBeforePipeline(t *testing.T) {
 		context.Background(),
 		&entity.IngestionTask{ID: taskID, DocumentID: docID, DatasetID: "kb-1", Status: common.RUNNING},
 	)
-	ingestor.executeTask(taskCtx)
+	ctx := t.Context()
+	ingestor.executeTask(ctx, taskCtx)
 
 	if runDocumentTaskCalled {
 		t.Fatal("expected runDocumentTask to NOT be called when cancel is detected before pipeline")
 	}
 
-	doc, err := dao.NewDocumentDAO().GetByID(docID)
+	doc, err := dao.NewDocumentDAO().GetByID(ctx, db, docID)
 	if err != nil {
 		t.Fatalf("load document: %v", err)
 	}
 	if doc.Progress != -1 {
 		t.Fatalf("document.progress = %v, want -1 (cancelled)", doc.Progress)
 	}
-	if doc.Run == nil || *doc.Run != string(entity.TaskStatusCancel) {
-		t.Fatalf("document.run = %v, want %s (CANCEL)", doc.Run, entity.TaskStatusCancel)
-	}
-	if doc.ProgressMsg == nil || *doc.ProgressMsg == "" {
-		t.Fatal("document.progress_msg should contain cancel marker, got empty")
+	if doc.ProgressMsg == nil || *doc.ProgressMsg != progressMessage {
+		t.Fatalf("document.progress_msg = %v, want preserved %q", doc.ProgressMsg, progressMessage)
 	}
 }

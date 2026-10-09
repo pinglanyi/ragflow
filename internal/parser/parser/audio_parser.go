@@ -22,6 +22,7 @@
 package parser
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -37,11 +38,8 @@ var audioExtensions = map[string]bool{
 	"vqf": true, "oggvorbis": true, "ape": true,
 }
 
-// AudioParser handles audio files for transcription. The struct mirrors
-// the configuration from setups["audio"]:output_format and
-// setups["audio"].vlm.llm_id.
+// AudioParser handles audio files for transcription.
 type AudioParser struct {
-	VLMModelID   string // vlm.llm_id — identifies the speech-to-text model
 	OutputFormat string
 }
 
@@ -51,15 +49,10 @@ func NewAudioParser() *AudioParser {
 }
 
 // ConfigureFromSetup reads audio-specific configuration from the
-// parser setup map. It extracts vlm.llm_id and output_format.
+// parser setup map.
 func (p *AudioParser) ConfigureFromSetup(setup map[string]any) {
 	if p == nil || setup == nil {
 		return
-	}
-	if vlm, ok := setup["vlm"].(map[string]any); ok {
-		if llmID, ok := vlm["llm_id"].(string); ok && llmID != "" {
-			p.VLMModelID = llmID
-		}
 	}
 	if v, ok := setup["output_format"].(string); ok && v != "" {
 		p.OutputFormat = v
@@ -70,7 +63,7 @@ func (p *AudioParser) ConfigureFromSetup(setup map[string]any) {
 // file extension against the audio extension whitelist. The actual
 // speech-to-text transcription happens via maybeDispatchAudio at the
 // component layer (mirrors Python's LLMBundle.transcription call).
-func (p *AudioParser) ParseWithResult(filename string, data []byte) ParseResult {
+func (p *AudioParser) ParseWithResult(ctx context.Context, filename string, data []byte) ParseResult {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if len(ext) > 1 && ext[0] == '.' {
 		ext = ext[1:]
@@ -81,7 +74,6 @@ func (p *AudioParser) ParseWithResult(filename string, data []byte) ParseResult 
 		}
 	}
 
-	// OutputFormat and VLMModelID are consumed by maybeDispatchAudio.
 	outFmt := p.OutputFormat
 	if outFmt == "" {
 		outFmt = "text"

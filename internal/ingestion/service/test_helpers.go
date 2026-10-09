@@ -30,6 +30,11 @@ func NewTestIngestor() *Ingestor {
 // IngestorOption configures a test Ingestor.
 type IngestorOption func(*Ingestor)
 
+func newUnitIngestor(name string, maxConcurrency int32, supportedTypes []string) *Ingestor {
+	ingestor := NewIngestor(name, maxConcurrency, supportedTypes)
+	return ingestor
+}
+
 // SetupTestIngestor creates a new test Ingestor with the given options.
 func SetupTestIngestor(t testingT, opts ...IngestorOption) *Ingestor {
 	t.Helper()

@@ -33,6 +33,7 @@ package runtime
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"sort"
 	"strings"
@@ -70,13 +71,13 @@ type CanvasState struct {
 	Globals            map[string]any
 	CancelFlag         *atomic.Bool
 	RunID              string
-	TaskID             string
+	SessionID          string
 }
 
 // NewCanvasState returns a zero-valued CanvasState with all maps allocated.
 // The atomic CancelFlag is allocated eagerly so nodes can safely poll it
 // even before any cancel signal has been wired.
-func NewCanvasState(runID, taskID string) *CanvasState {
+func NewCanvasState(runID, sessionID string) *CanvasState {
 	s := &CanvasState{
 		activeHistoryIndex: -1,
 		Outputs:            make(map[string]map[string]any),
@@ -89,13 +90,13 @@ func NewCanvasState(runID, taskID string) *CanvasState {
 		Globals:            make(map[string]any),
 		CancelFlag:         &atomic.Bool{},
 		RunID:              runID,
-		TaskID:             taskID,
+		SessionID:          sessionID,
 	}
 	s.EnsureSysDate()
 	return s
 }
 
-// EnsureSysDate fills sys.date with the current UTC timestamp when it
+// EnsureSysDate fills sys.date with the current local timestamp when it
 // is missing or blank. Python canvas initializes the same variable with
 // "%Y-%m-%d %H:%M:%S"; keep that wire format for DSL compatibility.
 func (s *CanvasState) EnsureSysDate() {
@@ -110,7 +111,7 @@ func (s *CanvasState) EnsureSysDate() {
 	if v, ok := s.Sys["date"]; ok && strings.TrimSpace(fmt.Sprint(v)) != "" {
 		return
 	}
-	s.Sys["date"] = time.Now().UTC().Format("2006-01-02 15:04:05")
+	s.Sys["date"] = time.Now().Format("2006-01-02 15:04:05")
 }
 
 // init registers CanvasState with eino's internal type registry so
@@ -142,12 +143,12 @@ type canvasStateJSON struct {
 	Globals            map[string]any            `json:"globals,omitempty"`
 	CancelFlag         bool                      `json:"cancel_flag"`
 	RunID              string                    `json:"run_id"`
-	TaskID             string                    `json:"task_id"`
+	SessionID          string                    `json:"session_id"`
 }
 
 // MarshalJSON serialises the CanvasState for eino's StatePre/Post
 // handler chain (which JSON-encodes the state on every node boundary
-// when a StateSerializer is wired) and for Redis-backed CheckPointStore
+// when a StateSerializer is wired) and for Kvrocks-backed CheckPointStore
 // payloads.
 //
 // Eino's interrupt path hit "failed to marshal state: unknown
@@ -181,7 +182,7 @@ func (s *CanvasState) MarshalJSON() ([]byte, error) {
 		Globals:            s.Globals,
 		CancelFlag:         s.CancelFlag != nil && s.CancelFlag.Load(),
 		RunID:              s.RunID,
-		TaskID:             s.TaskID,
+		SessionID:          s.SessionID,
 	}
 	// Use SafeJSONMarshal to handle non-serializable values (funcs,
 	// channels) that may have leaked into state maps. Mirrors the
@@ -201,15 +202,9 @@ func (s *CanvasState) UnmarshalJSON(b []byte) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if snap.Outputs != nil {
-		s.Outputs = snap.Outputs
-	}
-	if snap.Sys != nil {
-		s.Sys = snap.Sys
-	}
-	if snap.Env != nil {
-		s.Env = snap.Env
-	}
+	s.Outputs = snap.Outputs
+	s.Sys = snap.Sys
+	s.Env = snap.Env
 	s.Path = snap.Path
 	s.History = snap.History
 	s.activeHistoryIndex = -1
@@ -217,18 +212,12 @@ func (s *CanvasState) UnmarshalJSON(b []byte) error {
 		s.activeHistoryIndex = *snap.ActiveHistoryIndex
 	}
 	s.Memory = snap.Memory
-	if snap.Retrieval != nil {
-		s.Retrieval = snap.Retrieval
-	}
-	if snap.Globals != nil {
-		s.Globals = snap.Globals
-	}
-	if s.CancelFlag == nil {
-		s.CancelFlag = &atomic.Bool{}
-	}
+	s.Retrieval = snap.Retrieval
+	s.Globals = snap.Globals
+	s.ensureInitializedLocked()
 	s.CancelFlag.Store(snap.CancelFlag)
 	s.RunID = snap.RunID
-	s.TaskID = snap.TaskID
+	s.SessionID = snap.SessionID
 	return nil
 }
 
@@ -261,6 +250,7 @@ func (s *CanvasState) GetVar(ref string) (any, error) {
 func (s *CanvasState) SetVar(cpnID, param string, v any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureInitializedLocked()
 	setVarLocked(s.Outputs, cpnID, param, v)
 }
 
@@ -327,6 +317,42 @@ func (s *CanvasState) SnapshotNamespaces() (sys map[string]any, env map[string]a
 		globals[k] = v
 	}
 	return sys, env, globals
+}
+
+// MergeNamespaces adds the supplied values to the three shared namespaces.
+// Existing keys are preserved unless replaced by an incoming value.
+func (s *CanvasState) MergeNamespaces(sys, env, globals map[string]any) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureInitializedLocked()
+	maps.Copy(s.Sys, sys)
+	maps.Copy(s.Env, env)
+	maps.Copy(s.Globals, globals)
+}
+
+// ReplaceNamespaces replaces the three shared namespaces with defensive
+// copies of the supplied maps.
+func (s *CanvasState) ReplaceNamespaces(sys, env, globals map[string]any) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Sys = maps.Clone(sys)
+	if s.Sys == nil {
+		s.Sys = make(map[string]any)
+	}
+	s.Env = maps.Clone(env)
+	if s.Env == nil {
+		s.Env = make(map[string]any)
+	}
+	s.Globals = maps.Clone(globals)
+	if s.Globals == nil {
+		s.Globals = make(map[string]any)
+	}
 }
 
 // SetHistory replaces the conversation history with a defensive copy.
@@ -610,12 +636,34 @@ func (s *CanvasState) RecordOutput(cpnID, bucket string, payload any) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ensureInitializedLocked()
 	b, ok := s.Outputs[cpnID]
-	if !ok {
+	if !ok || b == nil {
 		b = make(map[string]any)
 		s.Outputs[cpnID] = b
 	}
 	b[bucket] = payload
+}
+
+func (s *CanvasState) ensureInitializedLocked() {
+	if s.Outputs == nil {
+		s.Outputs = make(map[string]map[string]any)
+	}
+	if s.Sys == nil {
+		s.Sys = make(map[string]any)
+	}
+	if s.Env == nil {
+		s.Env = make(map[string]any)
+	}
+	if s.Retrieval == nil {
+		s.Retrieval = make(map[string]any)
+	}
+	if s.Globals == nil {
+		s.Globals = make(map[string]any)
+	}
+	if s.CancelFlag == nil {
+		s.CancelFlag = &atomic.Bool{}
+	}
 }
 
 // GetGlobal returns a value from the workflow-wide Globals bag. Globals is a
@@ -885,7 +933,7 @@ func getVarLocked(s *CanvasState, ref string) (any, error) {
 // setVarLocked is the lock-free inner SetVar. Caller must hold s.mu.
 func setVarLocked(outputs map[string]map[string]any, cpnID, param string, v any) {
 	bucket, ok := outputs[cpnID]
-	if !ok {
+	if !ok || bucket == nil {
 		bucket = make(map[string]any)
 		outputs[cpnID] = bucket
 	}
@@ -897,7 +945,7 @@ func setVarLocked(outputs map[string]map[string]any, cpnID, param string, v any)
 			return
 		}
 		next, ok := cur[p].(map[string]any)
-		if !ok {
+		if !ok || next == nil {
 			next = make(map[string]any)
 			cur[p] = next
 		}

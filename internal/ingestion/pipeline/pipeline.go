@@ -18,7 +18,6 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -27,71 +26,37 @@ import (
 	_ "ragflow/internal/agent/component"
 	"ragflow/internal/agent/runtime"
 	"ragflow/internal/common"
-	redis2 "ragflow/internal/engine/redis"
+	kvrocks "ragflow/internal/engine/kvrocks"
 	"ragflow/internal/ingestion/component/globals"
 	"ragflow/internal/utility"
 
-	"github.com/cloudwego/eino/compose"
+	"go.uber.org/zap"
 )
 
 // Pipeline is a compiled ingestion canvas plus task-scoped metadata.
 type Pipeline struct {
 	taskID     string
-	documentID string // owning document; progress is mirrored back to the
-	// document table so the existing GET /api/v1/datasets/{dataset_id}/documents
-	// endpoint (which reads document.progress/run/progress_msg) reflects the
-	// live Go pipeline progress without a bespoke endpoint (plan §8).
+	documentID string // owning document; numeric progress is mirrored back to
+	// the document table for existing status projections.
 	canvas  *canvas.Canvas
-	store   canvas.CheckPointStore // optional injected; nil -> resolve at Run
-	tracker *canvas.RunTracker     // optional injected; nil -> resolve at Run
-	// requireResume, when true, makes Run refuse to start if no checkpoint
-	// store can be resolved (no injected store AND no global Redis client).
-	// Plan §6.a M4 方案 A: a deployment that cannot persist checkpoints must
-	// not silently degrade to a non-resumable run — it must surface a clear,
-	// distinguishable error so the caller knows resume is unavailable.
-	requireResume bool
-	factory       runtime.ComponentFactory // optional instance-scoped component factory
-	sink          ProgressSink             // optional progress sink; nil -> drop events (DB-independent)
+	tracker *canvas.RunTracker       // optional injected; nil -> resolve at Run
+	factory runtime.ComponentFactory // optional instance-scoped component factory
+	sink    ProgressSink             // optional progress sink; nil -> drop events (DB-independent)
 }
-
-// ErrResumeUnavailable is returned by Run when WithRequireResume is set but no
-// checkpoint store can be resolved (plan §6.a M4). Callers can test for it with
-// errors.Is to surface a "resume unavailable" condition instead of a generic
-// failure (e.g. refuse to enqueue the task rather than start a non-resumable
-// run).
-var ErrResumeUnavailable = errors.New("resume unavailable: no checkpoint store (Redis down or not configured)")
 
 // PipelineOption mutates a Pipeline before Run. Used to inject test doubles
 // (in-memory store / miniredis tracker) or dedicated Redis pools.
 type PipelineOption func(*Pipeline)
 
-// WithCheckPointStore injects a checkpoint store. When unset, Run resolves
-// one from the global Redis client (and degrades to a non-resumable run when
-// Redis is unavailable — plan §6.a).
-func WithCheckPointStore(s canvas.CheckPointStore) PipelineOption {
-	return func(p *Pipeline) { p.store = s }
-}
-
-// WithRunTracker injects a RunTracker for interrupt-id persistence / crash
-// recovery. When unset, Run resolves one from the global Redis client.
+// WithRunTracker injects a RunTracker for progress mirroring (terminal
+// run-status marks). When unset, Run resolves one from the global Kvrocks
+// client.
 func WithRunTracker(t *canvas.RunTracker) PipelineOption {
 	return func(p *Pipeline) { p.tracker = t }
 }
 
-// WithRequireResume makes Run refuse to start when no checkpoint store can be
-// resolved (no injected store AND no global Redis client). This is plan A: a
-// deployment that cannot persist checkpoints must not silently
-// degrade to a non-resumable run — it must surface a clear, distinguishable
-// error (ErrResumeUnavailable) so the caller knows resume is unavailable.
-// Production ingestion wiring sets this; unit tests leave it off to exercise
-// the non-resumable runPlain fallback.
-func WithRequireResume() PipelineOption {
-	return func(p *Pipeline) { p.requireResume = true }
-}
-
-// WithDocumentID binds the pipeline's owning document so progress can be
-// mirrored back into the document table (document.progress / run /
-// progress_msg) — the canonical store the document-list endpoint serves.
+// WithDocumentID binds the pipeline's owning document so numeric progress can
+// be mirrored back into the document table.
 // Pass the empty string to disable the mirror (e.g. headless/test runs where
 // the document row is not materialized).
 func WithDocumentID(docID string) PipelineOption {
@@ -117,8 +82,8 @@ type ProgressEvent struct {
 // (internal/ingestion/service). A nil sink is valid: events are dropped and
 // the pipeline stays DB-independent (unit tests, headless runs).
 type ProgressSink interface {
-	OnComponentTotal(taskID string, total int)
-	OnComponentProgress(ev ProgressEvent)
+	OnComponentTotal(ctx context.Context, taskID string, total int)
+	OnComponentProgress(ctx context.Context, ev ProgressEvent)
 }
 
 // WithProgressSink injects a sink that receives component progress events
@@ -132,17 +97,19 @@ func WithProgressSink(s ProgressSink) PipelineOption {
 // It accepts either the inner canvas DSL or the template wrapper whose
 // top-level `dsl` field carries that canvas.
 func NewPipelineFromDSL(dsl []byte, taskID string, opts ...PipelineOption) (*Pipeline, error) {
-	var raw map[string]any
-	if err := json.Unmarshal(dsl, &raw); err != nil {
-		return nil, fmt.Errorf("pipeline: decode DSL: %w", err)
-	}
-	canvasDSL, err := unwrapCanvasDSL(raw)
+	// UnwrapCanvasDSL is the single source of truth for stripping the
+	// optional {"dsl": {...}} canvas envelope; it also reports a nil/unparseable
+	// DSL.
+	canvasDSL, err := UnwrapCanvasDSL(dsl)
 	if err != nil {
 		return nil, err
 	}
 	cnv, err := canvas.DecodeFromDSL(canvasDSL)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: decode canvas DSL: %w", err)
+	}
+	if err := ValidatePipeline(cnv); err != nil {
+		return nil, err
 	}
 	p := &Pipeline{
 		taskID: taskID,
@@ -154,6 +121,24 @@ func NewPipelineFromDSL(dsl []byte, taskID string, opts ...PipelineOption) (*Pip
 	return p, nil
 }
 
+// ValidatePipeline enforces ingestion pipeline constraints.
+// Specifically, at most one Extractor component is permitted in the graph.
+func ValidatePipeline(cnv *canvas.Canvas) error {
+	if cnv == nil {
+		return nil
+	}
+	extractorCount := 0
+	for id, comp := range cnv.Components {
+		if isExtractorComponent(id, comp.Obj.ComponentName) {
+			extractorCount++
+		}
+	}
+	if extractorCount > 1 {
+		return fmt.Errorf("pipeline validation error: at most 1 Extractor component is allowed, found %d", extractorCount)
+	}
+	return nil
+}
+
 // WithComponentFactory installs an instance-scoped factory override for this
 // pipeline. It is used during canvas compilation so one pipeline run can
 // construct task-specific component instances without mutating the process-wide
@@ -163,20 +148,6 @@ func (p *Pipeline) WithComponentFactory(factory runtime.ComponentFactory) *Pipel
 		p.factory = factory
 	}
 	return p
-}
-
-func unwrapCanvasDSL(raw map[string]any) (map[string]any, error) {
-	if len(raw) == 0 {
-		return nil, errNilDSL
-	}
-	if rawDSL, ok := raw["dsl"]; ok {
-		canvasDSL, ok := rawDSL.(map[string]any)
-		if !ok || len(canvasDSL) == 0 {
-			return nil, errNilDSL
-		}
-		return canvasDSL, nil
-	}
-	return raw, nil
 }
 
 func mergeInto(dst, src map[string]any) map[string]any {
@@ -203,16 +174,16 @@ func cloneMapOrEmpty(m map[string]any) map[string]any {
 	return out
 }
 
-// defaultCheckpointTTL is the expiry applied to the eino checkpoint payload
-// and the RunTracker hash. A finished run's checkpoint is deleted on success;
-// the TTL only guards against leaks from crashed runs that never clean up.
-var defaultCheckpointTTL = 24 * time.Hour
+// defaultTrackerTTL is the expiry applied to the RunTracker run-status hash.
+// It matches the per-chunk cache TTL (chunkcache.TTL) so both expire on the
+// same horizon.
+var defaultTrackerTTL = 7 * 24 * time.Hour
 
 // Run executes the full ingestion graph described by the canonical DSL.
 // There is no pipeline-layer partial resume entry point: execution always
 // starts from the graph entry and component-level replay decisions belong to
 // the components themselves.
-func (p *Pipeline) Run(ctx context.Context, inputs map[string]any, override_params map[string]any) (map[string]any, error) {
+func (p *Pipeline) Run(ctx context.Context, inputs map[string]any, overrideParams map[string]any) (map[string]any, error) {
 	if p == nil {
 		return nil, fmt.Errorf("pipeline: Run on nil pipeline")
 	}
@@ -231,37 +202,19 @@ func (p *Pipeline) Run(ctx context.Context, inputs map[string]any, override_para
 		compileCtx = canvas.WithComponentFactory(compileCtx, p.factory)
 	}
 
-	// Resolve the checkpoint store + run tracker. Resume (interrupt-after
-	// non-terminal node) requires a checkpoint store to persist the resume
-	// point; without one we fall back to a single non-resumable Invoke
-	// (plan §6.a degrade — progress stays observable, the run just cannot
-	// pause/resume across nodes).
-	store := p.resolveStore()
+	// Resolve the run tracker for progress mirroring (terminal
+	// MarkSucceeded/MarkFailed/MarkCancelled marks). Resume-from-checkpoint is
+	// intentionally not supported: the pipeline always runs the full graph
+	// from the entry node, and component-level replay decisions (e.g. serving
+	// prior LLM/embedding results from the per-chunk cache) belong to the
+	// components themselves.
 	tracker := p.resolveTracker()
 
-	// M4 (plan §6.a 方案 A): refuse to start when resume is required but no
-	// checkpoint store is resolvable. A Redis-less deployment must not pretend
-	// the task is resumable; it must report the gap clearly so the caller can
-	// refuse to enqueue the task instead of silently running a non-resumable
-	// run (which would violate "re-run same task, completed components not
-	// redone").
-	if p.requireResume && store == nil {
-		return nil, fmt.Errorf("pipeline: Run: %w", ErrResumeUnavailable)
-	}
-	resumable := store != nil
-
 	var compileOpts []canvas.CompileOption
-	if resumable {
-		compileOpts = append(compileOpts,
-			canvas.WithCheckPointStore(store),
-			canvas.WithCheckPointID(p.taskID),
-			canvas.WithInterruptAfterNonTerminalCpn(),
-		)
-	}
 	// Run-level setups (keyed by cpnID) override the DSL-baked component
 	// setups at compile time (higher priority; see canvas.WithOverrideParams).
-	if override_params != nil {
-		compileOpts = append(compileOpts, canvas.WithOverrideParams(override_params))
+	if overrideParams != nil {
+		compileOpts = append(compileOpts, canvas.WithOverrideParams(overrideParams))
 	}
 	compiled, err := canvas.Compile(compileCtx, p.canvas, compileOpts...)
 	if err != nil {
@@ -272,7 +225,7 @@ func (p *Pipeline) Run(ctx context.Context, inputs map[string]any, override_para
 	// progress percentage. Best-effort: a DB failure (or headless run
 	// with no DB) must not abort the pipeline — progress is observability.
 	if p.sink != nil {
-		p.sink.OnComponentTotal(p.taskID, len(p.canvas.Components))
+		p.sink.OnComponentTotal(ctx, p.taskID, len(p.canvas.Components))
 	}
 
 	runState := canvas.NewCanvasState("", p.taskID)
@@ -284,7 +237,9 @@ func (p *Pipeline) Run(ctx context.Context, inputs map[string]any, override_para
 	// is nil when the DB is not initialized (unit tests, headless
 	// runs), in which case TrackProgress is a no-op — progress is an
 	// observability concern, not a data dependency.
-	runCtx = runtime.WithProgressCallback(runCtx, p.componentProgressCallback())
+	runCtx = runtime.WithProgressCallback(runCtx, p.componentProgressCallback(ctx))
+	runCtx = runtime.WithProgressMessageCallback(runCtx, p.componentProgressMessageCallback(ctx))
+	runCtx = runtime.WithProgressFractionCallback(runCtx, p.componentFractionCallback(ctx))
 
 	current := cloneMapOrEmpty(inputs)
 
@@ -295,153 +250,66 @@ func (p *Pipeline) Run(ctx context.Context, inputs map[string]any, override_para
 	// component re-publishes `name` (and storage refs) as it derives
 	// them mid-run.
 	globals.SeedIngestionGlobals(runCtx, current)
+	// Expose the task id on the run context so every component can register the
+	// per-chunk cache keys it writes into the task manifest (chunkcache). Without
+	// this the manifest is never populated and PurgeTask on success becomes a
+	// no-op, leaving orphaned cache entries until TTL expiry.
+	globals.SetTaskID(runCtx, p.taskID)
 
-	if !resumable {
-		return p.runPlain(runCtx, current, compiled, tracker, runState)
-	}
-
-	// Resumable path: record the run, then loop Invoke until the graph
-	// completes or a non-resumable error surfaces.
-	if tracker != nil {
-		if err := tracker.Start(ctx, p.taskID, "", "", ""); err != nil {
-			common.Error(fmt.Sprintf("pipeline: RunTracker.Start for task %s failed: %v", p.taskID, err), err)
-		}
-	}
-	return p.runResumable(ctx, runCtx, current, compiled, store, tracker, runState)
+	return p.runPlain(runCtx, current, compiled, tracker, runState)
 }
 
-// resolveStore returns the injected store, or a Redis-backed one when the
-// global Redis client is available. Returns nil (degraded, non-resumable)
-// when neither is present.
-func (p *Pipeline) resolveStore() canvas.CheckPointStore {
-	if p.store != nil {
-		return p.store
-	}
-	if redis2.Get() != nil {
-		return canvas.NewRedisCheckPointStore(defaultCheckpointTTL)
-	}
-	return nil
-}
-
-// resolveTracker mirrors resolveStore for the RunTracker.
+// resolveTracker resolves the RunTracker used for progress mirroring. When an
+// instance-scoped tracker was injected it wins; otherwise one is created on
+// the global Kvrocks client when available.
 func (p *Pipeline) resolveTracker() *canvas.RunTracker {
 	if p.tracker != nil {
 		return p.tracker
 	}
-	if redis2.Get() != nil {
-		return canvas.NewRunTracker(defaultCheckpointTTL)
+	if kvrocks.Get() != nil {
+		return canvas.NewRunTracker(defaultTrackerTTL)
 	}
 	return nil
 }
 
-// runPlain executes a single Invoke with no checkpoint/resume. Used when no
-// checkpoint store is available; progress is still recorded via the sink.
+// runPlain executes the full ingestion graph with a single Invoke and records
+// the terminal run status via the sink/RunTracker when available.
 func (p *Pipeline) runPlain(runCtx context.Context, current map[string]any, compiled *canvas.CompiledCanvas, tracker *canvas.RunTracker, runState *canvas.CanvasState) (map[string]any, error) {
+	// Terminal tracker writes must survive a run ctx that gets cancelled
+	// (the common failure/cancel path). Derive a fresh detached ctx per
+	// terminal branch, bounded so a hung Redis cannot stall — mirrors
+	// markStopped/markFailed in ingestion_service.go.
+	detached := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.WithoutCancel(runCtx), 5*time.Second)
+	}
+
 	out, err := compiled.Workflow.Invoke(runCtx, current)
 	if err != nil {
 		if errors.Is(runCtx.Err(), context.Canceled) || errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			if tracker != nil {
-				utility.BestEffort(fmt.Sprintf("MarkCancelled for %s", p.taskID), func() error { return tracker.MarkCancelled(runCtx, p.taskID) })
+				stateCtx, cancel := detached()
+				utility.BestEffort(fmt.Sprintf("MarkCancelled for %s", p.taskID), func() error { return tracker.MarkCancelled(stateCtx, p.taskID) })
+				cancel()
 			}
 			return current, fmt.Errorf("pipeline: run cancelled: %w", runCtx.Err())
 		}
 		if tracker != nil {
-			utility.BestEffort(fmt.Sprintf("MarkFailed for %s", p.taskID), func() error { return tracker.MarkFailed(runCtx, p.taskID, err.Error()) })
+			stateCtx, cancel := detached()
+			utility.BestEffort(fmt.Sprintf("MarkFailed for %s", p.taskID), func() error { return tracker.MarkFailed(stateCtx, p.taskID, err.Error()) })
+			cancel()
 		}
 		return current, fmt.Errorf("pipeline: run canvas workflow: %w", err)
 	}
 	if tracker != nil {
-		utility.BestEffort(fmt.Sprintf("MarkSucceeded for %s", p.taskID), func() error { return tracker.MarkSucceeded(runCtx, p.taskID) })
+		stateCtx, cancel := detached()
+		utility.BestEffort(fmt.Sprintf("MarkSucceeded for %s", p.taskID), func() error { return tracker.MarkSucceeded(stateCtx, p.taskID) })
+		cancel()
 	}
 	return finalizeResult(current, out, runState), nil
 }
 
-// runResumable drives the graph with eino's interrupt-after-node + resume
-// loop (plan §8 step 3). Every non-terminal-node pause is auto-resumed with
-// nil data (ingestion resume needs no user input). The loop's TOP reads any
-// persisted interrupt id — from the RunTracker (cross-process crash
-// recovery) or an in-process fallback — and resumes; the BOTTOM only persists
-// the id, never inline-resumes (avoids double-resuming one ctx, plan §4.2
-// 建议2).
-func (p *Pipeline) runResumable(ctx context.Context, runCtx context.Context, current map[string]any, compiled *canvas.CompiledCanvas, store canvas.CheckPointStore, tracker *canvas.RunTracker, runState *canvas.CanvasState) (map[string]any, error) {
-	cpID := compiled.CheckPointID
-	var localInterruptID string // in-process resume fallback when tracker is nil
-	invokeInput := current
-
-	const maxResumeRounds = 1000
-	for round := 0; round < maxResumeRounds; round++ {
-		// TOP: recover the pending interrupt (crash recovery or in-process).
-		resumeID := ""
-		if tracker != nil {
-			if id, ok, _ := tracker.GetInterruptID(ctx, cpID); ok && id != "" {
-				resumeID = id
-			}
-		}
-		if resumeID == "" {
-			resumeID = localInterruptID
-		}
-		if resumeID != "" {
-			runCtx = compose.ResumeWithData(runCtx, resumeID, nil)
-			invokeInput = nil // resume restores the graph input from checkpoint
-		}
-
-		out, invokeErr := compiled.Workflow.Invoke(runCtx, invokeInput, compose.WithCheckPointID(cpID))
-		if invokeErr == nil {
-			if tracker != nil {
-				utility.BestEffort(fmt.Sprintf("ClearInterruptID for %s", p.taskID), func() error { return tracker.ClearInterruptID(ctx, cpID) })
-				utility.BestEffort(fmt.Sprintf("MarkSucceeded for %s", p.taskID), func() error { return tracker.MarkSucceeded(ctx, cpID) })
-			}
-			if store != nil {
-				utility.BestEffort(fmt.Sprintf("delete checkpoint for %s", p.taskID), func() error { return store.Delete(ctx, cpID) })
-			}
-			return finalizeResult(current, out, runState), nil
-		}
-
-		// Cancellation (plan §4.3.b): wipe the checkpoint and mark cancelled.
-		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			p.cleanupCheckpoint(ctx, store, tracker, cpID)
-			if tracker != nil {
-				utility.BestEffort(fmt.Sprintf("MarkCancelled for %s", p.taskID), func() error { return tracker.MarkCancelled(ctx, cpID) })
-			}
-			return current, fmt.Errorf("pipeline: run cancelled: %w", ctx.Err())
-		}
-
-		if !canvas.IsInterruptError(invokeErr) {
-			if tracker != nil {
-				utility.BestEffort(fmt.Sprintf("MarkFailed for %s", p.taskID), func() error { return tracker.MarkFailed(ctx, cpID, invokeErr.Error()) })
-			}
-			return current, fmt.Errorf("pipeline: run canvas workflow: %w", invokeErr)
-		}
-
-		// Paused at a non-terminal node: persist for crash recovery, then
-		// resume on the next loop iteration's TOP.
-		ctxs := canvas.ExtractInterruptContexts(invokeErr)
-		id := canvas.FirstInterruptID(ctxs)
-		localInterruptID = id
-		if tracker != nil {
-			if err := tracker.AttachInterrupt(ctx, cpID, id); err != nil {
-				common.Error(fmt.Sprintf("pipeline: AttachInterrupt for task %s failed: %v", p.taskID, err), err)
-			}
-		}
-	}
-	return current, fmt.Errorf("pipeline: run exceeded max resume rounds (%d) for task %s", maxResumeRounds, p.taskID)
-}
-
-// cleanupCheckpoint wipes the eino checkpoint payload and the persisted
-// interrupt id (plan §4.3.b cancelled path).
-func (p *Pipeline) cleanupCheckpoint(ctx context.Context, store canvas.CheckPointStore, tracker *canvas.RunTracker, cpID string) {
-	if store != nil {
-		if err := store.Delete(ctx, cpID); err != nil {
-			common.Error(fmt.Sprintf("pipeline: delete checkpoint %s failed: %v", cpID, err), err)
-		}
-	}
-	if tracker != nil {
-		_ = tracker.ClearInterruptID(ctx, cpID)
-	}
-}
-
 // finalizeResult merges the graph output into the input map and attaches the
-// canvas state snapshot — the shared success payload for both run paths.
+// canvas state snapshot as the success payload.
 func finalizeResult(current, out map[string]any, runState *canvas.CanvasState) map[string]any {
 	if out == nil {
 		current["state"] = runState.Snapshot()
@@ -459,25 +327,67 @@ func finalizeResult(current, out map[string]any, runState *canvas.CanvasState) m
 // never touches the DAO layer. Returns nil when no sink is attached, leaving
 // TrackProgress a no-op and the pipeline DB-independent (unit tests, headless
 // runs).
-func (p *Pipeline) componentProgressCallback() runtime.ProgressCallback {
+func (p *Pipeline) componentProgressCallback(ctx context.Context) runtime.ProgressCallback {
 	if p.sink == nil {
 		return nil
 	}
 	return func(ev runtime.ProgressEvent) {
+		componentName := ev.Component
+		if comp, ok := p.canvas.Components[ev.Component]; ok && comp.Obj.ComponentName != "" {
+			componentName = comp.Obj.ComponentName
+		}
 		var msg string
 		switch ev.Phase {
 		case runtime.PhaseEnter:
-			msg = ev.Component + " Started"
+			msg = componentName + " Started"
 		case runtime.PhaseExit:
-			msg = ev.Component + " Done"
+			msg = componentName + " Done"
 		case runtime.PhaseError:
 			if ev.Err != nil {
-				msg = ev.Component + ": " + ev.Err.Error()
+				msg = componentName + ": " + ev.Err.Error()
 			} else {
-				msg = ev.Component + " Error"
+				msg = componentName + " Error"
 			}
 		}
-		p.sink.OnComponentProgress(ProgressEvent{
+		// Surface every component lifecycle event as a structured log line so
+		// a component failure (e.g. an LLM/client error) is captured in
+		// ingestor_server.log even if the wrapped error never reaches the
+		// higher-level "Task ... failed" branch.
+		switch ev.Phase {
+		case runtime.PhaseError:
+			if errors.Is(ev.Err, context.Canceled) {
+				// A user cancel is a normal control path; the authoritative
+				// "Task ... cancelled" line is logged by the service layer, so
+				// keep this at debug to avoid duplicate noise.
+				common.Debug("component progress: canceled",
+					zap.String("component", ev.Component),
+					zap.String("task_id", p.taskID),
+					zap.String("document_id", p.documentID))
+			} else if ev.Err != nil {
+				common.Error("component progress: error", ev.Err,
+					zap.String("component", ev.Component),
+					zap.String("task_id", p.taskID),
+					zap.String("document_id", p.documentID))
+			} else {
+				common.Info("component progress: error",
+					zap.String("component", ev.Component),
+					zap.String("task_id", p.taskID),
+					zap.String("document_id", p.documentID))
+			}
+		default:
+			// Keep the message constant: msg may carry component names or
+			// error-derived text, and a newline in it could forge a log record
+			// (CWE-117). Pass msg and the phase as structured fields instead.
+			common.Info("component progress",
+				zap.String("message", msg),
+				zap.Int("phase", int(ev.Phase)),
+				zap.String("component", ev.Component),
+				zap.String("task_id", p.taskID),
+				zap.String("document_id", p.documentID))
+		}
+		sinkCtx, cancel := progressSinkContext(ctx)
+		defer cancel()
+		p.sink.OnComponentProgress(sinkCtx, ProgressEvent{
 			TaskID:     p.taskID,
 			DocumentID: p.documentID,
 			Component:  ev.Component,
@@ -485,4 +395,54 @@ func (p *Pipeline) componentProgressCallback() runtime.ProgressCallback {
 			Phase:      int(ev.Phase),
 		})
 	}
+}
+
+type detailedProgressSink interface {
+	OnComponentMessage(ctx context.Context, taskID, documentID, component, message string)
+}
+
+// fractionProgressSink is the optional interface through which the pipeline
+// forwards in-flight component fractions (pages parsed, chunks embedded) to
+// the sink's progress tracker. Mirrors detailedProgressSink: a sink that does
+// not implement it simply receives no fraction channel.
+type fractionProgressSink interface {
+	OnComponentFraction(ctx context.Context, component string, fraction float64)
+}
+
+// componentFractionCallback forwards fraction reports to the sink. The sink
+// only mutates in-memory state here (its flusher owns persistence), so the
+// run context is passed through without the WithoutCancel fallback that the
+// I/O-bound callbacks need.
+func (p *Pipeline) componentFractionCallback(ctx context.Context) runtime.ProgressFractionCallback {
+	sink, ok := p.sink.(fractionProgressSink)
+	if !ok {
+		return nil
+	}
+	return func(component string, fraction float64) {
+		sink.OnComponentFraction(ctx, component, fraction)
+	}
+}
+
+func (p *Pipeline) componentProgressMessageCallback(ctx context.Context) runtime.ProgressMessageCallback {
+	sink, ok := p.sink.(detailedProgressSink)
+	if !ok {
+		return nil
+	}
+	return func(component, message string) {
+		common.Info("component progress detail",
+			zap.String("component", component),
+			zap.String("task_id", p.taskID),
+			zap.String("document_id", p.documentID),
+			zap.String("message", message))
+		sinkCtx, cancel := progressSinkContext(ctx)
+		defer cancel()
+		sink.OnComponentMessage(sinkCtx, p.taskID, p.documentID, component, message)
+	}
+}
+
+func progressSinkContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx.Err() == nil {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }

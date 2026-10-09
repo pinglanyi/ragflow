@@ -1,9 +1,10 @@
 export interface ITestRetrievalRequestBody {
   question: string;
+  page_size: number;
+  rerank_candidates_count: number;
   similarity_threshold: number;
   vector_similarity_weight: number;
   rerank_id?: string;
-  top_k?: number;
   use_kg?: boolean;
   highlight?: boolean;
   kb_id?: string[];
@@ -27,11 +28,11 @@ export interface IFetchKnowledgeListRequestParams {
   id?: string;
   page?: number;
   page_size?: number;
-  ext?: {
-    keywords?: string;
-    owner_ids?: string[];
-    parser_id?: string;
-  };
+  keywords?: string;
+  owner_ids?: string[];
+  parser_id?: string;
+  // Viewing a shared canvas: fetch the canvas owner's datasets instead.
+  tenant_id?: string;
 }
 
 export interface IFetchDocumentListRequestBody {
@@ -58,6 +59,8 @@ export interface IFetchArtifactTopicListRequestParams {
 
 export interface IFetchArtifactGraphRequestParams {
   node?: string;
+  keywords?: string;
+  top_n?: number;
 }
 
 export interface IUpdateArtifactPageRequestBody {

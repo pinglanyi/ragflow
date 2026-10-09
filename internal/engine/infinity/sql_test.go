@@ -379,3 +379,93 @@ func TestLoadFieldMapping_EmptyNameDefaultsToInfinityMappingJSON(t *testing.T) {
 		t.Errorf("empty name + no file should yield empty maps; got a2a=%v r2a=%v", a2a, r2a)
 	}
 }
+
+func TestBuildFilterFromCondition_UnconstrainedFilter(t *testing.T) {
+	clmns := map[string]struct {
+		Type    string
+		Default interface{}
+	}{
+		"id": {"Varchar", ""},
+	}
+	// empty condition yields "1=1"
+	if got := buildFilterFromCondition(map[string]interface{}{}, clmns); got != "1=1" {
+		t.Errorf("empty condition: got %q, want '1=1'", got)
+	}
+	// condition with nil or empty string values yields "1=1"
+	cond := map[string]interface{}{
+		"source_id": "",
+		"nil_field": nil,
+	}
+	if got := buildFilterFromCondition(cond, clmns); got != "1=1" {
+		t.Errorf("non-empty condition with blank values: got %q, want '1=1'", got)
+	}
+}
+
+// TestBuildFilterFromCondition_StringSliceIDPreservesScope pins the shape the
+// document availability switch relies on: the doc-service caller of
+// UpdateChunks (updateDocumentChunkAvailability) passes a typed []string id
+// list, and Infinity must render it as an IN clause. Dropping it leaves whatever
+// other clauses the caller passed (none, for that path), i.e. an update scoped
+// to the whole dataset table.
+func TestBuildFilterFromCondition_StringSliceIDPreservesScope(t *testing.T) {
+	clmns := map[string]struct {
+		Type    string
+		Default interface{}
+	}{
+		"id": {"Varchar", ""},
+	}
+	got := buildFilterFromCondition(map[string]interface{}{"id": []string{"chunk-a", "chunk-b"}}, clmns)
+	if got != "id IN ('chunk-a', 'chunk-b')" {
+		t.Errorf("condition []string id: got %q, want %q", got, "id IN ('chunk-a', 'chunk-b')")
+	}
+	// An empty list contributes no clause, so the caller is left with an
+	// unconstrained filter — the case UpdateChunks/DeleteChunks refuse.
+	if got := buildFilterFromCondition(map[string]interface{}{"id": []string{}}, clmns); got != "1=1" {
+		t.Errorf("empty []string id: got %q, want '1=1'", got)
+	}
+}
+
+func TestBuildFilterFromConditionJSONListMembership(t *testing.T) {
+	jsonColumns := map[string]struct {
+		Type    string
+		Default interface{}
+	}{
+		"source_doc_ids": {Type: "Json", Default: "[]"},
+	}
+	condition := map[string]interface{}{"source_doc_ids": []string{"doc-1", "doc-2"}}
+	want := `(json_contains(source_doc_ids, '"doc-1"') OR json_contains(source_doc_ids, '"doc-2"'))`
+	if got := buildFilterFromCondition(condition, jsonColumns); got != want {
+		t.Errorf("JSON-list condition = %q, want %q", got, want)
+	}
+	if got := equivalentConditionToStr(condition, jsonColumns); got != want {
+		t.Errorf("JSON-list search condition = %q, want %q", got, want)
+	}
+}
+
+func TestBuildFilterFromConditionLegacyJSONListMembership(t *testing.T) {
+	legacyColumns := map[string]struct {
+		Type    string
+		Default interface{}
+	}{
+		"source_doc_ids": {Type: "Varchar", Default: ""},
+	}
+	condition := map[string]interface{}{"source_doc_ids": []string{"doc-1"}}
+	want := `(filter_fulltext('source_doc_ids', 'doc-1'))`
+	if got := buildFilterFromCondition(condition, legacyColumns); got != want {
+		t.Errorf("legacy JSON-list condition = %q, want %q", got, want)
+	}
+	if got := equivalentConditionToStr(condition, legacyColumns); got != want {
+		t.Errorf("legacy JSON-list search condition = %q, want %q", got, want)
+	}
+}
+
+func TestBuildFilterFromConditionMissingJSONListColumnNeverMatches(t *testing.T) {
+	condition := map[string]interface{}{"source_doc_ids": []string{"doc-1"}}
+	want := `(1=0)`
+	if got := buildFilterFromCondition(condition, map[string]struct {
+		Type    string
+		Default interface{}
+	}{}); got != want {
+		t.Errorf("missing JSON-list column condition = %q, want %q", got, want)
+	}
+}

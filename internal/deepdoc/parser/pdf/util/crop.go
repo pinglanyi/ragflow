@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"log/slog"
 	"math"
-	pdf "ragflow/internal/deepdoc/parser/pdf/type"
 	"strings"
+
+	"go.uber.org/zap"
+
+	"ragflow/internal/common"
+	pdf "ragflow/internal/deepdoc/parser/pdf/type"
 )
 
 // CropSectionImage crops region(s) from rendered page images based on a
@@ -18,13 +21,13 @@ import (
 // Python: pdf_parser.py:1802 RAGFlowPdfParser.crop()
 func CropSectionImage(posTag string, decodedImages map[int]image.Image, zoom float64) string {
 	if len(decodedImages) == 0 {
-		slog.Warn("cropSectionImage: no page images available, skipping image generation")
+		common.Warn("cropSectionImage: no page images available, skipping image generation")
 		return ""
 	}
 
 	positions := ExtractPositions(posTag)
 	if len(positions) == 0 {
-		slog.Warn("cropSectionImage: empty position list in tag", "posTag", posTag[:min(80, len(posTag))])
+		common.Warn("cropSectionImage: empty position list in tag", zap.String("posTag", posTag[:min(80, len(posTag))]))
 		return ""
 	}
 
@@ -43,7 +46,7 @@ func CropSectionImage(posTag string, decodedImages map[int]image.Image, zoom flo
 		}
 	}
 	if len(valid) == 0 {
-		slog.Warn("cropSectionImage: no valid positions after filtering, skipping crop")
+		common.Warn("cropSectionImage: no valid positions after filtering, skipping crop")
 		return ""
 	}
 
@@ -143,7 +146,7 @@ func CropSectionImage(posTag string, decodedImages map[int]image.Image, zoom flo
 
 		pageImg, ok := decodedImages[pn0]
 		if !ok {
-			slog.Warn("cropSectionImage: page image not found", "page", pn0)
+			common.Warn("cropSectionImage: page image not found", zap.Int("page", pn0))
 			return ""
 		}
 		pageH := float64(pageImg.Bounds().Dy())
@@ -166,7 +169,7 @@ func CropSectionImage(posTag string, decodedImages map[int]image.Image, zoom flo
 			}
 			pageImg2, ok := decodedImages[pn]
 			if !ok {
-				slog.Warn("cropSectionImage: page image not found for subsequent page", "page", pn)
+				common.Warn("cropSectionImage: page image not found for subsequent page", zap.Int("page", pn))
 				return ""
 			}
 			pageH2 := float64(pageImg2.Bounds().Dy())
@@ -234,13 +237,13 @@ func CropSectionImage(posTag string, decodedImages map[int]image.Image, zoom flo
 
 	data, err := EncodePNG(stitched)
 	if err != nil {
-		slog.Warn("cropSectionImage: PNG encode failed", "err", err)
+		common.Warn("cropSectionImage: PNG encode failed", zap.Error(err))
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString(data)
 }
 
-// cropSectionByDLA crops a section using the best-overlapping DLA region,
+// CropSectionByDLA crops a section using the best-overlapping DLA region,
 // mimicking Python's cropout() in deepdoc/parser/pdf_parser.py (around line
 // 1307). Unlike the original Go version (which only cropped the first page),
 // it now walks every position and every page the section spans, crops each
@@ -370,8 +373,8 @@ func cropDLAPage(img image.Image, dlaRegions []pdf.DLAPageRegions,
 		if cropped, err := CropImageRegion(img, regions[bestIdx]); err == nil {
 			return cropped
 		} else {
-			slog.Warn("cropSectionByDLA: cropImageRegion failed, falling back to bbox",
-				"page", pn, "err", err)
+			common.Warn("cropSectionByDLA: cropImageRegion failed, falling back to bbox",
+				zap.Int("page", pn), zap.Error(err))
 		}
 	}
 	// Fallback: crop the section bbox on this page (FastCrop clamps to bounds).
@@ -432,7 +435,7 @@ func stitchVerticalImages(imgs []image.Image, gap int) string {
 
 	data, err := EncodePNG(stitched)
 	if err != nil {
-		slog.Warn("cropSectionByDLA: PNG encode failed", "err", err)
+		common.Warn("cropSectionByDLA: PNG encode failed", zap.Error(err))
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString(data)
@@ -483,7 +486,7 @@ func rotateCoordCW(x, y float64, origW, origH int, angle int) (float64, float64)
 	}
 }
 
-// rotateImageCW rotates an image clockwise. Only 0/90/180/270 supported;
+// RotateImageCW rotates an image clockwise. Only 0/90/180/270 supported;
 // other values return nil. Matches Python PIL.Image.rotate(-angle, expand=True).
 func RotateImageCW(img image.Image, angle int) *image.RGBA {
 	b := img.Bounds()
@@ -509,7 +512,7 @@ func RotateImageCW(img image.Image, angle int) *image.RGBA {
 	return dst
 }
 
-// mapRotatedPointToOriginal maps a point from rotated image coords back to
+// MapRotatedPointToOriginal maps a point from rotated image coords back to
 // original coords. angle is the clockwise rotation applied. origW, origH
 // are the ORIGINAL (pre-rotation) image dimensions.
 //
@@ -558,13 +561,19 @@ func MapRotatedRectToOriginal(x0, y0, x1, y1 float64, angle int, origW, origH in
 	return minX, minY, maxX, maxY
 }
 
-// CropImageRegion crops a pdf.DLARegion from an image with a 3% margin
-// (matching Python's _table_transformer_job: w*0.03, h*0.03).
+// TSRRegionMarginPx is the fixed pixel margin added around a DLA table bbox
+// before it is sent to TSR. It matches Python's _table_transformer_job, which
+// expands the box by MARGIN = 10 PDF points and then scales by ZM
+// (10 * DlaScale = 30px at the 216-DPI render). The margin is FIXED, not
+// proportional to table size — an earlier Go port mistakenly used w*0.03 /
+// h*0.03, which diverged from Python.
+const TSRRegionMarginPx = 10.0 * pdf.DlaScale
+
+// CropImageRegion crops a pdf.DLARegion from an image with a fixed margin
+// (matching Python's _table_transformer_job: MARGIN=10 points scaled by ZM).
 func CropImageRegion(img image.Image, r pdf.DLARegion) (image.Image, error) {
-	w := r.X1 - r.X0
-	h := r.Y1 - r.Y0
-	marginX := w * 0.03
-	marginY := h * 0.03
+	marginX := TSRRegionMarginPx
+	marginY := TSRRegionMarginPx
 	maxX := float64(img.Bounds().Dx())
 	maxY := float64(img.Bounds().Dy())
 	x0 := int(math.Max(0, r.X0-marginX))

@@ -46,6 +46,12 @@ export interface IAvailableProvider {
   model_types: string[];
   url: { default?: string; [key: string]: string | undefined };
   has_instance: boolean;
+  /**
+   * Display-only example endpoint from the provider catalog
+   * (`conf/models/*.json`). Rendered as the endpoint input's placeholder;
+   * never used to build requests nor to pre-fill the form.
+   */
+  url_hint?: string;
 }
 
 export interface IProviderInstance {
@@ -108,6 +114,14 @@ export interface IInstanceModel {
    * without relying solely on the (possibly unfetched) catalog.
    */
   is_tools?: boolean;
+  /**
+   * Per-model extra config persisted in `tenant_model.extra`.
+   * Carries provider-specific fields such as SoMark's element-format
+   * selects and feature-config toggles. Echoed back by the backend's
+   * `_hybrid_get_instance_models` so the frontend can pre-fill the
+   * edit dialog.
+   */
+  extra?: Record<string, any>;
 }
 
 export interface IDefaultModel {

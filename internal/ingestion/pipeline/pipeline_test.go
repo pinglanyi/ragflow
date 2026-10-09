@@ -18,8 +18,8 @@ package pipeline
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +29,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 type mockCanvasStage struct {
@@ -37,7 +38,7 @@ type mockCanvasStage struct {
 	calls  int
 }
 
-func (m *mockCanvasStage) Invoke(_ context.Context, inputs map[string]any) (map[string]any, error) {
+func (m *mockCanvasStage) Invoke(_ context.Context, _ *gorm.DB, inputs map[string]any) (map[string]any, error) {
 	m.called = true
 	m.calls++
 	out := cloneMapOrEmpty(inputs)
@@ -48,25 +49,6 @@ func (m *mockCanvasStage) Invoke(_ context.Context, inputs map[string]any) (map[
 }
 func (m *mockCanvasStage) Inputs() map[string]string  { return map[string]string{"name": "string"} }
 func (m *mockCanvasStage) Outputs() map[string]string { return map[string]string{"output": "any"} }
-
-// oneShotErrStage errors on the first Invoke (simulating a component crash
-// mid-run), then delegates to the embedded mock on subsequent calls. Used to
-// test that a second pipeline Run on the same taskID resumes past non-terminal
-// checkpoints instead of re-executing completed components.
-type oneShotErrStage struct {
-	mockCanvasStage
-	n int
-}
-
-func (s *oneShotErrStage) Invoke(ctx context.Context, inputs map[string]any) (map[string]any, error) {
-	s.n++
-	if s.n == 1 {
-		return nil, errors.New("simulated crash")
-	}
-	return s.mockCanvasStage.Invoke(ctx, inputs)
-}
-func (s *oneShotErrStage) Inputs() map[string]string  { return s.mockCanvasStage.Inputs() }
-func (s *oneShotErrStage) Outputs() map[string]string { return s.mockCanvasStage.Outputs() }
 
 func TestPipelineRunHappyPath(t *testing.T) {
 	stageA := &mockCanvasStage{output: map[string]any{"a": 1}}
@@ -98,7 +80,7 @@ func TestPipelineRunHappyPath(t *testing.T) {
 		t.Fatalf("NewPipelineFromDSL: %v", err)
 	}
 
-	out, err := pipe.Run(context.Background(), map[string]any{"name": "doc-canvas"}, nil)
+	out, err := pipe.Run(t.Context(), map[string]any{"name": "doc-canvas"}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -119,7 +101,7 @@ func TestPipelineRunHappyPath(t *testing.T) {
 
 func TestPipelineRunNilPipeline(t *testing.T) {
 	var p *Pipeline
-	if _, err := p.Run(context.Background(), nil, nil); err == nil {
+	if _, err := p.Run(t.Context(), nil, nil); err == nil {
 		t.Fatal("expected error for nil pipeline")
 	}
 }
@@ -144,7 +126,7 @@ func TestPipelineRunStageErrorBubbles(t *testing.T) {
 		t.Fatalf("NewPipelineFromDSL: %v", err)
 	}
 
-	if _, err := pipe.Run(context.Background(), map[string]any{"name": "x"}, nil); err == nil {
+	if _, err := pipe.Run(t.Context(), map[string]any{"name": "x"}, nil); err == nil {
 		t.Fatal("expected stage error")
 	}
 }
@@ -171,7 +153,7 @@ func TestNewPipelineFromDSLUnwrapsTemplateDSL(t *testing.T) {
 
 type errCanvasStage struct{}
 
-func (e *errCanvasStage) Invoke(_ context.Context, _ map[string]any) (map[string]any, error) {
+func (e *errCanvasStage) Invoke(_ context.Context, _ *gorm.DB, _ map[string]any) (map[string]any, error) {
 	return nil, &stageError{Stage: "p.RunErrStage", Reason: "intentional"}
 }
 func (e *errCanvasStage) Inputs() map[string]string  { return nil }
@@ -181,52 +163,10 @@ type factorySentinelStage struct {
 	marker string
 }
 
-func (s *factorySentinelStage) Invoke(_ context.Context, inputs map[string]any) (map[string]any, error) {
+func (s *factorySentinelStage) Invoke(_ context.Context, _ *gorm.DB, inputs map[string]any) (map[string]any, error) {
 	out := cloneMapOrEmpty(inputs)
 	out["marker"] = s.marker
 	return out, nil
-}
-
-// memCheckpointStore is a thread-safe in-memory canvas.CheckPointStore used
-// to exercise the resumable run path without Redis.
-type memCheckpointStore struct {
-	mu      sync.Mutex
-	data    map[string][]byte
-	deleted int // number of times Delete was called
-}
-
-func newMemCheckpointStore() *memCheckpointStore {
-	return &memCheckpointStore{data: map[string][]byte{}}
-}
-
-func (s *memCheckpointStore) Get(_ context.Context, id string) ([]byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.data[id]
-	return v, ok, nil
-}
-
-func (s *memCheckpointStore) Set(_ context.Context, id string, payload []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := make([]byte, len(payload))
-	copy(cp, payload)
-	s.data[id] = cp
-	return nil
-}
-
-func (s *memCheckpointStore) Delete(_ context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.data, id)
-	s.deleted++
-	return nil
-}
-
-func (s *memCheckpointStore) deleteCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.deleted
 }
 
 // TestPipelineRun_InstanceFactoryOverridesDefaultFactory verifies that a
@@ -250,7 +190,7 @@ func TestPipelineRun_InstanceFactoryOverridesDefaultFactory(t *testing.T) {
 		return &factorySentinelStage{marker: "instance"}, nil
 	})
 
-	out, err := pipe.Run(context.Background(), map[string]any{"name": "doc"}, nil)
+	out, err := pipe.Run(t.Context(), map[string]any{"name": "doc"}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -304,7 +244,7 @@ func TestPipelineRun_TaskScopedFactoriesDoNotLeakAcrossConcurrentPipelines(t *te
 	results := make(chan result, 2)
 	run := func(pipe *Pipeline) {
 		defer wg.Done()
-		out, err := pipe.Run(context.Background(), map[string]any{"name": "doc"}, nil)
+		out, err := pipe.Run(t.Context(), map[string]any{"name": "doc"}, nil)
 		if err != nil {
 			results <- result{err: err}
 			return
@@ -334,151 +274,6 @@ func TestPipelineRun_TaskScopedFactoriesDoNotLeakAcrossConcurrentPipelines(t *te
 	}
 }
 
-func TestPipelineRunResumableAutoResumes(t *testing.T) {
-	stageA := &mockCanvasStage{output: map[string]any{"a": 1}}
-	stageB := &mockCanvasStage{output: map[string]any{"b": 2}}
-
-	const (
-		nameA = "p.ResumeStageA"
-		nameB = "p.ResumeStageB"
-	)
-	runtime.MustRegister(nameA, runtime.CategoryIngestion,
-		func(_ string, _ map[string]any) (runtime.Component, error) { return stageA, nil },
-		runtime.Metadata{Version: "1.0.0"})
-	runtime.MustRegister(nameB, runtime.CategoryIngestion,
-		func(_ string, _ map[string]any) (runtime.Component, error) { return stageB, nil },
-		runtime.Metadata{Version: "1.0.0"})
-
-	pipe, err := NewPipelineFromDSL([]byte(`{
-		"dsl": {
-			"components": {
-				"begin": {"obj": {"component_name": "Begin", "params": {}}, "downstream": ["a"]},
-				"a": {"obj": {"component_name": "`+nameA+`", "params": {}}, "upstream": ["begin"], "downstream": ["b"]},
-				"b": {"obj": {"component_name": "`+nameB+`", "params": {}}, "upstream": ["a"]}
-			},
-			"path": ["begin", "a", "b"],
-			"graph": {"nodes": []}
-		}
-	}`), "task-resume", WithCheckPointStore(newMemCheckpointStore()))
-	if err != nil {
-		t.Fatalf("NewPipelineFromDSL: %v", err)
-	}
-
-	out, err := pipe.Run(context.Background(), map[string]any{"name": "doc-resume"}, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !stageA.called || !stageB.called {
-		t.Fatalf("expected both stages to run, got A=%v B=%v", stageA.called, stageB.called)
-	}
-	// No re-run on resume: each node must execute exactly once.
-	if stageA.calls != 1 || stageB.calls != 1 {
-		t.Fatalf("expected each stage to run exactly once, got A.calls=%d B.calls=%d", stageA.calls, stageB.calls)
-	}
-	if out == nil {
-		t.Fatal("expected non-nil output")
-	}
-}
-
-// TestPipelineRunResumableCrossRunResume validates crash-recovery resume
-// across two Run calls: when the terminal component errors mid-run (simulated
-// crash), non-terminal checkpoints + interrupt state persist. The second Run
-// on the same taskID resumes past completed non-terminal components instead of
-// re-executing them. A non-terminal stage (A) runs exactly once across both runs; the
-// terminal stage (B, a oneShotErrStage) errors on run 1 and succeeds on run 2.
-func TestPipelineRunResumableCrossRunResume(t *testing.T) {
-	mockA := &mockCanvasStage{output: map[string]any{"a": 1}}
-	mockB := &mockCanvasStage{output: map[string]any{"b": 2}}
-	termStage := &oneShotErrStage{mockCanvasStage: *mockB}
-
-	const (
-		nameA = "p.XRunStageA"
-		nameB = "p.XRunStageB"
-	)
-	runtime.MustRegister(nameA, runtime.CategoryIngestion,
-		func(_ string, _ map[string]any) (runtime.Component, error) { return mockA, nil },
-		runtime.Metadata{Version: "1.0.0"})
-	runtime.MustRegister(nameB, runtime.CategoryIngestion,
-		func(_ string, _ map[string]any) (runtime.Component, error) { return termStage, nil },
-		runtime.Metadata{Version: "1.0.0"})
-
-	store := newMemCheckpointStore()
-	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { client.Close() })
-	tracker := canvas.NewRunTrackerWithClient(client, time.Hour)
-
-	const taskID = "task-cross-run-resume"
-	pipe, err := NewPipelineFromDSL([]byte(`{
-		"dsl": {
-			"components": {
-				"begin": {"obj": {"component_name": "Begin", "params": {}}, "downstream": ["a"]},
-				"a": {"obj": {"component_name": "`+nameA+`", "params": {}}, "upstream": ["begin"], "downstream": ["b"]},
-				"b": {"obj": {"component_name": "`+nameB+`", "params": {}}, "upstream": ["a"]}
-			},
-			"path": ["begin", "a", "b"],
-			"graph": {"nodes": []}
-		}
-	}`), taskID, WithCheckPointStore(store), WithRunTracker(tracker))
-	if err != nil {
-		t.Fatalf("NewPipelineFromDSL: %v", err)
-	}
-
-	// Run 1: terminal B errors (oneShotErrStage n=1), simulating a crash.
-	// Non-terminal A's checkpoint + interrupt persist because the error path
-	// does not call ClearInterruptID or store.Delete.
-	_, err = pipe.Run(context.Background(), map[string]any{"name": "doc-cross-run"}, nil)
-	if err == nil {
-		t.Fatal("Run 1: expected error from simulated crash, got nil")
-	}
-	if mockA.calls != 1 {
-		t.Fatalf("Run 1: expected A to run once, got %d", mockA.calls)
-	}
-	// oneShotErrStage did not delegate to its embedded mock on the first call.
-	if termStage.calls != 0 {
-		t.Fatalf("Run 1: expected B (embedded mock) calls=0 (error before delegate), got %d", termStage.calls)
-	}
-
-	// Run 2: resume from after A via tracker.GetInterruptID. A is skipped;
-	// B's oneShotErrStage (n=2) delegates to its embedded mock successfully.
-	_, err = pipe.Run(context.Background(), map[string]any{"name": "doc-cross-run"}, nil)
-	if err != nil {
-		t.Fatalf("Run 2: expected recovery success, got error: %v", err)
-	}
-	if mockA.calls != 1 {
-		t.Fatalf("Run 2: expected A to still have calls=1 (was skipped by resume), got %d", mockA.calls)
-	}
-	if termStage.calls != 1 {
-		t.Fatalf("Run 2: expected B (embedded mock) calls=1 (delegated once), got %d", termStage.calls)
-	}
-}
-
-// TestPipelineRun_RequireResumeRejectsWithoutStore verifies that with
-// WithRequireResume set and no checkpoint store resolvable (no
-// injected store, no global Redis in unit scope), Run must refuse to start
-// and return ErrResumeUnavailable — a clear, distinguishable signal — rather
-// than silently degrading to a non-resumable runPlain. The reject fires
-// before compile, so the DSL does not need a runnable graph.
-func TestPipelineRun_RequireResumeRejectsWithoutStore(t *testing.T) {
-	pipe, err := NewPipelineFromDSL([]byte(`{
-		"dsl": {
-			"components": {
-				"begin": {"obj": {"component_name": "Begin", "params": {}}, "downstream": ["a"]},
-				"a": {"obj": {"component_name": "p.Docx", "params": {}}, "upstream": ["begin"]}
-			},
-			"path": ["begin", "a"],
-			"graph": {"nodes": []}
-		}
-	}`), "task-req-resume", WithRequireResume())
-	if err != nil {
-		t.Fatalf("NewPipelineFromDSL: %v", err)
-	}
-	_, err = pipe.Run(context.Background(), map[string]any{"name": "doc"}, nil)
-	if !errors.Is(err, ErrResumeUnavailable) {
-		t.Fatalf("expected ErrResumeUnavailable, got %v", err)
-	}
-}
-
 // recordingSink captures OnComponentTotal / OnComponentProgress calls so tests
 // can assert the pipeline forwards progress to the sink instead of writing
 // the DAO layer directly.
@@ -489,14 +284,14 @@ type recordingSink struct {
 	events   []ProgressEvent
 }
 
-func (r *recordingSink) OnComponentTotal(taskID string, total int) {
+func (r *recordingSink) OnComponentTotal(ctx context.Context, taskID string, total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.total = total
 	r.totalSet = true
 }
 
-func (r *recordingSink) OnComponentProgress(ev ProgressEvent) {
+func (r *recordingSink) OnComponentProgress(ctx context.Context, ev ProgressEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, ev)
@@ -534,7 +329,7 @@ func TestPipelineRunForwardsProgressToSink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPipelineFromDSL: %v", err)
 	}
-	if _, err := pipe.Run(context.Background(), map[string]any{"name": "doc-sink"}, nil); err != nil {
+	if _, err := pipe.Run(t.Context(), map[string]any{"name": "doc-sink"}, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -560,39 +355,6 @@ func TestPipelineRunForwardsProgressToSink(t *testing.T) {
 		if !seen[want] {
 			t.Fatalf("expected progress event for component %q, seen=%v", want, seen)
 		}
-	}
-}
-
-// =============================================================================
-// cleanupCheckpoint — direct unit test
-// =============================================================================
-
-func TestCleanupCheckpoint_DeletesStoreAndClearsTracker(t *testing.T) {
-	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { client.Close() })
-
-	store := newMemCheckpointStore()
-	if err := store.Set(context.Background(), "cp-1", []byte("data")); err != nil {
-		t.Fatalf("store.Set: %v", err)
-	}
-	tracker := canvas.NewRunTrackerWithClient(client, time.Hour)
-	if err := tracker.AttachInterrupt(context.Background(), "cp-1", "interrupt-1"); err != nil {
-		t.Fatalf("AttachInterrupt: %v", err)
-	}
-
-	p := &Pipeline{}
-	p.cleanupCheckpoint(context.Background(), store, tracker, "cp-1")
-
-	if store.deleteCount() != 1 {
-		t.Fatalf("store.Delete was not called")
-	}
-	id, ok, err := tracker.GetInterruptID(context.Background(), "cp-1")
-	if err != nil {
-		t.Fatalf("GetInterruptID: %v", err)
-	}
-	if ok && id != "" {
-		t.Fatalf("interrupt id should be cleared, got %q", id)
 	}
 }
 
@@ -626,7 +388,7 @@ func TestRunPlain_WithTracker_Success(t *testing.T) {
 		t.Fatalf("NewPipelineFromDSL: %v", err)
 	}
 
-	_, err = pipe.Run(context.Background(), map[string]any{"name": "doc"}, nil)
+	_, err = pipe.Run(t.Context(), map[string]any{"name": "doc"}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -657,8 +419,122 @@ func TestRunPlain_WithTracker_Error(t *testing.T) {
 		t.Fatalf("NewPipelineFromDSL: %v", err)
 	}
 
-	_, err = pipe.Run(context.Background(), map[string]any{"name": "doc"}, nil)
+	_, err = pipe.Run(t.Context(), map[string]any{"name": "doc"}, nil)
 	if err == nil {
 		t.Fatal("expected stage error, got nil")
+	}
+}
+
+func TestValidatePipeline_DisallowMultipleExtractors(t *testing.T) {
+	dsl := []byte(`{
+		"dsl": {
+			"components": {
+				"begin": {"obj": {"component_name": "Begin", "params": {}}, "downstream": ["Extractor:One"]},
+				"Extractor:One": {"obj": {"component_name": "Extractor", "params": {}}, "upstream": ["begin"], "downstream": ["Extractor:Two"]},
+				"Extractor:Two": {"obj": {"component_name": "Extractor", "params": {}}, "upstream": ["Extractor:One"]}
+			},
+			"path": ["begin", "Extractor:One", "Extractor:Two"],
+			"graph": {"nodes": []}
+		}
+	}`)
+
+	_, err := NewPipelineFromDSL(dsl, "test-task-dup-ext")
+	if err == nil {
+		t.Fatal("expected validation error for multiple Extractor components, got nil")
+	}
+	if !strings.Contains(err.Error(), "at most 1 Extractor component is allowed") {
+		t.Errorf("expected at most 1 Extractor error message, got: %v", err)
+	}
+}
+
+// fractionStage reports a fixed in-flight fraction from Invoke, the way a
+// parser reports pages or a tokenizer reports embedded chunks.
+type fractionStage struct {
+	fraction float64
+}
+
+func (f *fractionStage) Invoke(ctx context.Context, _ *gorm.DB, inputs map[string]any) (map[string]any, error) {
+	runtime.ReportComponentFraction(ctx, f.fraction)
+	return cloneMapOrEmpty(inputs), nil
+}
+func (f *fractionStage) Inputs() map[string]string  { return map[string]string{"name": "string"} }
+func (f *fractionStage) Outputs() map[string]string { return map[string]string{"output": "any"} }
+
+// fractionRecordingSink records fraction reports alongside the base
+// ProgressSink methods, exercising the optional-interface assertion.
+type fractionRecordingSink struct {
+	recordingSink
+	muFractions sync.Mutex
+	fractions   map[string]float64
+}
+
+func (r *fractionRecordingSink) OnComponentFraction(_ context.Context, component string, fraction float64) {
+	r.muFractions.Lock()
+	defer r.muFractions.Unlock()
+	if r.fractions == nil {
+		r.fractions = map[string]float64{}
+	}
+	r.fractions[component] = fraction
+}
+
+// TestPipelineRunForwardsFractionsToSink verifies the pipeline assembles the
+// fraction channel end to end: a component's bare ReportComponentFraction
+// reaches the sink's optional OnComponentFraction under the node's cpnID.
+func TestPipelineRunForwardsFractionsToSink(t *testing.T) {
+	stage := &fractionStage{fraction: 0.42}
+	const name = "p.FractionStage"
+	runtime.MustRegister(name, runtime.CategoryIngestion,
+		func(_ string, _ map[string]any) (runtime.Component, error) { return stage, nil },
+		runtime.Metadata{Version: "1.0.0"})
+
+	sink := &fractionRecordingSink{}
+	pipe, err := NewPipelineFromDSL([]byte(`{
+		"dsl": {
+			"components": {
+				"begin": {"obj": {"component_name": "Begin", "params": {}}, "downstream": ["a"]},
+				"a": {"obj": {"component_name": "`+name+`", "params": {}}, "upstream": ["begin"]}
+			},
+			"path": ["begin", "a"],
+			"graph": {"nodes": []}
+		}
+	}`), "task-frac", WithProgressSink(sink), WithDocumentID("doc-frac"))
+	if err != nil {
+		t.Fatalf("NewPipelineFromDSL: %v", err)
+	}
+	if _, err := pipe.Run(t.Context(), map[string]any{"name": "doc-frac"}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	sink.muFractions.Lock()
+	defer sink.muFractions.Unlock()
+	if got := sink.fractions["a"]; got != 0.42 {
+		t.Fatalf("fraction for node a = %v, want 0.42 (fractions=%v)", got, sink.fractions)
+	}
+}
+
+// TestPipelineRunWithoutFractionSink verifies a sink that does not implement
+// the optional fraction interface still runs: the channel is simply absent.
+func TestPipelineRunWithoutFractionSink(t *testing.T) {
+	stage := &fractionStage{fraction: 0.9}
+	const name = "p.FractionStageNoSink"
+	runtime.MustRegister(name, runtime.CategoryIngestion,
+		func(_ string, _ map[string]any) (runtime.Component, error) { return stage, nil },
+		runtime.Metadata{Version: "1.0.0"})
+
+	pipe, err := NewPipelineFromDSL([]byte(`{
+		"dsl": {
+			"components": {
+				"begin": {"obj": {"component_name": "Begin", "params": {}}, "downstream": ["a"]},
+				"a": {"obj": {"component_name": "`+name+`", "params": {}}, "upstream": ["begin"]}
+			},
+			"path": ["begin", "a"],
+			"graph": {"nodes": []}
+		}
+	}`), "task-nofrac", WithProgressSink(&recordingSink{}))
+	if err != nil {
+		t.Fatalf("NewPipelineFromDSL: %v", err)
+	}
+	if _, err := pipe.Run(t.Context(), map[string]any{"name": "x"}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
+	"gorm.io/gorm"
 
 	"ragflow/internal/agent/runtime"
 )
@@ -64,10 +65,10 @@ func (c *CategorizeComponent) Name() string { return "Categorize" }
 // Invoke calls the chat model, parses the response for a category, and
 // returns the chosen category (or the default if the model returned
 // something outside the configured set).
-func (c *CategorizeComponent) Invoke(ctx context.Context, inputs map[string]any) (map[string]any, error) {
+func (c *CategorizeComponent) Invoke(ctx context.Context, db *gorm.DB, inputs map[string]any) (map[string]any, error) {
 	p := mergeCategorizeParam(c.param, inputs)
 	var err error
-	p.ModelID, p.Driver, p.APIKey, p.BaseURL, err = resolveChatModelRef(ctx, p.ModelID, p.Driver, p.APIKey, p.BaseURL)
+	p.ModelID, p.Driver, p.APIKey, p.BaseURL, err = resolveChatModelRef(ctx, db, p.ModelID, p.Driver, p.APIKey, p.BaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +98,7 @@ func (c *CategorizeComponent) Invoke(ctx context.Context, inputs map[string]any)
 		{Role: schema.System, Content: sysPrompt},
 		{Role: schema.User, Content: userPrompt},
 	}
-	resp, err := inv.Invoke(ctx, ChatInvokeRequest{
+	resp, err := inv.Invoke(ctx, db, ChatInvokeRequest{
 		Driver:    p.Driver,
 		ModelName: p.ModelID,
 		APIKey:    p.APIKey,
@@ -122,11 +123,11 @@ func (c *CategorizeComponent) Invoke(ctx context.Context, inputs map[string]any)
 }
 
 // Stream mirrors Invoke as a single chunk.
-func (c *CategorizeComponent) Stream(ctx context.Context, inputs map[string]any) (<-chan map[string]any, error) {
+func (c *CategorizeComponent) Stream(ctx context.Context, db *gorm.DB, inputs map[string]any) (<-chan map[string]any, error) {
 	out := make(chan map[string]any, 1)
 	go func() {
 		defer close(out)
-		result, err := c.Invoke(ctx, inputs)
+		result, err := c.Invoke(ctx, db, inputs)
 		if err != nil {
 			out <- map[string]any{"error": err.Error()}
 			return
@@ -253,7 +254,7 @@ type categorizeHistoryMessage struct {
 func categorizeHistory(ctx context.Context, window int, query string) []categorizeHistoryMessage {
 	msgs := []categorizeHistoryMessage{}
 	if window > 0 {
-		if state, _, err := runtime.GetStateFromContext[*runtime.CanvasState](ctx); err == nil && state != nil {
+		if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
 			start := 0
 			if len(state.History) > window {
 				start = len(state.History) - window
@@ -300,7 +301,7 @@ func resolveCategorizeQuery(ctx context.Context, p CategorizeParam, inputs map[s
 	if v, ok := stringValueFromAny(inputs[queryRef]); ok && strings.TrimSpace(v) != "" {
 		return v
 	}
-	if state, _, err := runtime.GetStateFromContext[*runtime.CanvasState](ctx); err == nil && state != nil {
+	if state, err := runtime.GetStateFromContext(ctx); err == nil && state != nil {
 		if v, err := state.GetVar(queryRef); err == nil {
 			if s, ok := stringValueFromAny(v); ok {
 				return s

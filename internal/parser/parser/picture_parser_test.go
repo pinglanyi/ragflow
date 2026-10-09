@@ -29,51 +29,28 @@ func TestNewPictureParser(t *testing.T) {
 	if p.OutputFormat != "" {
 		t.Errorf("OutputFormat = %q, want empty", p.OutputFormat)
 	}
-	if p.VLMModelID != "" {
-		t.Errorf("VLMModelID = %q, want empty", p.VLMModelID)
-	}
-	if p.ImageContextSize != 0 {
-		t.Errorf("ImageContextSize = %d, want 0", p.ImageContextSize)
-	}
 }
 
 func TestPictureParser_ConfigureFromSetup(t *testing.T) {
 	p := NewPictureParser()
 	p.ConfigureFromSetup(map[string]any{
-		"vlm": map[string]any{
-			"llm_id": "gpt-4-vision",
-		},
-		"output_format":      "text",
-		"image_context_size": float64(3),
-		"layout_recognize":   "@PaddleOCR",
-		"video_prompt":       "summarize",
+		"output_format": "text",
 	})
-	if p.VLMModelID != "gpt-4-vision" {
-		t.Errorf("VLMModelID = %q, want gpt-4-vision", p.VLMModelID)
-	}
 	if p.OutputFormat != "text" {
 		t.Errorf("OutputFormat = %q, want text", p.OutputFormat)
-	}
-	if p.ImageContextSize != 3 {
-		t.Errorf("ImageContextSize = %d, want 3", p.ImageContextSize)
-	}
-	if p.LayoutRecognize != "@PaddleOCR" {
-		t.Errorf("LayoutRecognize = %q, want @PaddleOCR", p.LayoutRecognize)
-	}
-	if p.VideoPrompt != "summarize" {
-		t.Errorf("VideoPrompt = %q, want summarize", p.VideoPrompt)
 	}
 }
 
 func TestPictureParser_ParseWithResult_NilSetup(t *testing.T) {
+	ctx := t.Context()
 	p := NewPictureParser()
 	p.ConfigureFromSetup(nil)
-	res := p.ParseWithResult("photo.png", []byte("\x89PNG"))
+	res := p.ParseWithResult(ctx, "photo.png", []byte("\x89PNG"))
 	if res.Err != nil {
 		t.Errorf("unexpected error for nil setup: %v", res.Err)
 	}
-	if res.OutputFormat != "text" {
-		t.Errorf("OutputFormat = %q, want text", res.OutputFormat)
+	if res.OutputFormat != "json" {
+		t.Errorf("OutputFormat = %q, want json (image only allows json)", res.OutputFormat)
 	}
 	file, ok := res.File["doc_type_kwd"].(string)
 	if !ok || file != "image" {
@@ -82,23 +59,25 @@ func TestPictureParser_ParseWithResult_NilSetup(t *testing.T) {
 }
 
 func TestPictureParser_ParseWithResult_ValidExtensions(t *testing.T) {
+	ctx := t.Context()
 	exts := []string{"png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "svg", "ico", "avif", "heic", "apng"}
 	p := NewPictureParser()
 	for _, ext := range exts {
 		fn := "img." + ext
-		res := p.ParseWithResult(fn, []byte{1, 2, 3})
+		res := p.ParseWithResult(ctx, fn, []byte{1, 2, 3})
 		if res.Err != nil {
 			t.Errorf("unexpected error for .%s: %v", ext, res.Err)
 		}
-		if res.OutputFormat != "text" {
-			t.Errorf("OutputFormat = %q for .%s, want text", res.OutputFormat, ext)
+		if res.OutputFormat != "json" {
+			t.Errorf("OutputFormat = %q for .%s, want json (image only allows json)", res.OutputFormat, ext)
 		}
 	}
 }
 
 func TestPictureParser_ParseWithResult_InvalidExtension(t *testing.T) {
+	ctx := t.Context()
 	p := NewPictureParser()
-	res := p.ParseWithResult("sound.mp3", []byte{1})
+	res := p.ParseWithResult(ctx, "sound.mp3", []byte{1})
 	if res.Err == nil {
 		t.Error("expected error for .mp3, got nil")
 	}
@@ -108,8 +87,9 @@ func TestPictureParser_ParseWithResult_InvalidExtension(t *testing.T) {
 }
 
 func TestPictureParser_ParseWithResult_VideoExtension(t *testing.T) {
+	ctx := t.Context()
 	p := NewPictureParser()
-	res := p.ParseWithResult("video.mp4", []byte{1})
+	res := p.ParseWithResult(ctx, "video.mp4", []byte{1})
 	if res.Err == nil {
 		t.Error("expected error for video .mp4, got nil")
 	}
@@ -119,11 +99,12 @@ func TestPictureParser_ParseWithResult_VideoExtension(t *testing.T) {
 }
 
 func TestPictureParser_ParseWithResult_OutputFormat(t *testing.T) {
+	ctx := t.Context()
 	p := NewPictureParser()
 	p.ConfigureFromSetup(map[string]any{
 		"output_format": "json",
 	})
-	res := p.ParseWithResult("photo.jpg", []byte{1, 2, 3})
+	res := p.ParseWithResult(ctx, "photo.jpg", []byte{1, 2, 3})
 	if res.Err != nil {
 		t.Fatalf("unexpected error: %v", res.Err)
 	}
