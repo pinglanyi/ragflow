@@ -84,7 +84,7 @@ def main():
     print(f"[executors] 本栈应注册: {', '.join(sorted(expected))}")
     print(f"[executors] Redis 已注册 {len(members)} 个, 其中属于本栈 {len(ours)} 个")
     for name in live:
-        print(f"[executors] WARNING 外部执行器活跃: {name} (心跳 {ages[name]:.0f}s 前) —— 它抢同一队列的任务, 且没有本仓库的 GPU 运行库, OCR 会走 CPU")
+        print(f"[executors] WARNING 外部执行器活跃: {name} (心跳 {ages[name]:.0f}s 前) —— 它会消费同一队列; 代码版本及 GPU/OCR 运行环境尚未核实")
     if stale:
         print(f"[executors] 已失效残留(可忽略): {', '.join(stale)}")
     if live:

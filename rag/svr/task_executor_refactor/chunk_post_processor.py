@@ -1156,7 +1156,8 @@ async def run_document_structure_compile(handler, embedding_model: LLMBundle) ->
     ctx = handler._task_context
     found, document = DocumentService.get_by_id(ctx.doc_id)
     doc_name = document.name if found and document else ""
-    template_ids = _parser_config_compilation_template_ids(ctx.parser_config, ctx.tenant_id)
+    parser_config = {**ctx.kb_parser_config, **ctx.parser_config}
+    template_ids = _parser_config_compilation_template_ids(parser_config, ctx.tenant_id)
     if not template_ids:
         return
 

@@ -532,7 +532,7 @@ logs_all() {
 }
 
 # 检查是否有外部 RAGFlow 实例的执行器在抢同一个 Redis 队列。
-# 外部执行器没有本仓库的 CUDA 运行库, 它抢到的任务 OCR 会静默走 CPU。
+# 外部执行器的代码版本和 GPU/OCR 运行环境需单独核实。
 check_executor_conflicts() {
     [ -f "$EXECUTOR_CHECK" ] || return 0
     "$VENV_PYTHON" "$EXECUTOR_CHECK" --conf "$CONF_FILE" || true

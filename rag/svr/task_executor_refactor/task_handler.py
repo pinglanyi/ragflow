@@ -264,7 +264,7 @@ class TaskHandler:
                         _parser_config_compilation_template_ids,
                     )
 
-                    pc = self._task_context.parser_config or {}
+                    pc = {**self._task_context.kb_parser_config, **self._task_context.parser_config}
                     for tid in _parser_config_compilation_template_ids(pc, self._task_context.tenant_id):
                         tpl = CompilationTemplateService.get_saved(tid, self._task_context.tenant_id)
                         cfg = (tpl.get("config") or {}) if tpl else {}

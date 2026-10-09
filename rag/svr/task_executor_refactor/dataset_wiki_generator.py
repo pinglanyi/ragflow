@@ -976,7 +976,7 @@ async def run_wiki_incremental(
         types=[],
         suffix=[],
     )
-    eligible = _wiki_eligible_docs(all_docs, ctx.tenant_id, skip_doc_ids=deleted_doc_ids, dataset_parser_config=ctx.parser_config)
+    eligible = _wiki_eligible_docs(all_docs, ctx.tenant_id, skip_doc_ids=deleted_doc_ids, dataset_parser_config=ctx.kb_parser_config)
 
     if not eligible and not is_incremental:
         progress(1.0, _wiki_empty_eligible_message(all_docs))
