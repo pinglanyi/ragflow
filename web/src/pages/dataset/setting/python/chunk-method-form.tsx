@@ -1,6 +1,6 @@
 import { useFormContext, useWatch } from 'react-hook-form';
 import { MultimodalParserOptions } from '@/components/multimodal-parser-options';
-import { useKnowledgeBaseContext } from '../contexts/knowledge-base-context';
+import { useKnowledgeBaseContext } from '../../contexts/knowledge-base-context';
 
 import { DocumentParserType } from '@/constants/knowledge';
 import { useMemo } from 'react';
