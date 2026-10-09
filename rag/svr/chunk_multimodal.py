@@ -381,13 +381,15 @@ def parse_chunks(chunks, task, binary, options, model, progress_callback, cancel
                 _add_usage(usage, route_reference["usage"])
                 routed_chunks += 1
                 source["route"] = {"decision": decision, **route_reference}
-                if decision == "TEXT":
+                if decision == "TEXT" and str(chunk.get("content_with_weight") or "").strip():
                     parsed_chunks.append(chunk)
                     seen_sources[source_key] = route_reference
                     manifest["chunks"].append({**source, "screenshot_sha256": source_key, "kept_base_parse": True})
                     _write(manifest_path, _json_bytes(manifest))
                     progress_callback(msg=f"Smart multimodal route {index + 1}/{len(chunks)}: kept base parser output")
                     continue
+                if decision == "TEXT":
+                    source["route"].update(decision="MULTIMODAL", reason="empty_base_parse")
             elif router is not None:
                 routed_chunks += 1
                 source["route"] = {"decision": "MULTIMODAL", "reason": "table_parse_failed"}

@@ -411,7 +411,7 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
             yield {"answer": "stateless ", "reference": {}, "final": False}
             yield {"answer": "answer", "reference": {}, "final": False}
         yield {
-            "answer": "stateless answer",
+            "answer": "" if _stream else "stateless answer",
             "reference": {"chunks": [{"id": "chunk-1", "kb_id": "kb-1", "docnm_kwd": "manual.pdf"}]},
             "final": True,
         }
@@ -447,6 +447,12 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
     dialog_module = ModuleType("api.db.services.dialog_service")
     dialog_module.DialogService = DialogService
     dialog_module.rag_agent = rag_agent
+    def repair_answer(text, reference, indices):
+        captured["repaired_text"] = text
+        assert reference["chunks"][0]["id"] == "chunk-1"
+        return text, indices
+
+    dialog_module.repair_bad_citation_formats = repair_answer
     monkeypatch.setitem(sys.modules, dialog_module.__name__, dialog_module)
     kb_module = ModuleType("api.db.services.knowledgebase_service")
     kb_module.KnowledgebaseService = KnowledgebaseService
@@ -492,6 +498,9 @@ def test_execute_stateless_search_uses_default_model_without_persistence(monkeyp
     assert captured["dialog"].llm_id == "default-model@instance-a@Provider"
     assert captured["session_id"] is None
     assert result["chat_id"] is None
+    assert result["answer"] == "stateless answer"
+    if streaming:
+        assert captured["repaired_text"] == "stateless answer"
     assert result["session_id"] is None
     assert result["model"] == "default-model@instance-a@Provider"
     assert result["reference_count"] == 1

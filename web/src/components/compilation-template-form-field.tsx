@@ -21,20 +21,27 @@ import { TriangleAlert } from 'lucide-react';
 import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SelectWithSearch } from './originui/select-with-search';
+import { MultiSelect } from './ui/multi-select';
+import { Button } from './ui/button';
+import { Routes } from '@/routes';
+import { useNavigate } from 'react-router';
 
 type CompilationTemplateFormFieldProps = {
   horizontal?: boolean;
   name?: string;
   ownerTenantId?: string;
+  multiple?: boolean;
 };
 
 export function CompilationTemplateFormField({
   horizontal,
   name = 'parser_config.compilation_template_group_id',
   ownerTenantId,
+  multiple = false,
 }: CompilationTemplateFormFieldProps) {
   const { t } = useTranslation();
   const { navigateToAgents } = useNavigatePage();
+  const navigate = useNavigate();
   const { options, isFetched, isError } =
     useCompilationTemplateGroupOptions(ownerTenantId);
 
@@ -57,21 +64,57 @@ export function CompilationTemplateFormField({
       label={t('knowledgeConfiguration.compilationTemplate')}
       labelLink={{
         text: t('knowledgeConfiguration.createTemplate'),
-        onClick: navigateToAgents,
+        onClick: multiple
+          ? () => navigate(Routes.CompilationTemplatesEditNext)
+          : navigateToAgents,
       }}
       className="pb-4"
       horizontal={horizontal}
       required
     >
-      {(field) => (
-        <SelectWithSearch
-          value={field.value}
-          onChange={field.onChange}
-          options={options}
-          loading={!isFetched || isError}
-          renderMissingValue={renderMissingGroup}
-        />
-      )}
+      {(field) => {
+        if (!multiple) {
+          return (
+            <SelectWithSearch
+              value={field.value}
+              onChange={field.onChange}
+              options={options}
+              loading={!isFetched || isError}
+              renderMissingValue={renderMissingGroup}
+            />
+          );
+        }
+        const selectedIds: string[] = Array.isArray(field.value)
+          ? field.value
+          : field.value
+            ? [field.value]
+            : [];
+        return (
+          <div className="space-y-2">
+            <MultiSelect
+              options={options}
+              defaultValue={selectedIds}
+              onValueChange={field.onChange}
+              disabled={!isFetched || isError}
+              placeholder={t('common.selectPlaceholder')}
+            />
+            {selectedIds.map((groupId) => (
+              <Button
+                key={groupId}
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  navigate(`${Routes.CompilationTemplatesEditNext}/${groupId}`)
+                }
+              >
+                {t('common.edit')}{' '}
+                {options.find((option) => option.value === groupId)?.label ||
+                  groupId}
+              </Button>
+            ))}
+          </div>
+        );
+      }}
     </RAGFlowFormItem>
   );
 }

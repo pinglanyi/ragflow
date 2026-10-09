@@ -415,6 +415,7 @@ async def _agentic_search_events(*, tenant_id: str, options: dict, request_id: s
 
     final = None
     thinking = False
+    answer_parts = []
     async for answer in rag_agent(dialog, messages, stream, session_id=session_id, reasoning=options["reasoning"], force_rag=True):
         if not answer.get("final", True):
             if answer.get("start_to_think"):
@@ -424,8 +425,17 @@ async def _agentic_search_events(*, tenant_id: str, options: dict, request_id: s
                 thinking = False
                 continue
             if answer.get("answer"):
+                if not thinking:
+                    answer_parts.append(answer["answer"])
                 yield {"event": "progress" if thinking else "delta", "data": {"request_id": request_id, "text": answer["answer"]}}
             continue
+        # Streaming generators emit the answer as deltas and terminate with
+        # references plus an empty answer. Persist the assembled visible text.
+        if stream and not answer.get("answer"):
+            from api.db.services.dialog_service import repair_bad_citation_formats
+
+            text, _ = repair_bad_citation_formats("".join(answer_parts), answer.get("reference") or {"chunks": []}, set())
+            answer = {**answer, "answer": text}
         final = structure_answer(conversation, answer, message_id, session_id)
         break
     if not final or not final.get("answer"):

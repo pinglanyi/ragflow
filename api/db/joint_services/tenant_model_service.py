@@ -256,7 +256,37 @@ def resolve_model_config(tenant_id, model_type: str | enum.Enum, model_ref: str)
     try:
         return get_model_config_by_id(tenant_id, model_type, model_ref)
     except LookupError:
-        return get_model_config_from_provider_instance(tenant_id, model_type, model_ref)
+        try:
+            return get_model_config_from_provider_instance(tenant_id, model_type, model_ref)
+        except LookupError:
+            return _resolve_legacy_model_config(tenant_id, model_type, model_ref)
+
+
+def _resolve_legacy_model_config(tenant_id, model_type, model_ref):
+    pure_name, instance_name, provider_name = split_model_name(model_ref)
+    suffix = f"___{provider_name}"
+    if not provider_name or instance_name != "default" or not pure_name.endswith(suffix):
+        raise LookupError(f"Model {model_ref} not found for model {model_type}")
+    bare_name = pure_name[:-len(suffix)]
+    provider = TenantModelProviderService.get_by_tenant_id_and_provider_name(tenant_id, provider_name)
+    if not provider or not bare_name:
+        raise LookupError(f"Model {model_ref} not found for model {model_type}")
+    matches = []
+    model_type_val = model_type if isinstance(model_type, str) else model_type.value
+    for instance in TenantModelInstanceService.get_all_by_provider_id(provider.id):
+        original = TenantModelService.get_by_provider_id_and_instance_id_and_model_name(provider.id, instance.id, pure_name)
+        if original:
+            raise LookupError(f"Model {model_ref} exists and cannot be rebound")
+        if instance.status != ActiveStatusEnum.ACTIVE.value:
+            continue
+        model = TenantModelService.get_by_provider_id_and_instance_id_and_model_type_and_model_name(
+            provider.id, instance.id, model_type_val, bare_name
+        )
+        if model:
+            matches.append(model)
+    if len(matches) != 1:
+        raise LookupError(f"Model {model_ref} has no unique provider model binding")
+    return get_model_config_by_id(tenant_id, model_type, matches[0].id)
 
 
 def get_model_config_from_provider_instance(tenant_id, model_type: str | enum.Enum, model_name: str):

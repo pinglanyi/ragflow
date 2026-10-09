@@ -1,4 +1,5 @@
 import { DataFlowSelect } from '@/components/data-pipeline-select';
+import { CompilationTemplateFormField } from '@/components/compilation-template-form-field';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -262,6 +263,12 @@ export default function DatasetSettings() {
                     )}
 
                     {parseType === ParseType.BuiltIn && <ChunkMethodForm />}
+                    {parseType === ParseType.BuiltIn && (
+                      <CompilationTemplateFormField
+                        ownerTenantId={knowledgeDetails.tenant_id}
+                        multiple
+                      />
+                    )}
 
                     {/* <LinkDataPipeline
                     data={pipelineData}

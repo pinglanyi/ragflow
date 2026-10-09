@@ -162,6 +162,24 @@ class ArchiveTest(unittest.TestCase):
         self.assertTrue(manifest["chunks"][0]["kept_base_parse"])
         self.assertEqual(manifest["chunks"][1]["route"]["decision"], "MULTIMODAL")
 
+    def test_smart_text_route_without_base_text_recovers_picture(self):
+        from PIL import Image
+
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *args, **kwargs: chunk.update(content_with_weight=text)
+        answers = iter([response("TEXT"), response("Sensor sampling frequency: 128 Hz")])
+        chunk = {"image": Image.new("RGB", (30, 30), "white"), "_picture_filename": "sensor.png"}
+        task = {"tenant_id": "tenant", "doc_id": "doc", "name": "sensor.png", "id": "task", "language": "Chinese"}
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict(
+            "os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}
+        ), patch.object(m.ScreenshotParser, "_complete", lambda *args: next(answers)):
+            result = m.parse_chunks([chunk], task, b"png", {"mode": "smart"}, self.model, lambda **kwargs: None)
+        self.assertIn("128 Hz", result[0]["content_with_weight"])
+        self.assertIn("sensor.png", result[0]["content_with_weight"])
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["multimodal_chunk_count"], 1)
+        self.assertFalse(manifest["chunks"][0].get("kept_base_parse", False))
+
     def test_changed_crop_prompt_model_revision_or_limit_invalidates(self):
         keys = [self.parser().parse(b"image", {})[1]["key"]]
         for options in [{"prompt": "new"}, {"model_revision": "v2"}, {"max_tokens": 16384}, {"enable_thinking": True}]:
@@ -313,6 +331,7 @@ class ArchiveTest(unittest.TestCase):
             events.append("multimodal")
             return [{"content_with_weight": "# Markdown"}]
         ctx = types.SimpleNamespace(raw_task=task, chunk_limiter=asyncio.Semaphore(1), name="a.pdf", from_page=0, to_page=1, language="Chinese", progress_cb=lambda *a, **k: None, kb_id="kb", tenant_id="tenant", has_canceled_func=lambda _: False, id="id", location="a", recording_context=types.SimpleNamespace(record=lambda *a: None))
+        ctx.parser_id = "naive"
         namespace = {"Dict": dict, "List": list, "TaskContext": object, "timer": default_timer, "thread_pool_exec": thread, "merge_table_parser_config_from_kb": lambda t: dict(t["parser_config"]), "logging": logging, "partial": partial, "TaskCanceledException": type("TaskCanceledException", (Exception,), {})}
         exec(compile(ast.Module(body=[func], type_ignores=[]), str(source), "exec"), namespace)
         with patch.dict("sys.modules", {"rag.svr.chunk_multimodal": m}), patch.object(m, "parse_with_config", enhance):

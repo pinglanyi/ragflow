@@ -307,7 +307,7 @@ def _wiki_empty_eligible_message(all_docs) -> str:
     )
 
 
-def _wiki_eligible_docs(all_docs, tenant_id: str, skip_doc_ids=None) -> list[tuple[dict, str]]:
+def _wiki_eligible_docs(all_docs, tenant_id: str, skip_doc_ids=None, dataset_parser_config=None) -> list[tuple[dict, str]]:
     """Docs eligible for wiki compilation, each paired with its wiki template id.
 
     A doc is eligible when its ``parser_config`` OR its ingestion pipeline
@@ -332,7 +332,7 @@ def _wiki_eligible_docs(all_docs, tenant_id: str, skip_doc_ids=None) -> list[tup
         # after a Wiki clear there is intentionally no MAP input for them.
         if str(d.get("status", "1")) != "1":
             continue
-        pc = d.get("parser_config") or {}
+        pc = {**(dataset_parser_config or {}), **(d.get("parser_config") or {})}
         template_ids: list[str] = []
         seen_template_ids: set[str] = set()
         for template_id in _parser_config_compilation_template_ids(pc, tenant_id):
@@ -976,7 +976,7 @@ async def run_wiki_incremental(
         types=[],
         suffix=[],
     )
-    eligible = _wiki_eligible_docs(all_docs, ctx.tenant_id, skip_doc_ids=deleted_doc_ids)
+    eligible = _wiki_eligible_docs(all_docs, ctx.tenant_id, skip_doc_ids=deleted_doc_ids, dataset_parser_config=ctx.parser_config)
 
     if not eligible and not is_incremental:
         progress(1.0, _wiki_empty_eligible_message(all_docs))
