@@ -42,6 +42,7 @@ export function useChatSettingSchema() {
     parallel_api_key: z.string().optional(),
     querit_api_key: z.string().optional(),
     serply_api_key: z.string().optional(),
+    search1api_api_key: z.string().optional(),
     tavily_api_key: z.string().optional(),
     youcom_api_key: z.string().optional(),
     web_search_provider: z
@@ -53,6 +54,7 @@ export function useChatSettingSchema() {
         WebSearchProvider.Parallel,
         WebSearchProvider.Querit,
         WebSearchProvider.Serply,
+        WebSearchProvider.Search1API,
         WebSearchProvider.Tavily,
         WebSearchProvider.YouCom,
       ])

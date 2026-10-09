@@ -39,6 +39,7 @@ interface IProps {
 // One entry per provider. `name` is the BRAND, so it stays untranslated; it is what
 // the key field's label is interpolated into (chat.webSearchApiKeyLabel).
 const webSearchProviderCatalog = [
+  { name: 'Search1API', logo: undefined, value: WebSearchProvider.Search1API },
   {
     name: 'Brave Search',
     logo: braveLogo,
@@ -92,12 +93,14 @@ const providerOptions = webSearchProviderCatalog
   .map(({ name, logo, value }) => ({
     label: (
       <span className="flex items-center gap-2">
-        <img
-          src={logo}
-          alt=""
-          aria-hidden="true"
-          className="size-4 shrink-0 object-contain"
-        />
+        {logo && (
+          <img
+            src={logo}
+            alt=""
+            aria-hidden="true"
+            className="size-4 shrink-0 object-contain"
+          />
+        )}
         {name}
       </span>
     ),
@@ -112,6 +115,12 @@ const providerDisplayName = (provider?: WebSearchProvider) =>
   '';
 
 const providerKeyConfig = {
+  [WebSearchProvider.Search1API]: {
+    name: 'prompt_config.search1api_api_key',
+    tip: 'search1apiApiKeyTip',
+    placeholder: 'search1apiApiKeyMessage',
+    helpUrl: 'https://www.search1api.com',
+  },
   [WebSearchProvider.Brave]: {
     name: 'prompt_config.brave_api_key',
     tip: 'braveApiKeyTip',

@@ -1,11 +1,83 @@
 import { RAGFlowNodeType } from '@/interfaces/database/agent';
+import { FileType } from '@/constants/file';
 import { Operator } from './constant';
 import {
   generateNodeNamesWithIncreasingIndex,
   isEmptyMessageContent,
   receiveMessageError,
   transformTokenChunkerParams,
+  transformParserParams,
 } from './utils';
+
+describe('Python parser parameter persistence', () => {
+  it('blocks unresolved model IDs rather than silently widening saved ranges', () => {
+    expect(() =>
+      transformParserParams({
+        setups: [
+          {
+            fileFormat: FileType.PDF,
+            parse_method: 'unresolved-model-id',
+            pages: [{ from: 2, to: 4 }],
+          },
+        ],
+      } as any),
+    ).toThrow();
+  });
+  it('does not apply a stale provider while the newly selected model is unresolved', () => {
+    expect(() =>
+      transformParserParams({
+        setups: [
+          {
+            fileFormat: FileType.PDF,
+            parse_method: 'new-unresolved-id',
+            parse_method_provider: {
+              model_id: 'old-vision-id',
+              provider_name: 'OpenAI',
+            },
+            pages: [{ from: 2, to: 4 }],
+          },
+        ],
+      } as any),
+    ).toThrow();
+  });
+  it.each([
+    { parse_method: 'MinerU' },
+    { parse_method: 'model@instance@PaddleOCR' },
+    {
+      parse_method: 'opaque-mineru-id',
+      parse_method_provider: {
+        model_id: 'opaque-mineru-id',
+        provider_name: 'MinerU',
+      },
+    },
+  ])(
+    'omits stale ranges for unsupported PDF parser $parse_method',
+    (parser) => {
+      const setup = {
+        fileFormat: FileType.PDF,
+        pages: [{ from: 2, to: 4 }],
+        ...parser,
+      };
+      const result = transformParserParams({ setups: [setup] } as any) as any;
+      expect(result.setups[FileType.PDF]).not.toHaveProperty('pages');
+      expect(result.setups[FileType.PDF]).not.toHaveProperty(
+        'parse_method_provider',
+      );
+      expect(setup.pages).toEqual([{ from: 2, to: 4 }]);
+    },
+  );
+
+  it('retains PDF ranges and global vision settings', () => {
+    const result = transformParserParams({
+      enable_vision_enhancement: true,
+      vlm: { llm_id: 'vision' },
+      setups: [{ fileFormat: FileType.PDF, pages: [{ from: 2, to: 4 }] }],
+    } as any) as any;
+    expect(result.setups[FileType.PDF].pages).toEqual([[2, 4]]);
+    expect(result.enable_vision_enhancement).toBe(true);
+    expect(result.vlm.llm_id).toBe('vision');
+  });
+});
 
 describe('transformTokenChunkerParams', () => {
   it('keeps overlapped_percent and delimiters when delimiter_mode is one', () => {

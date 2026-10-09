@@ -8,6 +8,10 @@ export const SetupSchema = z
     // preprocess: z.array(z.string()).optional(),
     output_format: z.string().optional(),
     parse_method: z.string().optional(),
+    // UI capability metadata; excluded from parser API setups.
+    parse_method_provider: z
+      .object({ model_id: z.string(), provider_name: z.string() })
+      .optional(),
     lang: z.string().optional(),
     fields: z.array(z.string()).optional(),
     vlm: z.object({ llm_id: z.string().optional() }).optional(),
@@ -53,6 +57,8 @@ export const SetupSchema = z
   });
 
 export const FormSchema = z.object({
+  enable_vision_enhancement: z.boolean().nullish(),
+  vlm: z.object({ llm_id: z.string().optional() }).optional(),
   setups: z.array(SetupSchema).min(1, i18n.t('flow.atLeastOneFileType')),
 });
 

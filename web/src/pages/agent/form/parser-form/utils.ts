@@ -1,5 +1,6 @@
 import { FileType } from '@/constants/file';
 import { cloneDeep } from 'lodash';
+import { pickByBackend } from '@/utils/backend-variant';
 import {
   FileTypeDefaultModelFieldMap,
   initialParserValues,
@@ -7,6 +8,73 @@ import {
 
 export function buildFieldNameWithPrefix(name: string, prefix: string) {
   return `${prefix}.${name}`;
+}
+
+const externalPdfParsers = [
+  'mineru',
+  'paddleocr',
+  'docling',
+  'opendataloader',
+  'tcadp parser',
+  'somark',
+  'mistral ocr',
+];
+
+export function resolvePdfParserProvider(
+  method: string | undefined,
+  models: { model_id: string; provider_name: string }[],
+) {
+  return (
+    models.find((model) => model.model_id === method)?.provider_name ||
+    (method?.includes('@') ? method.split('@').at(-1) : undefined)
+  );
+}
+
+function pdfParserResolved(method?: string, provider?: string) {
+  const value = (method ?? '').toLowerCase();
+  return (
+    !value ||
+    ['deepdoc', 'plain_text', 'plain text', ...externalPdfParsers].includes(
+      value,
+    ) ||
+    Boolean(provider || method?.includes('@'))
+  );
+}
+
+export function supportsPdfPageRanges(method?: string, provider?: string) {
+  const value = (method ?? '').toLowerCase();
+  const selectedProvider = (
+    provider ||
+    resolvePdfParserProvider(method, []) ||
+    ''
+  ).toLowerCase();
+  return pickByBackend({
+    go: true,
+    python:
+      pdfParserResolved(method, provider) &&
+      !externalPdfParsers.some(
+        (name) => value === name || selectedProvider === name,
+      ),
+  });
+}
+
+export function pdfPageRangeParams(
+  method: string | undefined,
+  pages: { from: number; to: number }[] | undefined,
+  provider?: string,
+) {
+  const unresolved = pickByBackend({
+    go: false,
+    python: !pdfParserResolved(method, provider),
+  });
+  if (unresolved && pages?.length) {
+    throw new Error(
+      'PDF parser model is unresolved; wait for the model list before saving page ranges.',
+    );
+  }
+  return supportsPdfPageRanges(method, provider)
+    ? { pages: pages?.map((page) => [page.from, page.to]) ?? [] }
+    : {};
 }
 
 // Builds the default setup for a file type being added to the parser form,

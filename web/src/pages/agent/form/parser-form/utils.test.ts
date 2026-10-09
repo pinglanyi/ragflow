@@ -1,7 +1,37 @@
 import { FileType } from '@/constants/file';
 import { ModelTypeToField } from '@/constants/llm';
 import { initialParserValues } from '../../constant/pipeline';
-import { buildInitialParserSetup, buildInitialParserValues } from './utils';
+import {
+  buildInitialParserSetup,
+  buildInitialParserValues,
+  resolvePdfParserProvider,
+  supportsPdfPageRanges,
+} from './utils';
+
+describe('PDF parser page-range capabilities', () => {
+  it('resolves opaque model IDs through the selected tenant model catalog', () => {
+    const models = [
+      { model_id: 'opaque-mineru-id', provider_name: 'MinerU' },
+      { model_id: 'opaque-vision-id', provider_name: 'OpenAI' },
+    ];
+    expect(resolvePdfParserProvider('opaque-mineru-id', models)).toBe('MinerU');
+    expect(
+      supportsPdfPageRanges(
+        'opaque-mineru-id',
+        resolvePdfParserProvider('opaque-mineru-id', models),
+      ),
+    ).toBe(false);
+    expect(
+      supportsPdfPageRanges(
+        'opaque-vision-id',
+        resolvePdfParserProvider('opaque-vision-id', models),
+      ),
+    ).toBe(true);
+    expect(supportsPdfPageRanges('model@instance@PaddleOCR')).toBe(false);
+    expect(supportsPdfPageRanges('deepdoc')).toBe(true);
+    expect(supportsPdfPageRanges('unresolved-model-id')).toBe(false);
+  });
+});
 
 describe('parser-form utils', () => {
   describe('buildInitialParserSetup', () => {

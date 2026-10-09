@@ -8,8 +8,8 @@ import {
   SelectWithSearchFlagOptionType,
 } from '@/components/originui/select-with-search';
 import { RAGFlowFormItem } from '@/components/ragflow-form';
-import { useIsGoBackend } from '@/utils/backend-variant';
 import { isEmpty } from 'lodash';
+import { useFetchAllAddedModels } from '@/hooks/use-llm-request';
 import { useEffect, useMemo } from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
@@ -25,7 +25,11 @@ import {
 import { CommonProps } from './interface';
 import { DynamicPageRange } from './dynamic-page-range';
 import { useSetInitialLanguage } from './use-set-initial-language';
-import { buildFieldNameWithPrefix } from './utils';
+import {
+  buildFieldNameWithPrefix,
+  resolvePdfParserProvider,
+  supportsPdfPageRanges,
+} from './utils';
 
 const tableResultTypeOptions: SelectWithSearchFlagOptionType[] = [
   { label: 'Markdown', value: '0' },
@@ -41,12 +45,36 @@ export function PdfFormFields({ prefix }: CommonProps) {
   const { t } = useTranslation();
   const form = useFormContext();
   const ownerTenantId = useOwnerTenantId();
-  const isGo = useIsGoBackend();
 
   const parseMethodName = buildFieldNameWithPrefix('parse_method', prefix);
   const parseMethod = useWatch({
     name: parseMethodName,
   });
+  const {
+    data: models,
+    isFetched: modelsFetched,
+    isError: modelsError,
+  } = useFetchAllAddedModels(undefined, ownerTenantId);
+  const provider = resolvePdfParserProvider(parseMethod, models);
+  useEffect(() => {
+    if (modelsFetched && !modelsError) {
+      const name = buildFieldNameWithPrefix('parse_method_provider', prefix);
+      const previous = form.getValues(name);
+      if (
+        provider
+          ? previous?.model_id !== parseMethod ||
+            previous?.provider_name !== provider
+          : previous !== undefined
+      ) {
+        form.setValue(
+          name,
+          provider
+            ? { model_id: parseMethod, provider_name: provider }
+            : undefined,
+        );
+      }
+    }
+  }, [form, modelsFetched, modelsError, parseMethod, prefix, provider]);
   const flattenMediaToText = useWatch({
     name: buildFieldNameWithPrefix('flatten_media_to_text', prefix),
   });
@@ -101,7 +129,9 @@ export function PdfFormFields({ prefix }: CommonProps) {
       <RmdirFormField prefix={prefix} />
       <RemoveHeaderFooterFormField prefix={prefix} />
       <ParserMethodFormField prefix={prefix}></ParserMethodFormField>
-      {isGo && <DynamicPageRange prefix={prefix} />}
+      {supportsPdfPageRanges(parseMethod, provider) && (
+        <DynamicPageRange prefix={prefix} />
+      )}
       <FlattenMediaToTextFormField prefix={prefix} />
       {!flattenMediaToText && (
         <ModelTreeSelectFormField

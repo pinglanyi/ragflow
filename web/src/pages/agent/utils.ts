@@ -42,6 +42,7 @@ import { BeginFormSchemaType } from './form/begin-form/schema';
 import { DataOperationsFormSchemaType } from './form/data-operations-form';
 import { ExtractorFormSchemaType } from './form/extractor-form';
 import { ParserFormSchemaType } from './form/parser-form';
+import { pdfPageRangeParams } from './form/parser-form/utils';
 import { TitleChunkerFormSchemaType } from './form/title-chunker-form';
 import { TokenChunkerFormSchemaType } from './form/token-chunker-form';
 import { BeginQuery, IPosition } from './interface';
@@ -233,10 +234,13 @@ export function transformParserParams(params: ParserFormSchemaType) {
             enable_multi_column: cur.enable_multi_column,
             remove_toc: cur.remove_toc,
             remove_header_footer: cur.remove_header_footer || false,
-            ...pickByBackend({
-              go: { pages: cur.pages?.map((x) => [x.from, x.to]) ?? [] },
-              python: {},
-            }),
+            ...pdfPageRangeParams(
+              cur.parse_method,
+              cur.pages,
+              cur.parse_method_provider?.model_id === cur.parse_method
+                ? cur.parse_method_provider?.provider_name
+                : undefined,
+            ),
           };
           // Only include TCADP parameters if TCADP Parser is selected
           if (cur.parse_method?.toLowerCase() === 'tcadp parser') {

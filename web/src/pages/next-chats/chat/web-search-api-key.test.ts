@@ -10,6 +10,21 @@ import {
 } from './web-search-api-key';
 
 describe('getWebSearchProvider', () => {
+  it('requires and reads the selected Search1API key', () => {
+    const config = {
+      web_search_provider: 'search1api',
+      search1api_api_key: ' key ',
+    } as unknown as PromptConfig;
+    expect(getWebSearchProvider(config)).toBe('search1api');
+    expect(getWebSearchApiKey(config)).toBe('key');
+    expect(hasWebSearchProvider(config)).toBe(true);
+    expect(
+      missingWebSearchApiKeyField({
+        ...config,
+        search1api_api_key: '',
+      } as unknown as PromptConfig),
+    ).toBe('search1api_api_key');
+  });
   it('does not select a provider for a new unconfigured dialog', () => {
     expect(getWebSearchProvider({} as PromptConfig)).toBeUndefined();
   });

@@ -64,6 +64,7 @@ export enum WebSearchProvider {
   Parallel = 'parallel',
   Querit = 'querit',
   Serply = 'serply',
+  Search1API = 'search1api',
   Tavily = 'tavily',
   YouCom = 'youcom',
 }

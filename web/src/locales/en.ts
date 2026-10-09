@@ -1276,6 +1276,9 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       serplyApiKeyTip:
         'When Serply is selected, its web search results supplement dataset retrieval.',
       serplyApiKeyMessage: 'Please enter your Serply API Key',
+      search1apiApiKeyTip:
+        'Use Search1API web results to supplement dataset retrieval.',
+      search1apiApiKeyMessage: 'Please enter your Search1API API key',
       tavilyApiKeyTip:
         'If an API Key is correctly set here, Tavily-based web searches will be used to supplement dataset retrieval.',
       tavilyApiKeyMessage: 'Please enter your Tavily API Key',
@@ -2430,7 +2433,8 @@ Example: Virtual Hosted Style`,
       modelNameRequired: 'Model name is required',
       modelNameDuplicate: 'Model name already exists',
       modelTypeRequired: 'Please select at least one model type',
-      modelTypeSelectionHint: 'Model names only suggest initial types. Select supported capabilities and clear incorrect ones. Use embedding for embedding-only models and vision for image understanding.',
+      modelTypeSelectionHint:
+        'Model names only suggest initial types. Select supported capabilities and clear incorrect ones. Use embedding for embedding-only models and vision for image understanding.',
       modelMaxTokensMessage: 'Max tokens must be a number',
       modelMaxTokensMinMessage: 'Max tokens must be at least 0',
     },
@@ -2767,6 +2771,13 @@ Best for: Documents with flowing, contextually connected content — such as boo
       oneChunkDescription:
         'All parsed sections will be merged in order into a single chunk.',
       flattenMediaToText: 'Disable vision model',
+      globalVisionEnhancement: 'Global vision enhancement',
+      globalVisionEnhancementTip:
+        'Keep existing settings, disable enhancement, or use one vision model across supported formats. Format-level disable settings still apply. Leave the model blank to use the tenant default.',
+      inheritVisionSettings: 'Keep existing format settings',
+      enableVisionEnhancement: 'Enable global enhancement',
+      disableVisionEnhancement: 'Disable global enhancement',
+      globalVisionModel: 'Global vision model',
       flattenMediaToTextTip:
         'Treat image and table sections as plain text and skip vision enhancement.',
       enableChildrenDelimiters: 'Child chunk are used for retrieval',

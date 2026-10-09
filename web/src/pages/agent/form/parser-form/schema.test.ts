@@ -3,6 +3,25 @@ import { ParserFields } from '../../constant/pipeline';
 import { FormSchema } from './schema';
 
 describe('parser FormSchema', () => {
+  it('persists explicit global vision settings and retains inherited defaults', () => {
+    const base = {
+      setups: [{ fileFormat: FileType.PDF, parse_method: 'plain_text' }],
+    };
+    expect(
+      (FormSchema.parse(base) as any).enable_vision_enhancement,
+    ).toBeUndefined();
+    const enabled = FormSchema.parse({
+      ...base,
+      enable_vision_enhancement: true,
+      vlm: { llm_id: 'vision@provider' },
+    }) as any;
+    expect(enabled.enable_vision_enhancement).toBe(true);
+    expect(enabled.vlm.llm_id).toBe('vision@provider');
+    expect(
+      (FormSchema.parse({ ...base, enable_vision_enhancement: false }) as any)
+        .enable_vision_enhancement,
+    ).toBe(false);
+  });
   it('accepts video and audio setups without a model', () => {
     const result = FormSchema.safeParse({
       setups: [

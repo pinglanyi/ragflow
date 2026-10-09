@@ -1164,6 +1164,8 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
       serplyApiKeyTip:
         '选择 Serply 后，将使用 Serply 的网络搜索结果补充知识库检索。',
       serplyApiKeyMessage: '请输入 Serply API Key',
+      search1apiApiKeyTip: '使用 Search1API 的网络搜索结果补充知识库检索。',
+      search1apiApiKeyMessage: '请输入 Search1API API Key',
       youcomApiKeyTip:
         '可选。You.com 在限速端点上无需 API Key 即可使用；填写 Key 可解除限速。',
       youcomApiKeyMessage: '可选 —— 留空则使用免费额度',
@@ -2015,7 +2017,8 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
       modelNameRequired: '请输入模型名称',
       modelNameDuplicate: '模型名称已存在',
       modelTypeRequired: '请至少选择一个模型类型',
-      modelTypeSelectionHint: '模型名仅用于初始建议，请勾选实际支持的类型并取消误选项。纯向量模型只选 embedding；图片理解模型选择 vision。',
+      modelTypeSelectionHint:
+        '模型名仅用于初始建议，请勾选实际支持的类型并取消误选项。纯向量模型只选 embedding；图片理解模型选择 vision。',
       modelMaxTokensMessage: '最大 Token 数必须为数字',
       modelMaxTokensMinMessage: '最大 Token 数不能小于 0',
     },
@@ -2348,6 +2351,13 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
       oneChunkDescription:
         '所有解析后的 sections 会按原始顺序合并为 1 个 chunk。',
       flattenMediaToText: '禁用视觉模型',
+      globalVisionEnhancement: '全局视觉增强',
+      globalVisionEnhancementTip:
+        '可沿用原设置、关闭增强，或为支持的格式统一指定视觉模型。各格式的禁用设置仍生效；模型留空时使用租户默认模型。',
+      inheritVisionSettings: '沿用原有各格式设置',
+      enableVisionEnhancement: '开启全局视觉增强',
+      disableVisionEnhancement: '关闭全局视觉增强',
+      globalVisionModel: '全局视觉模型',
       flattenMediaToTextTip: '将图片和表格区块按普通文本处理，并跳过视觉增强。',
       enableChildrenDelimiters: '子块用于检索',
       merge: '合并',

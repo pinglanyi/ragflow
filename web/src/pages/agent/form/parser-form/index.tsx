@@ -27,6 +27,7 @@ import { Output } from '../components/output';
 import { OutputFormatFormField } from './common-form-fields';
 import { EmailFormFields } from './email-form-fields';
 import { ImageFormFields } from './image-form-fields';
+import { GlobalVisionFormFields } from './global-vision-form-fields';
 import { PdfFormFields } from './pdf-form-fields';
 import { PptFormFields } from './ppt-form-fields';
 import { FormSchema, ParserFormSchemaType } from './schema';
@@ -196,6 +197,7 @@ const ParserForm = ({
   return (
     <Form {...form}>
       <form className="space-y-5 px-5">
+        <GlobalVisionFormFields />
         {fields.map((field, index) => {
           return (
             <ParserItem
