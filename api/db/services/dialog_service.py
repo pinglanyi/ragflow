@@ -583,6 +583,52 @@ def repair_bad_citation_formats(answer: str, kbinfos: dict, idx: set):
     return answer, idx
 
 
+def repair_agentic_citation_formats(answer: str, kbinfos: dict) -> tuple[str, set[int]]:
+    """Normalize Agentic RAG citations and return zero-based chunk indices.
+
+    ``kb_prompt`` exposes evidence IDs starting at 1, while the legacy chat
+    citation helper uses zero-based IDs.  Keeping this conversion explicit
+    prevents the final valid marker (for example ``[ID:12]`` in a 12-item
+    pool) from being rejected and prevents every other marker from selecting
+    the following chunk.
+    """
+    max_id = len(kbinfos.get("chunks") or [])
+    normalized_answer = normalize_arabic_digits(answer) or ""
+
+    def replace(pattern):
+        nonlocal answer, normalized_answer
+        matches = list(pattern.finditer(normalized_answer))
+        if not matches:
+            return
+        parts = []
+        last_idx = 0
+        for match in matches:
+            parts.append(answer[last_idx : match.start()])
+            try:
+                citation_id = int(match.group(1))
+            except (TypeError, ValueError):
+                parts.append(answer[match.start() : match.end()])
+            else:
+                if 1 <= citation_id <= max_id:
+                    parts.append(f"[ID:{citation_id}]")
+                else:
+                    parts.append(answer[match.start() : match.end()])
+            last_idx = match.end()
+        parts.append(answer[last_idx:])
+        answer = "".join(parts)
+        normalized_answer = normalize_arabic_digits(answer) or ""
+
+    for pattern in BAD_CITATION_PATTERNS:
+        replace(pattern)
+
+    indices = set()
+    for match in CITATION_MARKER_PATTERN.finditer(normalized_answer):
+        citation_id = int(match.group(1))
+        if 1 <= citation_id <= max_id:
+            indices.add(citation_id - 1)
+    return answer, indices
+
+
 def _empty_response_applies(knowledges: list, text_attachments_content: str, image_attachments: list, image_files: list) -> bool:
     """The configured empty-response fallback applies only when retrieval
     found nothing AND the message carries no attachment context (text or
@@ -2135,14 +2181,7 @@ async def rag_agent(dialog, messages, stream=True, **kwargs):
             think = ans[0] + "</think>"
             answer = ans[1]
 
-        idx = set([])
-        normalized_answer = normalize_arabic_digits(answer) or ""
-        for match in CITATION_MARKER_PATTERN.finditer(normalized_answer):
-            i = int(match.group(1))
-            if i < len(rag_tools.kbinfos["chunks"]):
-                idx.add(i)
-
-        answer, idx = repair_bad_citation_formats(answer, rag_tools.kbinfos, idx)
+        answer, idx = repair_agentic_citation_formats(answer, rag_tools.kbinfos)
 
         doc_ids = set()
         for citation in idx:

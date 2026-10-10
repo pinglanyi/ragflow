@@ -1157,7 +1157,17 @@ async def _compose_answer_from_evidence(state: AgenticState, tools, token_queue:
     # and expand range-merged citations (see _expand_range_citation_markers).
     tools._rag_slot_evidence = state.get("slot_evidence") or {}
     tools._rag_cite_chunk_ids = [str(c.get("chunk_id") or c.get("id") or "") for c in cite_chunks]
-    evidence_kbinfos = dict(kbinfos, chunks=cite_chunks)
+    cited_doc_ids = {str(c.get("doc_id") or c.get("document_id") or "") for c in cite_chunks}
+    cited_doc_aggs = [
+        doc for doc in (kbinfos.get("doc_aggs") or [])
+        if str(doc.get("doc_id") or doc.get("document_id") or "") in cited_doc_ids
+    ]
+    evidence_kbinfos = dict(kbinfos, chunks=cite_chunks, doc_aggs=cited_doc_aggs)
+    # Publish exactly the pool whose 1-based IDs are shown to the answer model.
+    # run_agentic_rag reads the final state's kbinfos after graph completion;
+    # leaving the research-wide pool here made its [ID:n] markers point at
+    # unrelated chunks in API responses.
+    tools.kbinfos = evidence_kbinfos
     evidence_blocks = kb_prompt(evidence_kbinfos, min(tools.chat_mdl.max_length, _EVIDENCE_BUDGET_TOKENS))
     evidence = "\n".join(evidence_blocks) if isinstance(evidence_blocks, list) else str(evidence_blocks)
 
@@ -1251,7 +1261,7 @@ async def _compose_answer_from_evidence(state: AgenticState, tools, token_queue:
         _LOG.exception("formalize_answer: stream failed")
         token_queue.put_nowait("I'm sorry, I encountered an error while composing the answer.")
 
-    return {"final_answer": ""}
+    return {"final_answer": "", "kbinfos": evidence_kbinfos}
 
 
 # ── Graph construction ──

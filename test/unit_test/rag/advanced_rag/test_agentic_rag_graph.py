@@ -102,3 +102,37 @@ def test_compose_uses_present_evidence_even_when_empty_marker_is_stale(monkeypat
     asyncio.run(module._compose_answer_from_evidence(state, tools, queue, {"temperature": 0.3}))
 
     assert queue.get_nowait() != "EMPTY"
+
+
+def test_compose_publishes_the_same_bounded_pool_used_for_citations(monkeypatch):
+    module = _load_agentic_graph(monkeypatch)
+    queue = asyncio.Queue()
+    tools = SimpleNamespace(
+        chat_mdl=_ChatModel(),
+        empty_response="EMPTY",
+        user_defined_prompts={},
+        system_prompt="",
+        kbinfos={},
+    )
+    chunks = [
+        {
+            "chunk_id": f"chunk-{index}",
+            "doc_id": f"doc-{index}",
+            "content_with_weight": f"evidence-{index}",
+            "similarity": float(index),
+        }
+        for index in range(20)
+    ]
+    state = {
+        "question": "问题",
+        "kbinfos": {"chunks": chunks, "doc_aggs": [], "pre_summary": "摘要"},
+        "slot_evidence": {},
+    }
+
+    update = asyncio.run(module._compose_answer_from_evidence(state, tools, queue, {}))
+
+    assert len(update["kbinfos"]["chunks"]) == 12
+    assert update["kbinfos"]["chunks"] == tools.kbinfos["chunks"]
+    assert [chunk["chunk_id"] for chunk in tools.kbinfos["chunks"]] == [
+        f"chunk-{index}" for index in range(19, 7, -1)
+    ]

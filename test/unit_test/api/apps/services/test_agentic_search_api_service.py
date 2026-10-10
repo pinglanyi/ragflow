@@ -236,6 +236,36 @@ def test_normalize_agentic_search_result_flattens_references():
     assert normalized["request_id"] == "request-1"
 
 
+def test_normalize_agentic_search_result_keeps_only_cited_references_and_renumbers_them():
+    chunks = [
+        {
+            "id": f"chunk-{index}",
+            "document_id": f"doc-{index}",
+            "document_name": f"manual-{index}.pdf",
+            "content": f"evidence-{index}",
+        }
+        for index in range(1, 7)
+    ]
+    raw = {
+        "answer": "定义来自第五条证据 [ID:5]，并再次引用 [ID:5]。",
+        "session_id": "session-1",
+        "reference": {"chunks": chunks},
+    }
+
+    normalized = normalize_agentic_search_result(
+        raw,
+        request_id="request-1",
+        chat_id=None,
+        model="model-1",
+        reasoning=4,
+        elapsed_ms=42,
+    )
+
+    assert normalized["answer"] == "定义来自第五条证据 [ID:1]，并再次引用 [ID:1]。"
+    assert normalized["reference_count"] == 1
+    assert [item["chunk_id"] for item in normalized["references"]] == ["chunk-5"]
+
+
 @pytest.mark.parametrize("manual", [False, True])
 def test_execute_agentic_search_uses_request_scoped_dialog_copy(monkeypatch, manual):
     source = SimpleNamespace(

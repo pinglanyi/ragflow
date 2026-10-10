@@ -16,6 +16,7 @@
 
 import json
 import logging
+import re
 import time
 import uuid
 from copy import deepcopy
@@ -240,6 +241,39 @@ def _normalize_reference(chunk: dict) -> dict:
     }
 
 
+_ANSWER_CITATION_PATTERN = re.compile(r"\[ID:(\d+)\]", re.IGNORECASE)
+
+
+def _compact_cited_chunks(answer: str, chunks: list[dict]) -> tuple[str, list[dict]]:
+    """Keep the 1-based evidence entries cited by the answer and renumber them.
+
+    Agentic RAG renders evidence with ``ID: 1``, ``ID: 2``, ... and instructs
+    the answer model to emit matching ``[ID:n]`` markers.  The public API uses
+    a compact reference array, so markers are rewritten to index that array in
+    first-citation order.  Answers without citation markers retain the supplied
+    references for backwards compatibility with uncited low-mode responses.
+    """
+    matches = list(_ANSWER_CITATION_PATTERN.finditer(answer or ""))
+    if not matches:
+        return answer, chunks
+
+    old_to_new: dict[int, int] = {}
+    cited_chunks: list[dict] = []
+    for match in matches:
+        old_id = int(match.group(1))
+        if old_id in old_to_new or not 1 <= old_id <= len(chunks):
+            continue
+        old_to_new[old_id] = len(cited_chunks) + 1
+        cited_chunks.append(chunks[old_id - 1])
+
+    def replace(match: re.Match) -> str:
+        old_id = int(match.group(1))
+        new_id = old_to_new.get(old_id)
+        return f"[ID:{new_id}]" if new_id is not None else ""
+
+    return _ANSWER_CITATION_PATTERN.sub(replace, answer), cited_chunks
+
+
 def normalize_agentic_search_result(
     result: dict,
     *,
@@ -253,12 +287,13 @@ def normalize_agentic_search_result(
 ) -> dict:
     reference = result.get("reference") if isinstance(result, dict) else {}
     chunks = reference.get("chunks", []) if isinstance(reference, dict) else []
+    answer, chunks = _compact_cited_chunks(result.get("answer") or "", chunks)
     references = [_normalize_reference(chunk) for chunk in chunks if isinstance(chunk, dict)]
     return {
         "request_id": request_id,
         "chat_id": chat_id,
         "session_id": result.get("session_id"),
-        "answer": result.get("answer") or "",
+        "answer": answer,
         "references": references,
         "reference_count": len(references),
         "model": model,
