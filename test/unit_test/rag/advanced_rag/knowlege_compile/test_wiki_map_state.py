@@ -163,6 +163,22 @@ def _missing_after_resolve(wiki, tenant_id, kb_id, state, target_chunk_ids):
     return set(target_chunk_ids) - resolved_ids
 
 
+def test_current_map_inputs_skip_blank_chunks_without_truncating_scan(monkeypatch):
+    wiki = _load_wiki_module(monkeypatch)
+    # An entire empty first page must not hide valid text on the next page.
+    rows = [
+        {"id": f"blank-{i}", "doc_id": "doc", "content_with_weight": " \n" if i % 2 else ""}
+        for i in range(1000)
+    ]
+    rows.append({"id": "valid", "doc_id": "doc", "content_with_weight": "36 V supply"})
+    store = _StateDocStore(rows)
+    monkeypatch.setattr(sys.modules["common.settings"], "docStoreConn", store)
+
+    state = asyncio.run(wiki._wiki_scan_current_chunk_state("tenant", "kb", {"doc"}))
+
+    assert state == {"valid": {"doc_id": "doc", "hash": wiki._chunk_hash("36 V supply")}}
+
+
 def test_active_map_state_switches_marker_after_new_generation(monkeypatch):
     wiki = _load_wiki_module(monkeypatch)
     marker_id = wiki._stable_row_id(wiki.WIKI_MAP_STATE_META_COMPILE_KWD, "kb-1")

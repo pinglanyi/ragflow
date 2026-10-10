@@ -870,11 +870,16 @@ async def _wiki_scan_current_chunk_state(
             )
             rows = settings.docStoreConn.get_fields(res, ["id", "doc_id", "content_with_weight"]) or {}
             for row_id, row in rows.items():
+                text = row.get("content_with_weight") or ""
+                # MAP batching skips empty text. Keep the input baseline in
+                # sync so blank source rows cannot require nonexistent extracts.
+                if not text.strip():
+                    continue
                 chunk_id = str(row.get("id") or row_id or "")
                 if chunk_id:
                     state[chunk_id] = {
                         "doc_id": str(row.get("doc_id") or doc_id),
-                        "hash": _chunk_hash(row.get("content_with_weight") or ""),
+                        "hash": _chunk_hash(text),
                     }
             if len(rows) < 1000:
                 break
