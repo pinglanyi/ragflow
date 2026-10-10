@@ -898,8 +898,10 @@ async def run_structure_merge(ctx: TaskContext) -> None:
     progress(0.0, "Scanning doc_graph rows...")
     pairs = await _collect_structure_pairs(ctx.tenant_id, ctx.kb_id)
     if not pairs:
-        progress(1.0, "No doc_graph rows found.")
-        return
+        raise RuntimeError(
+            "No document structure results found. Attach the matching file compilation template "
+            "and compile documents before building the dataset structure."
+        )
 
     template_meta: dict[str, tuple[bool, Optional[str]]] = {}
 
@@ -929,8 +931,10 @@ async def run_structure_merge(ctx: TaskContext) -> None:
 
     if not eligible:
         kind_label = "any kind" if merge_all else (target_kind or task_type)
-        progress(1.0, f"No eligible templates for {kind_label}.")
-        return
+        raise RuntimeError(
+            f"No eligible templates for {kind_label}. Attach the matching file compilation template "
+            "and compile documents before building the dataset structure."
+        )
 
     disabled_doc_ids = await _disabled_doc_ids(ctx.kb_id)
     # A disabled document does not trigger an immediate rebuild. On the next

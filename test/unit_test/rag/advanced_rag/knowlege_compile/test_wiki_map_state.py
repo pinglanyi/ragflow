@@ -96,6 +96,52 @@ class _KbScopedDocStore(_StateDocStore):
         return rows[offset : offset + limit]
 
 
+@pytest.mark.parametrize("read_active_state", [False, True])
+def test_map_cache_and_active_state_read_past_es_result_window(monkeypatch, read_active_state):
+    wiki = _load_wiki_module(monkeypatch)
+
+    class WindowLimitedStore(_StateDocStore):
+        def search(self, fields, highlights, condition, matches, order, offset, limit, index, dataset_ids):
+            # ES requires an explicit stable sort to use the connector's
+            # search_after path once the ordinary result window is exhausted.
+            if offset + limit > 10000 and not order.fields:
+                raise ValueError("Result window is too large")
+            condition = {key: set(value) if isinstance(value, list) else value for key, value in condition.items()}
+            rows = []
+            for row in self.rows.values():
+                if any(condition.get(key) and row.get(key) not in condition[key] for key in ("doc_id", "compile_kwd", "type_kwd", "chunk_hash_kwd")):
+                    continue
+                if condition.get("source_chunk_ids") and not condition["source_chunk_ids"].intersection(row.get("source_chunk_ids") or []):
+                    continue
+                rows.append(row)
+            return rows[offset : offset + limit]
+
+    count = 13422
+    rows = [
+        {
+            "id": f"row-{i:05d}",
+            "doc_id": f"doc-{i % 263}",
+            "compile_kwd": wiki.WIKI_MAP_STATE_COMPILE_KWD if read_active_state else wiki.WIKI_MAP_COMPILE_KWD,
+            "type_kwd": "generation-1",
+            "source_chunk_ids": [f"chunk-{i:05d}"],
+            "chunk_hash_kwd": f"hash-{i:05d}",
+            "content_with_weight": json.dumps({"entities": []}),
+        }
+        for i in range(count)
+    ]
+    monkeypatch.setattr(sys.modules["common.settings"], "docStoreConn", WindowLimitedStore(rows))
+    if read_active_state:
+        async def generation(*_args):
+            return "generation-1"
+        monkeypatch.setattr(wiki, "_wiki_load_active_map_generation", generation)
+        result = asyncio.run(wiki._wiki_load_active_map_state("tenant-1", "kb-1"))
+    else:
+        requested = {row["source_chunk_ids"][0]: row["chunk_hash_kwd"] for row in rows}
+        result = asyncio.run(wiki._wiki_load_map_versions({row["doc_id"] for row in rows}, "tenant-1", "kb-1", requested))
+    assert len(result) == count
+    assert "chunk-13421" in result
+
+
 # Reporter chunk ids from infiniflow/ragflow#19092. MAP logged extracted=9 then
 # immediately listed these same ids as missing_chunks.
 _REPORTER_CHUNK_IDS = [

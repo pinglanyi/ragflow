@@ -68,14 +68,8 @@ config:
   # shape regardless of kind.
   entity:
     description: ''
-    fields:
-      - type: ''
-        description: ''
-        rule: ''
+    fields: []
   relation:
     description: ''
-    fields:
-      - type: ''
-        description: ''
-        rule: ''
+    fields: []
   global_rules: ''

@@ -745,6 +745,9 @@ async def _wiki_load_map_versions(
     requested_hashes = {chunk_hash for chunk_hash in (requested_versions or {}).values() if chunk_hash}
     normalized_doc_ids = {str(doc_id) for doc_id in ({doc_ids} if isinstance(doc_ids, str) else doc_ids) if doc_id}
     condition = {"compile_kwd": [WIKI_MAP_COMPILE_KWD], "doc_id": sorted(normalized_doc_ids)}
+    # This keyword tuple uniquely identifies a version and enables the ES
+    # connector's search_after pagination beyond the 10,000-row window.
+    order_by = OrderByExpr().asc("doc_id").asc("source_chunk_ids").asc("chunk_hash_kwd")
     if requested_chunk_ids:
         condition["source_chunk_ids"] = sorted(requested_chunk_ids)
     if requested_hashes:
@@ -757,7 +760,7 @@ async def _wiki_load_map_versions(
                 [],
                 condition,
                 [],
-                OrderByExpr(),
+                order_by,
                 offset,
                 page_size,
                 index,
@@ -895,6 +898,7 @@ async def _wiki_load_active_map_state(
 
     state: dict[str, dict] = {}
     offset = 0
+    order_by = OrderByExpr().asc("doc_id").asc("source_chunk_ids").asc("chunk_hash_kwd")
     while True:
         res = await thread_pool_exec(
             settings.docStoreConn.search,
@@ -902,7 +906,7 @@ async def _wiki_load_active_map_state(
             [],
             {"compile_kwd": [WIKI_MAP_STATE_COMPILE_KWD], "type_kwd": [generation]},
             [],
-            OrderByExpr(),
+            order_by,
             offset,
             1000,
             index,
