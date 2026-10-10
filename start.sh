@@ -22,6 +22,8 @@
 #   TASK_EXECUTOR_COUNT=3    每种类型启动的 worker 数
 #   TASK_EXECUTOR_OFFSET=6   worker ID 起始偏移 (默认启动 6、7、8，避开已占用的 3、4、5)
 #                            可覆盖为其他空闲编号，避免与同队列实例冲突
+#   RAGFLOW_TASK_QUEUE_NAMESPACE=ragflow_python_9380  本栈独立队列命名空间
+#                            后端与 worker 必须一致；首次切换需 restart，旧队列任务不搬迁
 #   MAX_CONCURRENT_TASKS=10  每 worker 并发任务数 (导出给子进程)
 #   START_ADMIN=1            额外启动 Admin 服务 (conf 中 admin.http_port=9381)
 #   RAGFLOW_ALLOW_CPU=1      允许 OCR 走 CPU: 关闭 GPU 断言, 只告警不终止
@@ -161,6 +163,11 @@ else
 fi
 
 BACKEND_PORT="${BACKEND_PORT:-${CONF_RAGFLOW_PORT:-9380}}"   # 后端 API (conf ragflow.http_port)
+export RAGFLOW_TASK_QUEUE_NAMESPACE="${RAGFLOW_TASK_QUEUE_NAMESPACE:-ragflow_python_${BACKEND_PORT}}"
+if [[ ! "$RAGFLOW_TASK_QUEUE_NAMESPACE" =~ ^[A-Za-z0-9_-]{1,80}$ ]]; then
+    echo "RAGFLOW_TASK_QUEUE_NAMESPACE 只能包含 1-80 个字母、数字、下划线或连字符" >&2
+    exit 1
+fi
 MYSQL_PORT="${MYSQL_PORT:-${CONF_MYSQL_PORT:-3306}}"
 REDIS_PORT="${REDIS_PORT:-${CONF_REDIS_PORT:-6379}}"
 MINIO_PORT="${MINIO_PORT:-${CONF_MINIO_PORT:-9000}}"
@@ -470,6 +477,7 @@ stop_all() {
 status_all() {
     echo "══════════════════════════════════════════════════"
     echo " RAGFlow 服务状态  (backend=${BACKEND_PORT}, types=${TASK_EXECUTOR_TYPES}, workers/type=${TASK_EXECUTOR_COUNT}, offset=${TASK_EXECUTOR_OFFSET})"
+    echo " Task queue namespace: ${RAGFLOW_TASK_QUEUE_NAMESPACE} (本次脚本配置；运行中进程以心跳为准)"
     echo "══════════════════════════════════════════════════"
     local name port running=""
     for name in server web admin; do

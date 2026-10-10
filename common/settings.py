@@ -25,6 +25,7 @@ from common.file_utils import get_project_base_directory
 from common.config_utils import get_base_config, decrypt_database_config
 from common.misc_utils import env_flag, pip_install_torch
 from common.constants import SVR_QUEUE_NAME, Storage
+from common.task_queue import task_queue_name
 
 import rag.utils
 import rag.utils.es_conn
@@ -243,7 +244,7 @@ def get_svr_queue_name(priority: int, suffix: str = "common") -> str:
         get_svr_queue_name(0) -> "te.0.common"  # default suffix="common"
 
     """
-    return f"{SVR_QUEUE_NAME}.{priority}.common"
+    return task_queue_name(priority, SVR_QUEUE_NAME)
 
 
 def get_svr_queue_names(suffix: str):

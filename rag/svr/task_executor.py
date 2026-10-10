@@ -1917,6 +1917,7 @@ async def report_status():
                 "ip_address": ip_address,
                 "pid": pid,
                 "name": CONSUMER_NAME,
+                "task_queues": settings.get_svr_queue_names(TASK_TYPE),
                 "now": now.astimezone().isoformat(timespec="milliseconds"),
                 "boot_at": BOOT_AT,
                 "pending": PENDING_TASKS,

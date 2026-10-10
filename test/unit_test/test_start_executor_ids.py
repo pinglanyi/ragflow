@@ -16,7 +16,7 @@ BASH = shutil.which("bash")
 class ExecutorIdsTests(unittest.TestCase):
     def run_shell(self, command, offset=None):
         source = (ROOT / "start.sh").read_text(encoding="utf-8")
-        config = "\n".join(re.findall(r"^(?:export )?TASK_EXECUTOR_(?:TYPES|COUNT|OFFSET)=.*$", source, re.MULTILINE))
+        config = "\n".join(re.findall(r"^(?:export )?(?:TASK_EXECUTOR_(?:TYPES|COUNT|OFFSET)|RAGFLOW_TASK_QUEUE_NAMESPACE|BACKEND_PORT)=.*$", source, re.MULTILINE))
         names = ["taskexec_pidfiles", "start_taskexec", "stop_all", "status_all"]
         functions = "\n".join(match.group(0) for name in names if (match := re.search(rf"^{name}\(\) \{{.*?^\}}", source, re.MULTILINE | re.DOTALL)))
         with tempfile.TemporaryDirectory(prefix="executor-test-") as folder:
@@ -39,7 +39,7 @@ launch_bg() {{ echo "LAUNCH:$*"; printf 123 > "$1"; }}
 {functions}
 {command}
 """
-            env = {key: value for key, value in os.environ.items() if not key.startswith("TASK_EXECUTOR_")}
+            env = {key: value for key, value in os.environ.items() if not key.startswith("TASK_EXECUTOR_") and key != "RAGFLOW_TASK_QUEUE_NAMESPACE"}
             if offset is not None:
                 env["TASK_EXECUTOR_OFFSET"] = str(offset)
             result = subprocess.run([BASH, "-c", harness], env=env, capture_output=True, text=True, encoding="utf-8", timeout=20, check=False)
@@ -61,6 +61,10 @@ launch_bg() {{ echo "LAUNCH:$*"; printf 123 > "$1"; }}
         output = self.run_shell("start_taskexec", offset=10)
         for index in (10, 11, 12):
             self.assertIn(f"-t common -i {index}", output)
+
+    def test_default_queue_namespace_is_exported_to_all_children(self):
+        output = self.run_shell("bash -c 'printf %s \"$RAGFLOW_TASK_QUEUE_NAMESPACE\"'")
+        self.assertEqual(output, "ragflow_python_9380")
 
     def test_stop_leaves_old_executor_pidfiles_alone(self):
         output = self.run_shell("stop_all")
