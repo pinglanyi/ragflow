@@ -69,7 +69,7 @@ def main():
     expected = expected_executors(
         os.environ.get("TASK_EXECUTOR_TYPES", "common").split(),
         int(os.environ.get("TASK_EXECUTOR_COUNT", "3")),
-        int(os.environ.get("TASK_EXECUTOR_OFFSET", "3")),
+        int(os.environ.get("TASK_EXECUTOR_OFFSET", "6")),
     )
 
     client = redis_client(conf)

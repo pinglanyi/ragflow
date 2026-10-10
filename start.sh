@@ -4,7 +4,7 @@
 # 参考 deepagents/scripts/start_ragflow.sh 改写: 去掉了 DeepAgents 代理,
 # 端口改为从 conf/service_conf.yaml 自动解析, 组件入口适配本仓库代码。
 #
-# 用法: bash start.sh [run|start|stop|status|restart|check-runtime|check-executors|logs [name]]
+# 用法: bash start.sh [run|start|start-taskexec|stop|status|restart|check-runtime|check-executors|logs [name]]
 #
 # 启动内容:
 #   1. 依赖服务  (docker compose -f docker/docker-compose-base.yml up -d)
@@ -20,8 +20,8 @@
 #   RAGFLOW_EXTRA_SERVICES="clickhouse nats" 启动依赖时额外带上的 compose 服务
 #   TASK_EXECUTOR_TYPES="common"  任务执行器类型 (可加 graphrag raptor resume)
 #   TASK_EXECUTOR_COUNT=3    每种类型启动的 worker 数
-#   TASK_EXECUTOR_OFFSET=3   worker ID 起始偏移 (避免与同一套依赖上其他
-#                            ragflow 实例 (如 docker 里 root 的 worker 0..n) 冲突)
+#   TASK_EXECUTOR_OFFSET=6   worker ID 起始偏移 (默认启动 6、7、8，避开已占用的 3、4、5)
+#                            可覆盖为其他空闲编号，避免与同队列实例冲突
 #   MAX_CONCURRENT_TASKS=10  每 worker 并发任务数 (导出给子进程)
 #   START_ADMIN=1            额外启动 Admin 服务 (conf 中 admin.http_port=9381)
 #   RAGFLOW_ALLOW_CPU=1      允许 OCR 走 CPU: 关闭 GPU 断言, 只告警不终止
@@ -67,9 +67,9 @@ export PYTHONPATH="$PROJECT_DIR"
 
 # 任务执行器配置
 export MAX_CONCURRENT_TASKS="${MAX_CONCURRENT_TASKS:-10}"   # 每 worker 并发解析数
-TASK_EXECUTOR_TYPES="${TASK_EXECUTOR_TYPES:-common}"         # 空格分隔: common graphrag raptor resume
-TASK_EXECUTOR_COUNT="${TASK_EXECUTOR_COUNT:-3}"              # 每种类型 worker 数
-TASK_EXECUTOR_OFFSET="${TASK_EXECUTOR_OFFSET:-3}"            # worker ID 起始偏移
+export TASK_EXECUTOR_TYPES="${TASK_EXECUTOR_TYPES:-common}"  # 空格分隔: common graphrag raptor resume
+export TASK_EXECUTOR_COUNT="${TASK_EXECUTOR_COUNT:-3}"       # 每种类型 worker 数
+export TASK_EXECUTOR_OFFSET="${TASK_EXECUTOR_OFFSET:-6}"     # worker ID 起始偏移，同步给检查脚本
 
 # 前端端口 (vite.config.ts 默认 9222)
 FRONTEND_PORT="${FRONTEND_PORT:-9222}"
@@ -375,6 +375,15 @@ start_admin() {
 # ============================================================================
 # 任务执行器  (rag/svr/task_executor.py -i <id> -t <type>)
 # ============================================================================
+taskexec_pidfiles() {
+    local type i
+    for type in $TASK_EXECUTOR_TYPES; do
+        for ((i = 0; i < TASK_EXECUTOR_COUNT; i++)); do
+            printf '%s/taskexec_%s_%s.pid\n' "$LOG_DIR" "$type" "$((i + TASK_EXECUTOR_OFFSET))"
+        done
+    done
+}
+
 start_taskexec() {
     local type idx worker_id pid_file all_running=true i
     for type in $TASK_EXECUTOR_TYPES; do
@@ -445,12 +454,13 @@ start_web() {
 # 停止 / 状态
 # ============================================================================
 stop_all() {
+    local pid_file
     stop_pidfile "$PID_SERVER"
     stop_pidfile "$PID_WEB"
     stop_pidfile "$PID_ADMIN"
-    for pid_file in "$LOG_DIR"/taskexec_*.pid; do
+    while IFS= read -r pid_file; do
         [ -f "$pid_file" ] && stop_pidfile "$pid_file"
-    done
+    done < <(taskexec_pidfiles)
     # 强制清理端口残留 (vite 的 node 子进程在 npm 被杀后可能存活)
     kill_port "$FRONTEND_PORT"
     pkill -9 -f "vite.*--port.*$FRONTEND_PORT" 2>/dev/null || true
@@ -459,7 +469,7 @@ stop_all() {
 
 status_all() {
     echo "══════════════════════════════════════════════════"
-    echo " RAGFlow 服务状态  (backend=${BACKEND_PORT}, types=${TASK_EXECUTOR_TYPES}, workers/type=${TASK_EXECUTOR_COUNT})"
+    echo " RAGFlow 服务状态  (backend=${BACKEND_PORT}, types=${TASK_EXECUTOR_TYPES}, workers/type=${TASK_EXECUTOR_COUNT}, offset=${TASK_EXECUTOR_OFFSET})"
     echo "══════════════════════════════════════════════════"
     local name port running=""
     for name in server web admin; do
@@ -480,13 +490,13 @@ status_all() {
     done
 
     local count=0
-    for pid_file in "$LOG_DIR"/taskexec_*.pid; do
+    while IFS= read -r pid_file; do
         if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
             local bn; bn="$(basename "$pid_file" .pid)"
             echo "  $bn : 运行中 (PID=$(cat "$pid_file"))"
             ((count++))
         fi
-    done
+    done < <(taskexec_pidfiles)
     echo "  task executor workers : ${count} 个运行中"
 
     echo ""
@@ -540,6 +550,11 @@ check_executor_conflicts() {
 
 # ============================================================================
 case "${1:-start}" in
+    start-taskexec)
+        "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" --check || exit 1
+        check_executor_conflicts
+        start_taskexec || exit 1
+        ;;
     start|run)
         echo "===== RAGFlow 一键启动 ====="
         "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" --check || { echo "[runtime] 环境检查失败，未启动服务" >&2; exit 1; }
@@ -573,7 +588,7 @@ case "${1:-start}" in
         logs_all "${2:-all}"
         ;;
     *)
-        echo "用法: bash start.sh [run|start|stop|status|restart|check-runtime|check-executors [--strict]|logs [server|web|taskexec|admin|all]]"
+        echo "用法: bash start.sh [run|start|start-taskexec|stop|status|restart|check-runtime|check-executors [--strict]|logs [server|web|taskexec|admin|all]]"
         exit 1
         ;;
 esac

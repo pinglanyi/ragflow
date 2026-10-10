@@ -1,6 +1,10 @@
 import importlib.util
+import io
+import os
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -13,9 +17,23 @@ class CheckExecutorsTests(unittest.TestCase):
         self.m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.m)
 
-    def test_expected_executors_follows_start_sh_defaults(self):
+    def test_expected_executors_keeps_explicit_old_offset_supported(self):
         names = self.m.expected_executors(["common"], 3, 3)
         self.assertEqual(names, {"task_executor_common_3", "task_executor_common_4", "task_executor_common_5"})
+
+    def test_cli_defaults_match_new_shell_ids(self):
+        client = Mock()
+        client.smembers.return_value = []
+        output = io.StringIO()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("sys.argv", ["check_executors.py"]),
+            patch.object(self.m.Path, "read_text", return_value="{}"),
+            patch.object(self.m, "redis_client", return_value=client),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(self.m.main(), 0)
+        self.assertIn("task_executor_common_6, task_executor_common_7, task_executor_common_8", output.getvalue())
 
     def test_expected_executors_covers_several_types(self):
         names = self.m.expected_executors(["common", "graphrag"], 2, 0)
