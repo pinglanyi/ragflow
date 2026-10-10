@@ -58,7 +58,7 @@ export default function ChatBasicSetting({
         collapseOpen={collapseOpen}
         onCollapseOpenChange={onCollapseOpenChange}
       ></LlmSettingFieldItems>
-      <FailoverModelsField name={prefixName(llmSettingPrefix, 'failover_llm_ids')} primaryLlmId={primaryLlmId} />
+      <FailoverModelsField name={`${llmSettingPrefix}.failover_llm_ids`} primaryLlmId={primaryLlmId} />
 
       <FormField
         control={form.control}

@@ -101,6 +101,19 @@ class IteratorTests(unittest.TestCase):
         ]
         self.assertEqual([c["chunk_id"] for c in self.collect()], ["first", "second"])
 
+    def test_single_image_chunk_needs_no_fabricated_coordinates(self):
+        self.rows = [{"id": "image-only", "doc_id": "doc", "img_id": "stored-image", "content_with_weight": "Sensor supply: 24 V"}]
+        chunks = self.collect()
+        self.assertEqual(chunks[0]["chunk_order"], 0)
+        self.assertEqual(chunks[0]["positions"], [])
+        self.assertEqual(chunks[0]["image_id"], "stored-image")
+        self.assertEqual(chunks[0]["content_with_weight"], "Sensor supply: 24 V")
+
+    def test_multiple_unordered_image_chunks_remain_rejected(self):
+        self.rows = [{"id": str(i), "doc_id": "doc", "img_id": "image"} for i in range(2)]
+        with self.assertRaises(ValueError):
+            self.collect()
+
     def test_raptor_summary_is_not_a_source_chunk(self):
         self.rows[0]["raptor_kwd"] = "raptor"
         self.rows[0].pop("position_int")

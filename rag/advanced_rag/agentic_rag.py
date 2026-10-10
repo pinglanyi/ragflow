@@ -1140,7 +1140,11 @@ class RAGTools:
         else:
             raise ValueError("Document scan reached the 10000-row limit; completeness is unknown")
         logical_orders = [item[0] for item in ordered]
-        if len(logical_orders) == len(set(logical_orders)) and all(order is not None for order in logical_orders):
+        if len(ordered) <= 1:
+            # A single source chunk has an unambiguous order even when an image
+            # parser supplies no page geometry. Preserve its absent coordinates.
+            pass
+        elif len(logical_orders) == len(set(logical_orders)) and all(order is not None for order in logical_orders):
             ordered.sort(key=lambda item: (item[0], str(item[2]["chunk_id"])))
         elif all(item[1] is not None for item in ordered):
             ordered.sort(key=lambda item: (*item[1], str(item[2]["chunk_id"])))
