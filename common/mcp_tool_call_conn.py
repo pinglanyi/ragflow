@@ -29,6 +29,7 @@ from typing import Any, Literal, Protocol
 from typing_extensions import override
 
 from common.constants import MCPServerType
+from common.mcp_http_client import create_guarded_mcp_client
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
@@ -198,7 +199,7 @@ class MCPToolCallSession(ToolCallSession):
         if self._mcp_server.server_type == MCPServerType.SSE:
             # SSE transport
             try:
-                async with sse_client(url, headers) as stream:
+                async with sse_client(url, headers, httpx_client_factory=create_guarded_mcp_client) as stream:
                     async with ClientSession(*stream) as client_session:
                         try:
                             await asyncio.wait_for(client_session.initialize(), timeout=5)
@@ -220,7 +221,7 @@ class MCPToolCallSession(ToolCallSession):
         elif self._mcp_server.server_type == MCPServerType.STREAMABLE_HTTP:
             # Streamable HTTP transport
             try:
-                async with streamablehttp_client(url, headers) as (read_stream, write_stream, _):
+                async with streamablehttp_client(url, headers, httpx_client_factory=create_guarded_mcp_client) as (read_stream, write_stream, _):
                     async with ClientSession(read_stream, write_stream) as client_session:
                         try:
                             await asyncio.wait_for(client_session.initialize(), timeout=5)

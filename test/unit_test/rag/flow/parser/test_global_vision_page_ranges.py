@@ -10,6 +10,35 @@ import pytest
 ROOT = Path(__file__).resolve().parents[5]
 
 
+def test_docling_flow_forwards_saved_conversion_options():
+    scope = load_pdf_method()
+    scope["os"] = SimpleNamespace(environ={})
+    backend = Mock()
+    backend.parse_pdf.return_value = ([], [])
+    scope["DoclingParser"] = Mock(return_value=backend)
+    process = SimpleNamespace(
+        _param=SimpleNamespace(setups={"pdf": {"parse_method": "docling", "output_format": "json",
+                                             "docling_do_ocr": False, "docling_pdf_backend": "dlparse_v4"}}),
+        _canvas=SimpleNamespace(_tenant_id="tenant"), callback=Mock(), set_output=Mock(),
+    )
+    scope["_pdf"](process, "a.pdf", b"pdf")
+    assert backend.parse_pdf.call_args.kwargs["do_ocr"] is False
+    assert backend.parse_pdf.call_args.kwargs["pdf_backend"] == "dlparse_v4"
+
+
+def test_docling_dataset_forwards_saved_conversion_options():
+    tree = ast.parse((ROOT / "rag/app/naive.py").read_text(encoding="utf-8"))
+    function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "by_docling")
+    backend = Mock()
+    backend.check_installation.return_value = True
+    backend.parse_pdf.return_value = ([], [])
+    scope = {"MAXIMUM_PAGE_NUMBER": 1000, "DoclingParser": Mock(return_value=backend), "os": SimpleNamespace(environ={})}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "<naive>", "exec"), scope)
+    scope["by_docling"]("a.pdf", binary=b"pdf", parser_config={"docling_do_ocr": False, "docling_pdf_backend": "dlparse_v4"})
+    assert backend.parse_pdf.call_args.kwargs["do_ocr"] is False
+    assert backend.parse_pdf.call_args.kwargs["pdf_backend"] == "dlparse_v4"
+
+
 def _load_flow_utils(monkeypatch):
     tree = ast.parse((ROOT / "rag/flow/parser/utils.py").read_text(encoding="utf-8"))
     method = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "enhance_media_sections_with_vision")

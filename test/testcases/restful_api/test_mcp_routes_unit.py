@@ -134,6 +134,59 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def test_preview_masks_credentials_without_mutating_storage(monkeypatch):
+    module = _load_mcp_api(monkeypatch)
+    server = _DummyMCPServer(id="one", variables={"authorization_token": "secret", "tools": {}}, headers={"X-Key": "key", "Empty": ""})
+    monkeypatch.setattr(module.MCPServerService, "get_or_none", lambda **_: server)
+    result = module.detail("one")["data"]
+    assert result["variables"]["authorization_token"] == "********"
+    assert result["headers"] == {"X-Key": "********", "Empty": ""}
+    assert server.variables["authorization_token"] == "secret"
+    assert server.headers["X-Key"] == "key"
+
+
+def test_masked_credentials_restore_only_to_same_url(monkeypatch):
+    module = _load_mcp_api(monkeypatch)
+    server = _DummyMCPServer(url="https://original/mcp", headers={"X-Key": "key"}, variables={"authorization_token": "secret"})
+    headers, variables = module._restore_mcp_credentials(server, server.url, {"X-Key": "********"}, {"authorization_token": "********"})
+    assert headers == {"X-Key": "key"}
+    assert variables == {"authorization_token": "secret"}
+    with pytest.raises(ValueError, match="credentials"):
+        module._restore_mcp_credentials(server, "https://changed/mcp", {"X-Key": "********"}, {})
+    with pytest.raises(ValueError, match="credentials"):
+        module._restore_mcp_credentials(server, server.url, {"Unknown": "********"}, {})
+
+
+def test_masked_preview_rejects_other_tenants_before_discovery(monkeypatch):
+    module = _load_mcp_api(monkeypatch)
+    _stub_url_safety(monkeypatch, module)
+    server = _DummyMCPServer(id="one", url="https://original/mcp", tenant_id="other", headers={"X-Key": "key"})
+    monkeypatch.setattr(module.MCPServerService, "get_by_id", lambda _: (True, server))
+    async def inline(func, *args):
+        return func(*args)
+    monkeypatch.setattr(module, "thread_pool_exec", inline)
+    _set_request_json(monkeypatch, module, {"url": server.url, "server_type": "sse", "headers": {"X-Key": "********"}})
+    assert _run(module.test_mcp("one"))["code"] == 102
+
+
+def test_masked_update_discovers_with_real_credentials_returns_mask(monkeypatch):
+    module = _load_mcp_api(monkeypatch)
+    _stub_url_safety(monkeypatch, module)
+    server = _DummyMCPServer(id="one", name="srv", url="https://original/mcp", headers={"X-Key": "key"}, variables={"authorization_token": "secret"})
+    monkeypatch.setattr(module.MCPServerService, "get_by_id", lambda _: (True, server))
+    _set_request_json(monkeypatch, module, {"headers": {"X-Key": "********"}, "variables": {"authorization_token": "********"}})
+
+    async def discover(_func, servers, timeout):
+        assert servers[0].headers == {"X-Key": "key"}
+        assert servers[0].variables["authorization_token"] == "secret"
+        return {"srv": []}, None
+
+    monkeypatch.setattr(module, "thread_pool_exec", discover)
+    result = _run(module.update("one"))
+    assert result["code"] == 0
+    assert result["data"]["headers"]["X-Key"] == "********"
+
+
 def _set_request_json(monkeypatch, module, payload):
     async def _request_json():
         return payload

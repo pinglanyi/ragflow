@@ -83,6 +83,7 @@ export const LlmSettingFieldSchema = {
   max_tokens: z.number().optional(),
   parameter: z.string().optional(),
   thinking: z.enum(['default', 'enabled', 'disabled']).optional(),
+  failover_llm_ids: z.array(z.string()).optional(),
 };
 
 export const LlmSettingSchema = {

@@ -32,6 +32,7 @@ _ALLOWED_FIELDS = {
     "reasoning",
     "top_n",
     "similarity_threshold",
+    "failover_llm_ids",
 }
 
 _STATELESS_PROMPT_CONFIG = {
@@ -128,12 +129,21 @@ async def load_routable_datasets(*, user_id: str) -> list[dict]:
     return catalog
 
 
-async def select_datasets(*, tenant_id: str, query: str, datasets: list[dict], model_config: dict) -> list[dict]:
+async def select_datasets(*, tenant_id: str, query: str, datasets: list[dict], model_config: dict, failover_llm_ids=None) -> list[dict]:
     from api.db.services.llm_service import LLMBundle
     from rag.prompts.generator import gen_json
 
     system, user = build_dataset_router_prompt(query=query, datasets=datasets)
     chat_model = LLMBundle(tenant_id, model_config)
+    if failover_llm_ids:
+        from api.db.joint_services.tenant_model_service import resolve_model_config
+        from rag.llm.failover import configure_chat_failover
+
+        chat_model = configure_chat_failover(
+            chat_model, {"failover_llm_ids": failover_llm_ids},
+            lambda ref: resolve_model_config(tenant_id, model_config["model_type"], ref),
+            lambda config: LLMBundle(tenant_id, config),
+        )
     selection = await gen_json(system, user, chat_model, gen_conf={"temperature": 0.0})
     return validate_dataset_selection(selection, datasets)
 
@@ -152,6 +162,11 @@ def validate_agentic_search_request(payload: dict) -> dict:
     options = dict(payload)
     options["query"] = query.strip()
     options["reasoning"] = payload.get("reasoning", 3)
+    if "failover_llm_ids" in payload:
+        refs = payload["failover_llm_ids"]
+        if not isinstance(refs, list) or not all(isinstance(ref, str) and ref.strip() for ref in refs):
+            raise ValueError("failover_llm_ids must be a list of nonempty model IDs")
+        options["failover_llm_ids"] = list(dict.fromkeys(ref.strip() for ref in refs))
     if not isinstance(options["reasoning"], int) or isinstance(options["reasoning"], bool) or not 1 <= options["reasoning"] <= 4:
         raise ValueError("reasoning must be an integer from 1 to 4")
 
@@ -190,7 +205,7 @@ def build_stateless_dialog(*, tenant_id: str, dataset_ids: list[str], model: str
         tenant_id=tenant_id,
         llm_id=model,
         tenant_llm_id=None,
-        llm_setting={},
+        llm_setting={"failover_llm_ids": list(options["failover_llm_ids"])} if "failover_llm_ids" in options else {},
         prompt_config=deepcopy(_STATELESS_PROMPT_CONFIG),
         kb_ids=list(dataset_ids),
         top_n=options.get("top_n", 6),
@@ -215,6 +230,8 @@ def build_stateless_conversation(*, tenant_id: str):
 
 def apply_dialog_overrides(dialog, options: dict):
     copied = deepcopy(dialog)
+    if "failover_llm_ids" in options:
+        copied.llm_setting = {**(copied.llm_setting or {}), "failover_llm_ids": list(options["failover_llm_ids"])}
     if "dataset_ids" in options:
         copied.kb_ids = list(options["dataset_ids"])
     if options.get("model"):
@@ -380,7 +397,8 @@ async def _agentic_search_events(*, tenant_id: str, options: dict, request_id: s
     else:
         router_started = time.monotonic()
         catalog = await load_routable_datasets(user_id=tenant_id)
-        selected_datasets = await select_datasets(tenant_id=tenant_id, query=options["query"], datasets=catalog, model_config=model_config)
+        router_options = {"failover_llm_ids": options["failover_llm_ids"]} if options.get("failover_llm_ids") else {}
+        selected_datasets = await select_datasets(tenant_id=tenant_id, query=options["query"], datasets=catalog, model_config=model_config, **router_options)
         dataset_ids = [item["id"] for item in selected_datasets]
         await validate_explicit_dataset_scope(dataset_ids=dataset_ids, user_id=tenant_id)
         router_ms = round((time.monotonic() - router_started) * 1000)

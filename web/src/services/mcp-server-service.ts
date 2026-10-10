@@ -33,8 +33,8 @@ const mcpServerService = {
     request.post(api.importMcpServer, { data: params }),
   export: ({ mcp_id }: { mcp_id: string }) =>
     request.get(api.exportMcpServer(mcp_id)),
-  test: (params: Record<string, any>) =>
-    request.post(api.testMcpServer(params.name || 'preview'), { data: params }),
+  test: ({ mcp_id, ...params }: Record<string, any>) =>
+    request.post(api.testMcpServer(mcp_id || params.name || 'preview'), { data: params }),
 };
 
 export default mcpServerService;

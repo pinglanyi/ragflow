@@ -114,6 +114,10 @@ const FloatingChatWidgetMarkdown = ({
           return;
         }
         if (!documentUrl) return;
+        if (/^https?:\/\//i.test(documentUrl)) {
+          window.open(documentUrl, '_blank', 'noopener,noreferrer');
+          return;
+        }
         window.open(
           `/document/${documentId}?ext=${fileExtension}&resource=${'document'}`,
           '_blank',

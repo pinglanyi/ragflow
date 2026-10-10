@@ -208,7 +208,7 @@ def decode_text(blob, document_type="text"):
     )
     for bom, encoding in bom_codecs:
         if blob.startswith(bom):
-            return blob.decode(encoding), encoding
+            return blob.decode(encoding).removeprefix("\ufeff"), encoding
 
     try:
         return blob.decode("utf-8"), "utf-8"

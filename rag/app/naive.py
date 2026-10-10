@@ -309,6 +309,7 @@ def by_monkeyocrv2(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMB
 def by_docling(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, lang="Chinese", callback=None, pdf_cls=None, **kwargs):
     pdf_parser = DoclingParser()
     parse_method = kwargs.get("parse_method", "raw")
+    config = kwargs.get("parser_config") or {}
 
     if not pdf_parser.check_installation():
         if callback:
@@ -323,6 +324,8 @@ def by_docling(filename, binary=None, from_page=0, to_page=MAXIMUM_PAGE_NUMBER, 
         delete_output=bool(int(os.environ.get("DOCLING_DELETE_OUTPUT", 1))),
         docling_server_url=os.environ.get("DOCLING_SERVER_URL", ""),
         parse_method=parse_method,
+        do_ocr=config.get("docling_do_ocr"),
+        pdf_backend=config.get("docling_pdf_backend"),
     )
     return sections, tables, pdf_parser
 

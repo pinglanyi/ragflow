@@ -104,6 +104,34 @@ class RAGFlowOSS:
         r = self.conn.upload_fileobj(BytesIO(binary), bucket, fnm)
         return r
 
+    def _resolve_path(self, bucket, key):
+        # Match OSS put/get: the prefix does not contain the logical bucket.
+        return self.bucket or bucket, f"{self.prefix_path}/{key}" if self.prefix_path else key
+
+    def copy(self, src_bucket, src_path, dest_bucket, dest_path):
+        try:
+            source_bucket, source_key = self._resolve_path(src_bucket, src_path)
+            target_bucket, target_key = self._resolve_path(dest_bucket, dest_path)
+            # Let boto3 encode the structured source once, including Unicode/%.
+            self.conn.copy_object(CopySource={"Bucket": source_bucket, "Key": source_key}, Bucket=target_bucket, Key=target_key)
+            return True
+        except Exception:
+            logging.exception("OSS object copy failed")
+            return False
+
+    def move(self, src_bucket, src_path, dest_bucket, dest_path):
+        if not self.copy(src_bucket, src_path, dest_bucket, dest_path):
+            return False
+        try:
+            bucket, key = self._resolve_path(src_bucket, src_path)
+            target = self._resolve_path(dest_bucket, dest_path)
+            if (bucket, key) != target:
+                self.conn.delete_object(Bucket=bucket, Key=key)
+            return True
+        except Exception:
+            logging.exception("OSS source deletion failed after copy")
+            return False
+
     def get_properties(self, bucket, key):
         return {}
 

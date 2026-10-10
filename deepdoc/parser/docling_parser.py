@@ -396,6 +396,8 @@ class DoclingParser(RAGFlowPdfParser):
         parse_method: str = "raw",
         docling_server_url: Optional[str] = None,
         request_timeout: Optional[int] = None,
+        do_ocr: Optional[bool] = None,
+        pdf_backend: Optional[str] = None,
     ):
         """
         Parses a PDF document using a remote Docling server.
@@ -431,6 +433,8 @@ class DoclingParser(RAGFlowPdfParser):
         filename = Path(filepath).name or "input.pdf"
         b64 = base64.b64encode(pdf_bytes).decode("ascii")
 
+        convert_options = self._conversion_options(do_ocr, pdf_backend)
+
         # Standard payloads
         # Standard fallback payloads (no chunking)
         v1_payload_standard = {
@@ -461,6 +465,9 @@ class DoclingParser(RAGFlowPdfParser):
             "options": chunking_opts,
             "file_sources": [{"filename": filename, "base64_string": b64}],
         }
+
+        for payload in (v1_payload_standard, v1alpha_payload_standard, v1_payload_chunked, v1alpha_payload_chunked):
+            payload["options"].update(convert_options)
 
         errors = []
         response_json = None
@@ -556,6 +563,24 @@ class DoclingParser(RAGFlowPdfParser):
             callback(0.95, f"[Docling] Remote sections: {len(sections)}")
         return sections, tables
 
+    @staticmethod
+    def _conversion_options(do_ocr=None, pdf_backend=None):
+        options = {}
+        if do_ocr is not None:
+            if not isinstance(do_ocr, bool):
+                raise ValueError("docling_do_ocr must be a boolean or null")
+            options["do_ocr"] = do_ocr
+        else:
+            configured = os.environ.get("DOCLING_DO_OCR", "").strip().lower()
+            if configured in {"1", "true", "t", "0", "false", "f"}:
+                options["do_ocr"] = configured in {"1", "true", "t"}
+        if pdf_backend is not None and not isinstance(pdf_backend, str):
+            raise ValueError("docling_pdf_backend must be a string or null")
+        backend = (pdf_backend or os.environ.get("DOCLING_PDF_BACKEND", "")).strip()
+        if backend:
+            options["pdf_backend"] = backend
+        return options
+
     def parse_pdf(
         self,
         filepath: str | PathLike[str],
@@ -569,6 +594,8 @@ class DoclingParser(RAGFlowPdfParser):
         parse_method: str = "raw",
         docling_server_url: Optional[str] = None,
         request_timeout: Optional[int] = None,
+        do_ocr: Optional[bool] = None,
+        pdf_backend: Optional[str] = None,
     ):
         self.outlines = extract_pdf_outlines(binary if binary is not None else filepath)
 
@@ -584,6 +611,8 @@ class DoclingParser(RAGFlowPdfParser):
                 parse_method=parse_method,
                 docling_server_url=server_url,
                 request_timeout=request_timeout,
+                do_ocr=do_ocr,
+                pdf_backend=pdf_backend,
             )
 
         if binary is not None:

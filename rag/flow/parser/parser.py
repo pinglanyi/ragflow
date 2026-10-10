@@ -468,6 +468,8 @@ class Parser(ProcessBase):
                 callback=self.callback,
                 parse_method="pipeline",
                 docling_server_url=os.environ.get("DOCLING_SERVER_URL", ""),
+                do_ocr=conf.get("docling_do_ocr"),
+                pdf_backend=conf.get("docling_pdf_backend"),
             )
             bboxes = []
             for item in lines or []:

@@ -306,6 +306,7 @@ class Retrieval(ToolBase, ABC):
     async def _invoke_async(self, **kwargs):
         if self.check_if_canceled("Retrieval processing"):
             return
+        self.set_output("json", [])
         if not kwargs.get("query"):
             self.set_output("formalized_content", self._param.empty_response)
             return

@@ -12,6 +12,64 @@ import pytest
 ROOT = Path(__file__).resolve().parents[4]
 
 
+@pytest.mark.parametrize("do_ocr", [True, False])
+def test_conversion_options_survive_all_protocol_fallbacks(monkeypatch, do_ocr):
+    module = _load_docling_parser(monkeypatch)
+    calls = []
+
+    def post(url, json, timeout):
+        calls.append((url, json))
+        return _Response({"document": {"text_content": "body"}}, 422 if len(calls) < 4 else 200)
+
+    monkeypatch.setenv("DOCLING_DO_OCR", str(not do_ocr).lower())
+    monkeypatch.setenv("DOCLING_PDF_BACKEND", "env_backend")
+    monkeypatch.setattr(module.requests, "post", post)
+    parser = module.DoclingParser(docling_server_url="http://docling.local")
+    parser._parse_pdf_remote("a.pdf", binary=b"%PDF", do_ocr=do_ocr, pdf_backend=" dlparse_v4 ")
+    assert len(calls) == 4
+    for _, payload in calls:
+        assert payload["options"]["do_ocr"] is do_ocr
+        assert payload["options"]["pdf_backend"] == "dlparse_v4"
+
+
+def test_conversion_options_environment_and_absent_defaults(monkeypatch):
+    module = _load_docling_parser(monkeypatch)
+    calls = []
+
+    def post(url, json, timeout):
+        calls.append(json["options"])
+        return _Response({"document": {"text_content": "body"}})
+
+    monkeypatch.setattr(module.requests, "post", post)
+    parser = module.DoclingParser(docling_server_url="http://docling.local")
+    monkeypatch.delenv("DOCLING_DO_OCR", raising=False)
+    monkeypatch.delenv("DOCLING_PDF_BACKEND", raising=False)
+    parser._parse_pdf_remote("a.pdf", binary=b"%PDF")
+    assert "do_ocr" not in calls[-1]
+    assert "pdf_backend" not in calls[-1]
+    monkeypatch.setenv("DOCLING_DO_OCR", "false")
+    monkeypatch.setenv("DOCLING_PDF_BACKEND", " dlparse_v2 ")
+    parser._parse_pdf_remote("a.pdf", binary=b"%PDF")
+    assert calls[-1]["do_ocr"] is False
+    assert calls[-1]["pdf_backend"] == "dlparse_v2"
+
+
+def test_parse_pdf_forwards_conversion_options(monkeypatch):
+    module = _load_docling_parser(monkeypatch)
+    parser = module.DoclingParser(docling_server_url="http://docling.local")
+    monkeypatch.setattr(parser, "check_installation", lambda **kw: True)
+    received = {}
+
+    def convert(**kwargs):
+        received.update(kwargs)
+        return [], []
+
+    monkeypatch.setattr(parser, "_parse_pdf_remote", convert)
+    parser.parse_pdf("a.pdf", binary=b"%PDF", do_ocr=False, pdf_backend="dlparse_v4")
+    assert received["do_ocr"] is False
+    assert received["pdf_backend"] == "dlparse_v4"
+
+
 class _Response:
     status_code = 200
     text = ""

@@ -1,3 +1,4 @@
+import { supportsSourceLocate } from '@/utils/source-locate';
 /*
  *  Copyright 2026 The InfiniFlow Authors. All Rights Reserved.
  *
@@ -119,9 +120,11 @@ const MarkdownContent = ({
       isPdf: boolean = false,
       documentUrl?: string,
     ) => {
-      void isPdf;
-      void documentUrl;
       return () => {
+        if (!isPdf && documentUrl && /^https?:\/\//i.test(documentUrl)) {
+          window.open(documentUrl, '_blank', 'noopener,noreferrer');
+          return;
+        }
         clickDocumentButton?.(documentId, chunk);
       };
     },
@@ -180,6 +183,7 @@ const MarkdownContent = ({
         chunkItem,
         documentId,
         document,
+        documentUrl,
       } = getReferenceInfo(chunkIndex);
 
       return (
@@ -232,8 +236,8 @@ const MarkdownContent = ({
                   onClick={handleDocumentButtonClick(
                     documentId,
                     chunkItem,
-                    // fileExtension === 'pdf',
-                    // documentUrl,
+                    supportsSourceLocate(fileExtension),
+                    documentUrl,
                   )}
                 >
                   {document?.doc_name}

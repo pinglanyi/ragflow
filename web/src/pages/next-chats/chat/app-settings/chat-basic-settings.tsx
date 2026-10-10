@@ -3,6 +3,7 @@
 import { AvatarNameDescription } from '@/components/avatar-name-description';
 import { KnowledgeBaseFormField } from '@/components/knowledge-base-item';
 import { LlmSettingFieldItems } from '@/components/llm-setting-items/next';
+import { FailoverModelsField } from '@/components/llm-setting-items/failover-models-field';
 import {
   FormControl,
   FormField,
@@ -39,6 +40,7 @@ export default function ChatBasicSetting({
   });
 
   const llmSettingPrefix = prefixName(prefix, 'llm_setting');
+  const primaryLlmId = useWatch({ control: form.control, name: prefixName(prefix, 'llm_id') });
 
   return (
     <div className="space-y-8">
@@ -56,6 +58,7 @@ export default function ChatBasicSetting({
         collapseOpen={collapseOpen}
         onCollapseOpenChange={onCollapseOpenChange}
       ></LlmSettingFieldItems>
+      <FailoverModelsField name={prefixName(llmSettingPrefix, 'failover_llm_ids')} primaryLlmId={primaryLlmId} />
 
       <FormField
         control={form.control}

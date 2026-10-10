@@ -1063,6 +1063,12 @@ NER：使用 spaCy NER 和基于规则的关键词提取来抽取 Entities 和 R
       thinkingLevelHighDescription: '深度推理',
       thinkingLevelUltra: 'Ultra',
       thinkingLevelUltraDescription: '尽力思考',
+      failoverModels: '备用模型',
+      failoverModelsTip: '服务商故障时按顺序尝试备用模型；流式答案已经输出内容后不重放请求。',
+      failoverModelsPrimaryLabel: '主模型',
+      failoverModelsNoPrimary: '租户默认',
+      failoverModelsEmpty: '未配置备用模型，继续使用原来选择的模型。',
+      failoverModelsAdd: '添加备用模型',
       thinkingTip:
         '仅控制官方模型提供商中的 Qwen、Kimi 和 GLM 模型思考模式。系统默认会关闭 Qwen 思考，以避免任务长时间运行。',
       quote: '显示引文',

@@ -35,6 +35,7 @@ from api.db.services.doc_metadata_service import DocMetadataService
 from api.db.services.knowledgebase_service import KnowledgebaseService, validate_dataset_embedding_models
 from api.db.services.langfuse_service import TenantLangfuseService
 from api.db.services.llm_service import LLMBundle, resolve_llm_setting
+from rag.llm.failover import configure_chat_failover
 from api.db.services.user_service import TenantService
 from common.metadata_utils import apply_meta_data_filter
 from api.utils.reference_metadata_utils import (
@@ -290,6 +291,15 @@ class DialogService(CommonService):
         return list(objs)
 
 
+def _with_dialog_failover(dialog, primary, **kwargs):
+    return configure_chat_failover(
+        primary,
+        dialog.llm_setting,
+        lambda ref: resolve_model_config(dialog.tenant_id, primary.model_config["model_type"], ref),
+        lambda config: LLMBundle(dialog.tenant_id, config, **kwargs),
+    )
+
+
 async def async_chat_solo(dialog, messages, stream=True, session_id=None):
     if dialog.llm_id:
         if dialog.tenant_llm_id:
@@ -315,6 +325,7 @@ async def async_chat_solo(dialog, messages, stream=True, session_id=None):
         model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
 
     chat_mdl = LLMBundle(dialog.tenant_id, model_config, langfuse_session_id=session_id)
+    chat_mdl = _with_dialog_failover(dialog, chat_mdl, langfuse_session_id=session_id)
     factory = model_config.get("llm_factory", "") if model_config else ""
 
     text_attachments_content, image_attachments, image_files = get_files_content(messages[-1], model_config["model_type"])
@@ -378,6 +389,7 @@ def get_models(dialog, trace_context=None, langfuse_session_id=None):
         chat_model_config = get_tenant_default_model_by_type(dialog.tenant_id, LLMType.CHAT)
 
     chat_mdl = LLMBundle(dialog.tenant_id, chat_model_config, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
+    chat_mdl = _with_dialog_failover(dialog, chat_mdl, trace_context=trace_context, langfuse_session_id=langfuse_session_id)
 
     if dialog.rerank_id:
         if dialog.tenant_rerank_id:

@@ -131,106 +131,28 @@ def test_skill_roots_project_to_two_level_navigation(monkeypatch):
 
 
 def test_wiki_uses_builtin_template_when_documents_have_no_assignment(monkeypatch):
-    module = _load_module(
-        monkeypatch,
-        "wiki_generator_under_test",
-        "rag/svr/task_executor_refactor/dataset_wiki_generator.py",
+    # Exercise the fallback owner directly; run_wiki now uses incremental MAP state.
+    import ast
+
+    path = ROOT / "rag/svr/task_executor_refactor/dataset_wiki_generator.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_wiki_eligible_docs"]
+    namespace = {
+        "_parser_config_compilation_template_ids": lambda *args: [],
+        "_pipeline_compilation_template_ids": lambda *args: [],
+        "_wiki_template": lambda *args: None,
+    }
+    service = types.ModuleType("api.db.services.compilation_template_service")
+    service.CompilationTemplateService = types.SimpleNamespace(
+        load_builtins_from_files=lambda: [{"id": "wiki", "kind": "artifacts"}],
     )
-    module._parser_config_compilation_template_ids = lambda config, tenant_id: []
-
-    document_service = types.ModuleType("api.db.services.document_service")
-    document_service.DocumentService = types.SimpleNamespace(
-        get_by_kb_id=lambda **kwargs: ([{"id": "doc-1", "name": "one.pdf"}], 1)
-    )
-    monkeypatch.setitem(sys.modules, "api.db.services.document_service", document_service)
-
-    knowledgebase_service = types.ModuleType("api.db.services.knowledgebase_service")
-    knowledgebase_service.KnowledgebaseService = types.SimpleNamespace(
-        get_by_id=lambda kb_id: (
-            True,
-            types.SimpleNamespace(name="KB", description="description"),
-        )
-    )
-    monkeypatch.setitem(sys.modules, "api.db.services.knowledgebase_service", knowledgebase_service)
-
-    class TemplateService:
-        @staticmethod
-        def get_saved(template_id, tenant_id):
-            return None
-
-        @staticmethod
-        def load_builtins_from_files():
-            return [{"id": "wiki", "kind": "artifacts", "config": {"kind": "artifacts"}}]
-
-        @staticmethod
-        def fill_config_default_llm(config, tenant_id):
-            return dict(config)
-
-    template_service = types.ModuleType("api.db.services.compilation_template_service")
-    template_service.CompilationTemplateService = TemplateService
-    monkeypatch.setitem(
-        sys.modules,
-        "api.db.services.compilation_template_service",
-        template_service,
-    )
-
-    llm_service = types.ModuleType("api.db.services.llm_service")
-    llm_service.LLMBundle = lambda *args, **kwargs: object()
-    monkeypatch.setitem(sys.modules, "api.db.services.llm_service", llm_service)
-
-    tenant_models = types.ModuleType("api.db.joint_services.tenant_model_service")
-    tenant_models.get_tenant_default_model_by_type = lambda *args: object()
-    tenant_models.resolve_model_config = lambda *args: object()
-    monkeypatch.setitem(
-        sys.modules,
-        "api.db.joint_services.tenant_model_service",
-        tenant_models,
-    )
-
     chunk_api = types.ModuleType("api.apps.restful_apis.chunk_api")
     chunk_api._compilation_template_kind = lambda kind: kind
-    monkeypatch.setitem(sys.modules, "api.apps.restful_apis.chunk_api", chunk_api)
-
-    mapped = []
-
-    async def map_chunks(**kwargs):
-        mapped.append(kwargs["doc_id"])
-        return {"entities": [], "concepts": [], "claims": [], "relations": []}
-
-    async def no_result(**kwargs):
-        return None
-
-    async def pages_result(**kwargs):
-        return []
-
-    module.wiki_map_from_chunks = map_chunks
-    module.wiki_reduce_from_extracts = no_result
-    module.wiki_plan_from_reduction = no_result
-    module.wiki_refine_from_plan = pages_result
-    module.persist_wiki_pages_to_es = no_result
-    module.persist_wiki_page_graph_to_es = no_result
-
-    progress_messages = []
-
-    def progress(value=None, message="", msg=""):
-        progress_messages.append(message or msg)
-
-    ctx = types.SimpleNamespace(
-        tenant_id="tenant-1",
-        kb_id="kb-1",
-        language="Chinese",
-        progress_cb=progress,
-    )
-
-    async def chunks(*args, **kwargs):
-        yield [{"id": "chunk-1", "content_with_weight": "content"}]
-
-    import asyncio
-
-    asyncio.run(module.run_wiki(ctx, object(), chunks))
-
-    assert mapped == ["doc-1"]
-    assert any("using built-in Wiki template" in message for message in progress_messages)
+    monkeypatch.setitem(sys.modules, service.__name__, service)
+    monkeypatch.setitem(sys.modules, chunk_api.__name__, chunk_api)
+    exec(compile(tree, str(path), "exec"), namespace)
+    docs = [{"id": "doc-1"}, {"id": "disabled", "status": "0"}, {"id": "deleted"}]
+    assert namespace["_wiki_eligible_docs"](docs, "tenant-1", skip_doc_ids={"deleted"}) == [(docs[0], "wiki")]
 
 
 def test_replace_dataset_nav_from_clusters_writes_cluster_and_document(monkeypatch):

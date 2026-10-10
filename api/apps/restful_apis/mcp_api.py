@@ -14,6 +14,8 @@
 #  limitations under the License.
 #
 
+from copy import deepcopy
+
 from quart import Response, request
 
 from api.apps import current_user, login_required
@@ -27,6 +29,37 @@ from common.constants import VALID_MCP_SERVER_TYPES
 from common.mcp_tool_call_conn import MCPToolCallSession, close_multiple_mcp_toolcall_sessions
 from common.misc_utils import get_uuid, thread_pool_exec
 from common.ssrf_guard import assert_url_is_safe, pin_dns_global
+
+
+_SECRET_MASK = "********"
+
+
+def _mcp_response(data):
+    result = deepcopy(data)
+    variables = result.get("variables") or {}
+    if variables.get("authorization_token"):
+        variables["authorization_token"] = _SECRET_MASK
+    if "variables" in result:
+        result["variables"] = variables
+    if "headers" in result:
+        result["headers"] = {key: _SECRET_MASK if isinstance(value, str) and value else value for key, value in (result["headers"] or {}).items()}
+    return result
+
+
+def _restore_mcp_credentials(server, url, headers, variables):
+    headers, variables = deepcopy(headers), deepcopy(variables)
+    original_headers = server.headers or {}
+    original_variables = server.variables or {}
+    if variables.get("authorization_token") == _SECRET_MASK:
+        if url != server.url or not original_variables.get("authorization_token"):
+            raise ValueError("Provide explicit credentials when changing the MCP URL or adding a token.")
+        variables["authorization_token"] = original_variables["authorization_token"]
+    for key, value in headers.items():
+        if value == _SECRET_MASK:
+            if url != server.url or key not in original_headers:
+                raise ValueError("Provide explicit credentials when changing the MCP URL or adding a header.")
+            headers[key] = original_headers[key]
+    return headers, variables
 
 
 def _get_mcp_ids_from_args() -> list[str]:
@@ -96,7 +129,7 @@ async def list_mcp() -> Response:
         if page_number and items_per_page:
             servers = servers[(page_number - 1) * items_per_page : page_number * items_per_page]
 
-        return get_json_result(data={"mcp_servers": servers, "total": total})
+        return get_json_result(data={"mcp_servers": [_mcp_response(server) for server in servers], "total": total})
     except Exception as e:
         return server_error_response(e)
 
@@ -116,7 +149,7 @@ def detail(mcp_id: str) -> Response:
         if mcp_server is None:
             return get_data_error_result(message=f"Cannot find MCP server {mcp_id} for user {current_user.id}")
 
-        return get_json_result(data=mcp_server.to_dict())
+        return get_json_result(data=_mcp_response(mcp_server.to_dict()))
     except Exception as e:
         return server_error_response(e)
 
@@ -173,7 +206,7 @@ async def create() -> Response:
         if not MCPServerService.insert(**req):
             return get_data_error_result(message="Failed to create MCP server.")
 
-        return get_json_result(data=req)
+        return get_json_result(data=_mcp_response(req))
     except Exception as e:
         return server_error_response(e)
 
@@ -202,10 +235,14 @@ async def update(mcp_id: str) -> Response:
     if url_error:
         return get_data_error_result(message=url_error)
 
-    headers = safe_json_parse(req.get("headers", mcp_server.headers))
+    defaults = _mcp_response(mcp_server.to_dict())
+    headers = safe_json_parse(req.get("headers", defaults["headers"]))
+    variables = safe_json_parse(req.get("variables", defaults["variables"]))
+    try:
+        headers, variables = _restore_mcp_credentials(mcp_server, url, headers, variables)
+    except ValueError as exc:
+        return get_data_error_result(message=str(exc))
     req["headers"] = headers
-
-    variables = safe_json_parse(req.get("variables", mcp_server.variables))
     variables.pop("tools", None)
 
     timeout = get_float(req, "timeout", 10)
@@ -232,7 +269,7 @@ async def update(mcp_id: str) -> Response:
         if not e:
             return get_data_error_result(message="Failed to fetch updated MCP server.")
 
-        return get_json_result(data=updated_mcp.to_dict())
+        return get_json_result(data=_mcp_response(updated_mcp.to_dict()))
     except Exception as e:
         return server_error_response(e)
 
@@ -363,6 +400,15 @@ async def test_mcp(mcp_id: str) -> Response:
     timeout = get_float(req, "timeout", 10)
     headers = safe_json_parse(req.get("headers", {}))
     variables = safe_json_parse(req.get("variables", {}))
+
+    if variables.get("authorization_token") == _SECRET_MASK or _SECRET_MASK in headers.values():
+        exists, stored = MCPServerService.get_by_id(mcp_id)
+        if not exists or stored.tenant_id != current_user.id:
+            return get_data_error_result(message="Cannot restore credentials for this MCP server.")
+        try:
+            headers, variables = _restore_mcp_credentials(stored, url, headers, variables)
+        except ValueError as exc:
+            return get_data_error_result(message=str(exc))
 
     mcp_server = MCPServer(id=mcp_id, server_type=server_type, url=url, headers=headers, variables=variables)
 

@@ -133,3 +133,35 @@
 - Search1API 真实供应商请求尚未验收：当前没有该供应商凭据。此次未连接生产数据库、修改账号模型配置或部署服务器。
 
 这轮完成了明确的 Search1API 工作流缺口及两项已复现的对照缺陷；其余待对照条目仍按第三节和 CSV 继续跟踪，不能宣称官方全部功能已移植。
+
+
+## 八、第二轮 Python 兼容移植（本次实现）
+
+本轮以 `0a0e9c81e` 为本地代码基线，继续对照官方 `f2e618aed`。不引入 Go 服务、不执行数据迁移，不改 worker 6–8、GPU OCR 或独立队列配置。第一轮第七节的审计数量是当时快照；最新逐提交状态以 CSV 为准。
+
+| 项目 | 本次结果 | 使用方式与兼容边界 |
+| --- | --- | --- |
+| 对话级备用模型 | Python 模型链、聊天设置界面、Agentic API 普通/流式及自动选库接入 | 默认为空，原模型路径保持；按顺序配置 `llm_setting.failover_llm_ids`，Agentic API 使用顶层同名字段。模型按当前租户解析，不跨账号借用凭据。 |
+| 故障切换保护 | 执行过工具、输出过内容或取消后不重放；全部失败短暂冷却；关闭流即关闭底层连接 | callable 工具和传统 session 两种协议均覆盖。已尝试模型 token 累加，阶段 calls 仍表示逻辑调用次数；真实模型故障演练待部署。 |
+| Docling OCR/backend | 保存配置和环境变量透传到四种 remote Serve 请求协议 | `parser_config.docling_do_ocr`、`docling_pdf_backend`；环境 `DOCLING_DO_OCR`、`DOCLING_PDF_BACKEND`。显式 false 优先，未设置保留服务端默认。此次不增加前端专门表单，也不修改本地 Docling 引擎参数。 |
+| UTF-8/16/32 BOM | 去掉解码结果的起始 BOM，内部 BOM 保留 | 覆盖 JSON 读取和 Markdown 标题语义；普通 UTF-8、GB18030 保持。 |
+| MCP 凭据和网络请求 | 列表、详情、保存响应掩码；同地址编辑/测试恢复原凭据；每次请求校验并固定到检查过的 IP | 新增 token/header、改变地址不能继承掩码凭据。显式下载导出仍返回 owner 凭据。守护传输不使用环境代理；已有 private-host 显式允许策略保持。真实 SSE/HTTP 服务需部署验收。 |
+| OSS copy/move | 补齐 Python OSS 复制/移动接口，遵循现有默认桶和前缀 | CopySource 交给 boto3 编码，失败不删除源文件；同目标不删除源。S3 本来已有结构化源，无需手工二次编码。真实 OSS 服务未连接。 |
+| Wiki/引用外链 | Wiki 的 scheme/protocol-relative 链接不当作内部页面；四处聊天/搜索引用可以直接打开 HTTP(S) 外链 | 保留 PDF/Excel 内部原文定位；外部打开使用 noopener/noreferrer。 |
+| 筛选状态 | 数据刷新时保留未提交勾选 | 不改变已提交筛选条件。 |
+| Retrieval 工作流 | 补知识库/记忆绑定校验、旧配置来源推断；清除空查询遗留 JSON 证据 | 原 embedding 兼容行为回归通过；旧版仅有 memory_ids 的工作流继续推断为 memory，不默认切换到 dataset。 |
+| API Key 界面 | 可以创建多把，16把时禁用新增 | Python API 原有契约不变，不给存量账号增加新的服务端限制。 |
+
+独立审查发现并复现了工具重复执行、流关闭延迟、自动选库绕过备用链、备用链用量遗漏四项问题，已分别修复并补回归。
+
+### 本轮验证
+
+- Python 按文件独立进程执行，避免历史 mock 模块污染；原功能与新增用例共 439 passed、10 subtests passed。覆盖 Agentic API/工具、元数据、多模态 full/smart 接线、归档、Wiki 模板、视觉/PDF范围、供应商、embedding 数量、Search1API、Excel、MCP、故障切换、OSS、执行器编号及队列隔离。
+- 旧 Wiki 回退测试按现有增量 Wiki 入口调整：直接验证实际模板资格函数，未配置模板时选内置 Wiki，禁用/删除文档不进入回退；该测试不再声称覆盖整条 Wiki 生成流程。
+- 前端最终针对性回归 21 套、209 passed；包含旧 memory-only 工作流来源兼容和四处外链引用。最终生产构建成功（VITE_MINIFY=esbuild，2m29s）；保留既有 chunk/eval 警告。最终 TypeScript 仍为 208 条；与固定基线归一行号和类型摘要数量后新增 0、消失 0，不能宣称完整类型检查通过。
+- 新增 Python 文件 Ruff 通过；隔离测试用依赖不写入项目，不修改生产环境。
+- 本轮没有部署生产环境，也没有执行真实供应商故障切换、MCP 远程服务或 OSS 存储验收。已有线上 GPU 证据继续引用第一节，不把本地回归当成新的 GPU 实测。
+
+### 仍需继续对照 / 验收
+
+此轮没有宣称官方所有功能迁移完成。以下保持明确待办：统一解析器/Pipeline 的新单一选择界面（当前 Python 两种模式都可用，仍沿用原界面）；Vastbase G100 新文档引擎（需要独立服务和 Python 驱动）；Infinity/ES 特定后端的边界差异；工作流恢复/并行的有状态故障演练；跨账号全端点权限验收；Wiki 全局名称去重/重命名和存储格式对照；DOCX、媒体上下文、MinerU 最新协议样例；官方 Go 的 CPU/页面预算调整。其余 CSV “待语义对照”条目仍不等于功能缺失，也不自动算已完成。

@@ -48,14 +48,16 @@ def test_close_sync_waits_for_transport_context_cleanup(monkeypatch, server_type
     transport_closed = threading.Event()
 
     @asynccontextmanager
-    async def fake_sse_client(url, headers):
+    async def fake_sse_client(url, headers, **kwargs):
+        assert kwargs["httpx_client_factory"] is mcp_tool_call_conn.create_guarded_mcp_client
         try:
             yield object(), object()
         finally:
             transport_closed.set()
 
     @asynccontextmanager
-    async def fake_streamable_http_client(url, headers):
+    async def fake_streamable_http_client(url, headers, **kwargs):
+        assert kwargs["httpx_client_factory"] is mcp_tool_call_conn.create_guarded_mcp_client
         try:
             yield object(), object(), None
         finally:
@@ -102,7 +104,7 @@ def test_close_sync_cancels_blocked_initialization(monkeypatch):
     transport_closed = threading.Event()
 
     @asynccontextmanager
-    async def fake_sse_client(url, headers):
+    async def fake_sse_client(url, headers, **kwargs):
         try:
             yield object(), object()
         finally:
@@ -289,7 +291,7 @@ def test_close_sync_propagates_transport_cleanup_error(monkeypatch, caplog):
     join_attempted = threading.Event()
 
     @asynccontextmanager
-    async def fake_sse_client(url, headers):
+    async def fake_sse_client(url, headers, **kwargs):
         try:
             yield object(), object()
         finally:

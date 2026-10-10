@@ -109,7 +109,7 @@ export function EditMcpDialog({
     if (isTriggeredBySaving) {
       onOk?.(nextValues);
     } else {
-      const ret = await testMcpServer(nextValues);
+      const ret = await testMcpServer({ ...nextValues, mcp_id: id || undefined });
       if (ret.code === 0) {
         setFieldChanged(false);
       }

@@ -1,6 +1,9 @@
 import { ParseType } from '@/constants/knowledge';
 import { formSchema } from '../form-schema';
 
+// Validate the real schema without booting the browser router in jsdom.
+jest.mock('@/routes', () => ({ Routes: {} }));
+
 describe('dataset compilation template settings', () => {
   it.each(['wiki-template', ['wiki-template', 'tree-template']])(
     'preserves selected template groups when saving: %p',

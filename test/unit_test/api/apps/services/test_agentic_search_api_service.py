@@ -16,6 +16,23 @@ normalize_agentic_search_result = MODULE.normalize_agentic_search_result
 validate_agentic_search_request = MODULE.validate_agentic_search_request
 
 
+def test_optional_failover_configuration_reaches_stateless_and_saved_dialogs():
+    options = validate_agentic_search_request({"query": "hello", "failover_llm_ids": [" backup ", "backup"]})
+    assert options["failover_llm_ids"] == ["backup"]
+    dialog = MODULE.build_stateless_dialog(tenant_id="tenant", dataset_ids=["kb"], model="primary", options=options)
+    assert dialog.llm_setting["failover_llm_ids"] == ["backup"]
+    existing = SimpleNamespace(llm_setting={"temperature": 0.2, "failover_llm_ids": ["old"]})
+    overridden = apply_dialog_overrides(existing, options)
+    assert overridden.llm_setting == {"temperature": 0.2, "failover_llm_ids": ["backup"]}
+    assert existing.llm_setting["failover_llm_ids"] == ["old"]
+
+
+@pytest.mark.parametrize("value", ["backup", [1], [None], [" "]])
+def test_failover_request_rejects_invalid_members(value):
+    with pytest.raises(ValueError, match="failover_llm_ids"):
+        validate_agentic_search_request({"query": "hello", "failover_llm_ids": value})
+
+
 def test_validate_requires_query_and_accepts_auto_scope():
     with pytest.raises(ValueError, match="query"):
         validate_agentic_search_request({"chat_id": "chat-1"})
@@ -185,6 +202,47 @@ def test_router_selection_uses_resolved_model_and_validates_output(monkeypatch):
     assert result == [{"id": "kb-1", "name": "产品手册", "reason": "安装资料", "confidence": 0.8}]
     assert captured["config"] == {"llm_name": "model"}
     assert captured["gen_conf"] == {"temperature": 0.0}
+
+
+def test_auto_dataset_router_uses_tenant_scoped_fallback(monkeypatch):
+    from test.unit_test.rag.llm.test_failover_unit import load
+
+    monkeypatch.setitem(sys.modules, "rag.llm", ModuleType("rag.llm"))
+    monkeypatch.setitem(sys.modules, "rag.llm.failover", load())
+    seen = []
+
+    class Bundle:
+        def __init__(self, tenant, config):
+            self.model_config = config
+            self.is_tools = False
+
+        async def async_chat(self, *args, **kwargs):
+            if self.model_config["llm_name"] == "primary":
+                raise RuntimeError("unavailable")
+            return "backup result"
+
+    def resolve(tenant_id, model_type, model_ref):
+        seen.append((tenant_id, model_type, model_ref))
+        return {"model_type": "chat", "llm_name": model_ref}
+
+    async def gen_json(system, user, model, gen_conf):
+        assert await model.async_chat(system, []) == "backup result"
+        return {"selected": [{"id": "kb"}]}
+
+    for name, attrs in {
+        "api.db.services.llm_service": {"LLMBundle": Bundle},
+        "api.db.joint_services.tenant_model_service": {"resolve_model_config": resolve},
+        "rag.prompts.generator": {"gen_json": gen_json},
+    }.items():
+        mod = ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+    result = asyncio.run(MODULE.select_datasets(
+        tenant_id="tenant", query="query", datasets=[{"id": "kb", "name": "KB", "description": "", "embd_id": "e"}],
+        model_config={"model_type": "chat", "llm_name": "primary"}, failover_llm_ids=["backup"],
+    ))
+    assert result[0]["id"] == "kb"
+    assert seen == [("tenant", "chat", "backup")]
 
 
 def test_apply_dialog_overrides_does_not_mutate_source():

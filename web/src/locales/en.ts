@@ -1168,6 +1168,12 @@ This auto-tagging feature enhances retrieval by adding another layer of domain-s
       thinkingLevelHighDescription: 'Deep reasoning',
       thinkingLevelUltra: 'Ultra',
       thinkingLevelUltraDescription: 'Maximum cognitive effort',
+      failoverModels: 'Fallback models',
+      failoverModelsTip: 'Try these models in order after a provider failure. A response already streaming is not replayed.',
+      failoverModelsPrimaryLabel: 'Primary model',
+      failoverModelsNoPrimary: 'Tenant default',
+      failoverModelsEmpty: 'No fallback configured. The selected model is used as before.',
+      failoverModelsAdd: 'Add a fallback model',
       thinkingTip:
         'Only controls thinking mode for official Qwen, Kimi, and GLM model providers. System default disables Qwen thinking to avoid long-running tasks.',
       quote: 'Show citations',
