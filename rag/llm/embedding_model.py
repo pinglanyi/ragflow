@@ -192,6 +192,8 @@ class Base(ABC):
             batch = texts[i : i + batch_size]
             try:
                 embeddings, tokens = call_fn(batch)
+                if len(embeddings) != len(batch):
+                    raise EmbeddingError(f"Unexpected embedding count: got {len(embeddings)}, expected {len(batch)}")
             except ModelException:
                 # Already a structured (and possibly retryable) model error; keep it.
                 raise

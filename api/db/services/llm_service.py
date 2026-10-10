@@ -198,6 +198,8 @@ class LLMBundle(LLM4Tenant):
                 safe_texts.append(text)
 
         embeddings, used_tokens = self.mdl.encode(safe_texts)
+        if len(embeddings) != len(safe_texts):
+            raise ValueError(f"Unexpected embedding count: got {len(embeddings)}, expected {len(safe_texts)}")
         if self.model_config["llm_factory"] == "Builtin":
             logging.debug("LLMBundle.encode query: {}, emd len: {}, used_tokens: {}. Builtin model don't need to update token usage".format(texts, len(embeddings), used_tokens))
         else:

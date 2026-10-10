@@ -50,6 +50,38 @@ _spec.loader.exec_module(_mod)
 RAGFlowExcelParser = _mod.RAGFlowExcelParser
 
 
+def test_calamine_fallback_preserves_all_legacy_xls_sheets(monkeypatch):
+    import pandas as pd
+
+    calls = []
+    sheets = {"Alpha": pd.DataFrame({"Model": ["A1"]}), "Beta": pd.DataFrame({"Model": ["B2"]})}
+
+    def read_excel(source, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("engine") != "calamine":
+            raise ImportError("Optional default XLS engine not installed")
+        return sheets if kwargs.get("sheet_name") is None and "sheet_name" in kwargs else sheets["Alpha"]
+
+    monkeypatch.setattr(_mod.pd, "read_excel", read_excel)
+    monkeypatch.setattr(_mod, "load_workbook", lambda *a, **kw: (_ for _ in ()).throw(ValueError("Not OOXML")))
+    workbook = RAGFlowExcelParser._load_excel_to_workbook(BytesIO(b"\xd0\xcf\x11\xe0" + b"fake BIFF8"))
+    assert workbook.sheetnames == ["Alpha", "Beta"]
+    assert workbook["Beta"].cell(row=2, column=1).value == "B2"
+    assert calls[-1] == {"engine": "calamine", "sheet_name": None}
+
+
+def test_genuine_biff8_xls_keeps_both_sheets():
+    from pathlib import Path
+
+    fixture = Path(__file__).with_name("fixtures") / "legacy-two-sheets.xls"
+    binary = fixture.read_bytes()
+    assert binary.startswith(b"\xd0\xcf\x11\xe0")
+    workbook = RAGFlowExcelParser._load_excel_to_workbook(binary)
+    assert workbook.sheetnames == ["Alpha", "Beta"]
+    assert workbook["Alpha"].cell(row=2, column=1).value == "A1"
+    assert workbook["Beta"].cell(row=2, column=1).value == "B2"
+
+
 def _test_find_codec(binary):
     for encoding in ("utf-8-sig", "gb18030"):
         try:
