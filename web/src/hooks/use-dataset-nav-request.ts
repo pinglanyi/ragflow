@@ -15,7 +15,10 @@
  */
 
 import message from '@/components/ui/message';
-import { DatasetNavList } from '@/interfaces/database/dataset-nav';
+import {
+  DatasetNavList,
+  NavigationTreeMode,
+} from '@/interfaces/database/dataset-nav';
 import i18n from '@/locales/config';
 import datasetNavService from '@/services/dataset-nav-service';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -24,11 +27,16 @@ import { trim } from 'lodash';
 import { useKnowledgeBaseId } from './use-knowledge-request';
 
 export const DatasetNavKeys = {
+  targets: (kbId: string) => ['dataset_nav', kbId, 'targets'] as const,
   all: (kbId: string) => ['dataset_nav', kbId] as const,
   list: (kbId: string, keywords = '') =>
     ['dataset_nav', kbId, 'list', keywords] as const,
-  children: (kbId: string, name: string, keywords = '') =>
-    ['dataset_nav', kbId, 'children', name, keywords] as const,
+  children: (
+    kbId: string,
+    name: string,
+    keywords = '',
+    treeMode: NavigationTreeMode = 'hierarchical',
+  ) => ['dataset_nav', kbId, 'children', name, keywords, treeMode] as const,
 };
 
 type DatasetNavResponse<T> = {
@@ -88,6 +96,7 @@ export function useFetchDatasetNav(keywords = '') {
 export function useFetchDatasetNavChildren(
   parentName: string | null,
   keywords = '',
+  treeMode: NavigationTreeMode = 'hierarchical',
 ) {
   const kbId = useKnowledgeBaseId();
   const trimmedKeywords = trim(keywords);
@@ -100,7 +109,12 @@ export function useFetchDatasetNavChildren(
     error,
     refetch,
   } = useQuery<DatasetNavList | null>({
-    queryKey: DatasetNavKeys.children(kbId, parentName ?? '', trimmedKeywords),
+    queryKey: DatasetNavKeys.children(
+      kbId,
+      parentName ?? '',
+      trimmedKeywords,
+      treeMode,
+    ),
     initialData: null,
     enabled,
     gcTime: 0,
@@ -110,6 +124,7 @@ export function useFetchDatasetNavChildren(
         datasetId: kbId,
         name: parentName!,
         keywords: trimmedKeywords,
+        treeMode,
       });
       return unwrapDatasetNavResponse(data);
     },

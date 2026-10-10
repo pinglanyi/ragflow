@@ -3437,6 +3437,8 @@ _NAV_FIELDS = [
     "doc_id",
     "depth_int",
     "parent_kwd",
+    "content_ltks",
+    "content_sm_ltks",
 ]
 
 
@@ -3477,7 +3479,7 @@ def _nav_item(row: dict) -> dict:
         row_type = next(iter(row_type), None)
     is_cluster = (row_type or payload.get("type")) == "nav_cluster"
     return {
-        "name": row.get("name") or "",
+        "name": (row.get("name") or "") if is_cluster else (row.get("doc_id") or row.get("name") or ""),
         "display_name": payload.get("display_name") or row.get("name") or "",
         "description": payload.get("description") or "",
         "keywords": list(payload.get("keywords") or []),
@@ -3488,6 +3490,8 @@ def _nav_item(row: dict) -> dict:
         "type": "cluster" if is_cluster else "doc",
         "doc_id": None if is_cluster else (row.get("doc_id") or row.get("name")),
         "has_children": is_cluster,
+        "parent_kwd": row.get("parent_kwd"),
+        "depth": row.get("depth_int"),
     }
 
 
@@ -3558,19 +3562,28 @@ async def list_nav_clusters(dataset_id: str, tenant_id: str, page: int = 1, page
     return await _nav_search(dataset_id, tenant_id, condition, page, page_size)
 
 
-async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: int = 1, page_size: int = 1000):
+async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: int = 1, page_size: int = 1000, tree_mode: str = "hierarchical"):
     """Direct children of the node ``name`` — sub-clusters and document leaves.
 
     One level at a time (lazy) so the tree loads hierarchically as the user
     expands each node.
     """
+    if tree_mode not in {"hierarchical", "two_layer"}:
+        return False, "tree_mode must be hierarchical or two_layer"
+    if not KnowledgebaseService.accessible(dataset_id, tenant_id):
+        return False, "No authorization."
     if not isinstance(name, str) or not name.strip():
         return True, {"total": 0, "items": []}
     condition = {
         "compile_kwd": [_NAV_COMPILE_KWD],
         "parent_kwd": [name.strip()],
     }
-    success, result = await _nav_search(dataset_id, tenant_id, condition, page, page_size)
+    # A two-layer view resolves the cluster's complete document membership;
+    # the indexed parent-child hierarchy remains intact for tree retrieval.
+    if tree_mode == "two_layer":
+        success, result = True, {"total": 0, "items": []}
+    else:
+        success, result = await _nav_search(dataset_id, tenant_id, condition, page, page_size)
     if not success or result.get("items"):
         return success, result
 
@@ -3621,6 +3634,15 @@ async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: in
             doc_ids=page_doc_ids,
         )
         documents_by_id = {str(doc.get("id")): doc for doc in documents}
+        # Read only this page's navigation leaves, so manual labels and notes
+        # stay visible in the projection. SQL still filters deleted source files.
+        nav_ok, nav_result = await _nav_search(dataset_id, tenant_id, {
+            "compile_kwd": [_NAV_COMPILE_KWD], "type_kwd": ["nav_doc"],
+            "doc_id": page_doc_ids,
+        }, 1, page_size)
+        if not nav_ok:
+            return nav_ok, nav_result
+        nav_by_id = {item["doc_id"]: item for item in nav_result["items"]}
         items = []
         for doc_id in page_doc_ids:
             doc = documents_by_id.get(doc_id)
@@ -3629,6 +3651,13 @@ async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: in
             metadata = doc.get("meta_fields")
             if not isinstance(metadata, dict):
                 metadata = {}
+            if doc_id in nav_by_id:
+                items.append(nav_by_id[doc_id])
+                continue
+            if tree_mode == "two_layer":
+                # Do not resurrect a navigation leaf removed by a manual edit
+                # just because an older ancestor coverage list still names it.
+                continue
             items.append(
                 {
                     "name": doc_id,
@@ -3638,6 +3667,7 @@ async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: in
                     "type": "doc",
                     "doc_id": doc_id,
                     "has_children": False,
+                    "parent_kwd": name.strip(),
                 }
             )
         return True, {"total": len(doc_ids), "items": items}
@@ -3647,7 +3677,83 @@ async def list_nav_children(dataset_id: str, tenant_id: str, name: str, page: in
             dataset_id,
             name.strip(),
         )
+        if tree_mode == "two_layer":
+            return False, "Failed to load navigation documents"
         return success, result
+
+
+async def list_nav_targets(dataset_id: str, tenant_id: str):
+    """Bounded list of topics for the move destination picker."""
+    success, result = await _nav_search(dataset_id, tenant_id, {
+        "compile_kwd": [_NAV_COMPILE_KWD], "type_kwd": ["nav_cluster"],
+    }, 1, 2000)
+    if success and result["total"] > 2000:
+        return False, "Too many navigation topics to edit safely"
+    return success, result
+
+
+async def update_nav_node(dataset_id: str, tenant_id: str, name: str, changes: dict):
+    if not KnowledgebaseService.accessible(dataset_id, tenant_id):
+        return False, "No authorization."
+    _, kb = KnowledgebaseService.get_by_id(dataset_id)
+    lock = await _acquire_nav_lock(dataset_id)
+    if lock is None:
+        return False, "Navigation tree is busy."
+    applied = []
+    index_nm = None
+    try:
+        from copy import deepcopy
+        from common.doc_store.doc_store_base import OrderByExpr
+        from api.apps.services.navigation_tree_edit import edit_navigation_rows
+        from rag.advanced_rag.knowlege_compile.dataset_nav import _tokenize, _fine_tokenize
+
+        pack = _compiled_index_or_none(kb.tenant_id, dataset_id)
+        if pack is None:
+            return False, "Navigation tree not found"
+        index_nm, _ = pack
+        result = await thread_pool_exec(
+            settings.docStoreConn.search, _NAV_FIELDS, [],
+            {"compile_kwd": [_NAV_COMPILE_KWD]}, [], OrderByExpr(),
+            0, 10000, index_nm, [dataset_id],
+        )
+        rows = settings.docStoreConn.get_fields(result, _NAV_FIELDS)
+        if int(settings.docStoreConn.get_total(result) or 0) != len(rows):
+            return False, "Tree is too large or incomplete to edit safely"
+        for row_id, row in rows.items():
+            row["id"] = row_id
+        try:
+            patches = edit_navigation_rows(list(rows.values()), name, changes)
+        except ValueError as exc:
+            return False, str(exc)
+        for row, patch in patches:
+            if "content_with_weight" in patch:
+                payload = json.loads(patch["content_with_weight"])
+                text = f'{payload.get("display_name", row["name"])} {payload.get("description", "")}'
+                patch["content_ltks"] = _tokenize(text)
+                patch["content_sm_ltks"] = _fine_tokenize(patch["content_ltks"])
+            # Partial updates preserve source evidence, vectors and stable IDs.
+            applied.append((row, patch))
+            updated = await thread_pool_exec(settings.docStoreConn.update,
+                {"compile_kwd": [_NAV_COMPILE_KWD], "id": row["id"]},
+                deepcopy(patch), index_nm, dataset_id)
+            if updated is False:
+                raise RuntimeError("Document store rejected navigation update")
+        refresh = getattr(settings.docStoreConn, "refresh_idx", None)
+        if refresh and applied:
+            await thread_pool_exec(refresh, index_nm)
+        return True, {"name": name, "updated": len(patches)}
+    except Exception:
+        logging.exception("Navigation edit failed kb=%s node=%s", dataset_id, name)
+        for original, patch in reversed(applied):
+            try:
+                await thread_pool_exec(settings.docStoreConn.update,
+                    {"id": original["id"], "compile_kwd": [_NAV_COMPILE_KWD]},
+                    {key: original.get(key, "") for key in patch}, index_nm, dataset_id)
+            except Exception:
+                logging.exception("Navigation edit rollback failed kb=%s", dataset_id)
+        return False, "Failed to edit navigation tree; reload before retrying"
+    finally:
+        _release_nav_lock(lock, dataset_id)
 
 
 async def _acquire_nav_lock(dataset_id: str):

@@ -57,6 +57,7 @@ def _load_module(monkeypatch, name: str, relative_path: str):
 
     compile_common = types.ModuleType("rag.advanced_rag.knowlege_compile._common")
     compile_common.encode = lambda *args, **kwargs: []
+    compile_common.knowledge_compile_gen_conf = lambda _model, config: config
     monkeypatch.setitem(
         sys.modules,
         "rag.advanced_rag.knowlege_compile._common",
@@ -264,6 +265,12 @@ def test_replace_dataset_nav_from_clusters_writes_cluster_and_document(monkeypat
                     "description": "Cluster A",
                     "doc_ids": ["doc-1"],
                     "embedding": [0.5, 0.5],
+                    "children": [{
+                        "name": "cluster-a/subtopic",
+                        "display_name": "子主题",
+                        "doc_ids": ["doc-2"],
+                        "documents": [{"doc_id": "doc-2", "name": "two.pdf"}],
+                    }],
                     "documents": [
                         {
                             "doc_id": "doc-1",
@@ -277,7 +284,7 @@ def test_replace_dataset_nav_from_clusters_writes_cluster_and_document(monkeypat
         )
     )
 
-    assert count == 2
+    assert count == 4
     assert calls[0] == (
         "delete",
         {"compile_kwd": ["dataset_nav"]},
@@ -289,3 +296,8 @@ def test_replace_dataset_nav_from_clusters_writes_cluster_and_document(monkeypat
     assert rows[1]["type_kwd"] == "nav_doc"
     assert rows[1]["doc_id"] == "doc-1"
     assert json.loads(rows[1]["content_with_weight"])["display_name"] == "manual.pdf"
+    assert rows[2]["parent_kwd"] == "cluster-a"
+    assert rows[2]["depth_int"] == 1
+    assert json.loads(rows[2]["content_with_weight"])["display_name"] == "子主题"
+    assert rows[3]["parent_kwd"] == "cluster-a/subtopic"
+    assert rows[3]["depth_int"] == 2

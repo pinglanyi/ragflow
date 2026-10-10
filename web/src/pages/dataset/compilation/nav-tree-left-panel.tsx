@@ -8,6 +8,7 @@ import { ITraceInfo, useGenerateStatus } from '@/hooks/use-dataset-generate';
 import {
   DatasetNavList,
   DatasetNavNode,
+  NavigationTreeMode,
 } from '@/interfaces/database/dataset-nav';
 import { IStructureGraphTemplate } from '@/interfaces/database/document-structure';
 import { cn } from '@/lib/utils';
@@ -79,6 +80,8 @@ function NavNodeDeleteAction({
 }
 
 type NavTreeLeftPanelProps = {
+  treeRevision?: number;
+  treeMode?: NavigationTreeMode;
   navList: DatasetNavList | null;
   navLoading: boolean;
   navError?: boolean;
@@ -104,6 +107,8 @@ type NavTreeLeftPanelProps = {
 };
 
 export function NavTreeLeftPanel({
+  treeRevision = 0,
+  treeMode = 'hierarchical',
   navList,
   navLoading,
   navError = false,
@@ -162,6 +167,7 @@ export function NavTreeLeftPanel({
         // them), so it is nested from the payload instead of being fetched
         // branch by branch.
         searchMode: !!activeKeywords,
+        treeMode,
         getActions: renderNavActions,
         onNodeClick,
         onNodeExpand,
@@ -172,6 +178,7 @@ export function NavTreeLeftPanel({
     [
       navList?.items,
       activeKeywords,
+      treeMode,
       childrenMap,
       childrenErrorParents,
       structureMap,
@@ -253,7 +260,7 @@ export function NavTreeLeftPanel({
               </div>
             ) : null}
             <TreeView
-              key={activeKeywords}
+              key={`${treeRevision}:${treeMode}:${activeKeywords}`}
               data={treeData}
               // Search: mount the matched branches open (sentinel trick above).
               expandAll={!!activeKeywords}

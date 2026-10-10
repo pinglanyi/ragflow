@@ -461,7 +461,7 @@ def _make_nav_doc_row(
         "compile_kwd": _COMPILE_KWD,
         "knowledge_graph_kwd": "entity",
         "type_kwd": "nav_doc",
-        "name": f"{parent_kwd}_{xxhash.xxh64(summary.encode()).hexdigest()[:12]}",
+        "name": doc_id,
         "parent_kwd": parent_kwd,
         "depth_int": depth_int,
         "available_int": 0,
@@ -483,28 +483,28 @@ async def replace_dataset_nav_from_clusters(
 ) -> int:
     """Replace a dataset navigation tree from precomputed corpus clusters.
 
-    ``clusters`` is a two-level projection designed for the dataset Tree UI::
+    ``clusters`` preserves nested corpus branches for lazy tree navigation::
 
         [{"name": str, "description": str, "doc_ids": [str],
           "embedding": [float],
-          "documents": [{"doc_id": str, "name": str,
+          "children": [<cluster>, ...], "documents": [{"doc_id": str, "name": str,
                          "description": str, "embedding": [float]}]}]
 
     Corpus-to-Skills already performs the expensive document summarization and
     clustering work.  Reusing that output keeps Tree generation explicit and
     avoids a second LLM pass.  The replace is protected by the same Redis lock
-    as incremental document updates, so readers see either the old tree or the
-    newly generated one.
+    as incremental document updates, preventing concurrent writers from
+    interleaving replacements. The store does not provide multi-row transactions.
     """
     if not tenant_id or not kb_id:
         return 0
 
     rows: list[dict] = []
     seen_docs: set[str] = set()
-    for cluster in clusters or []:
+    def append_cluster(cluster: dict, parent: str, depth: int) -> None:
         name = str(cluster.get("name") or "").strip()
         if not name:
-            continue
+            return
         documents = [doc for doc in (cluster.get("documents") or []) if isinstance(doc, dict)]
         doc_ids = [str(doc_id) for doc_id in (cluster.get("doc_ids") or []) if doc_id]
         rows.append(
@@ -512,12 +512,15 @@ async def replace_dataset_nav_from_clusters(
                 kb_id,
                 name,
                 str(cluster.get("description") or ""),
-                "root",
-                0,
+                parent,
+                depth,
                 doc_ids,
                 list(cluster.get("embedding") or []),
             )
         )
+        payload = json.loads(rows[-1]["content_with_weight"])
+        payload["display_name"] = cluster.get("display_name") or name
+        rows[-1]["content_with_weight"] = json.dumps(payload, ensure_ascii=False)
         for document in documents:
             doc_id = str(document.get("doc_id") or "").strip()
             if not doc_id or doc_id in seen_docs:
@@ -529,11 +532,16 @@ async def replace_dataset_nav_from_clusters(
                     doc_id,
                     str(document.get("description") or ""),
                     name,
-                    1,
+                    depth + 1,
                     embedding=list(document.get("embedding") or []),
                     display_name=str(document.get("name") or ""),
                 )
             )
+        for child in cluster.get("children") or []:
+            append_cluster(child, name, depth + 1)
+
+    for cluster in clusters or []:
+        append_cluster(cluster, "root", 0)
 
     if not rows:
         return 0
@@ -1065,6 +1073,7 @@ async def upsert_dataset_nav_doc(
             await _store_upsert(tenant_id, kb_id, nav_doc_row)
 
             # Check fanout — if the cluster now has too many children, trigger split
+            await _update_nav_ancestor_membership(tenant_id, kb_id, best_name, doc_id, add=True)
             await _maybe_split_cluster(
                 tenant_id,
                 kb_id,
@@ -1076,7 +1085,7 @@ async def upsert_dataset_nav_doc(
         elif best_name and sim >= _MIN_SIM:
             # ── Create new cluster as sibling/child ──
             parent_for_new = best_parent if best_parent else best_name
-            depth_of_parent = 1  # default
+            depth_of_parent = -1 if parent_for_new == "root" else 0
             parent_row = await _store_get(
                 tenant_id,
                 kb_id,
@@ -1092,7 +1101,7 @@ async def upsert_dataset_nav_doc(
                 new_name,
                 new_desc,
                 parent_for_new,
-                depth_of_parent,
+                new_depth,
                 [doc_id],
                 doc_embedding,
             )
@@ -1105,12 +1114,13 @@ async def upsert_dataset_nav_doc(
                 doc_id,
                 summary,
                 new_name,
-                new_depth,
+                new_depth + 1,
                 embd_mdl,
                 doc_embedding,
                 graph_content=graph_content,
             )
             await _store_upsert(tenant_id, kb_id, nav_doc_row)
+            await _update_nav_ancestor_membership(tenant_id, kb_id, parent_for_new, doc_id, add=True)
         else:
             # ── Create root-level new cluster ──
             root_title, new_desc = await _llm_create_summary(chat_mdl, [summary])
@@ -1153,6 +1163,26 @@ async def upsert_dataset_nav_doc(
             logging.exception("dataset_nav: lock release failed for kb=%s", kb_id)
 
 
+async def _update_nav_ancestor_membership(tenant_id: str, kb_id: str, parent: str, doc_id: str, *, add: bool) -> None:
+    """Keep all ancestor coverage lists consistent; retain manually empty topics."""
+    seen: set[str] = set()
+    while parent and parent != "root":
+        if parent in seen or len(seen) >= 64:
+            raise ValueError("Invalid navigation ancestor chain")
+        seen.add(parent)
+        row = await _store_get(tenant_id, kb_id, nav_cluster_id(kb_id, parent))
+        if not row:
+            return
+        members = list(row.get("doc_ids_kwd") or [])
+        if add:
+            members = list(dict.fromkeys([*members, doc_id]))
+        else:
+            members = [item for item in members if item != doc_id]
+        row["doc_ids_kwd"], row["doc_count_int"] = members, len(members)
+        await _store_upsert(tenant_id, kb_id, row)
+        parent = row.get("parent_kwd") or "root"
+
+
 async def _remove_dataset_nav_doc_locked(
     tenant_id: str,
     kb_id: str,
@@ -1167,29 +1197,8 @@ async def _remove_dataset_nav_doc_locked(
     parent_name = doc_row.get("parent_kwd", "")
     await _store_delete(tenant_id, kb_id, doc_row_id)
 
-    # 2. Remove doc_id from the parent cluster's doc_ids_kwd
-    if parent_name and parent_name != "root":
-        cluster_id = nav_cluster_id(kb_id, parent_name)
-        cluster_row = await _store_get(tenant_id, kb_id, cluster_id)
-        if cluster_row:
-            doc_ids = cluster_row.get("doc_ids_kwd") or []
-            if doc_id in doc_ids:
-                doc_ids.remove(doc_id)
-            if not doc_ids:
-                # Cluster is empty — delete it
-                await _store_delete(tenant_id, kb_id, cluster_id)
-                # Recurse: check grandparent
-                grandparent = cluster_row.get("parent_kwd", "")
-                if grandparent and grandparent != "root":
-                    await _cleanup_empty_cluster(
-                        tenant_id,
-                        kb_id,
-                        grandparent,
-                    )
-            else:
-                cluster_row["doc_ids_kwd"] = doc_ids
-                cluster_row["doc_count_int"] = len(doc_ids)
-                await _store_upsert(tenant_id, kb_id, cluster_row)
+    # A multi-level tree requires removing coverage from every ancestor.
+    await _update_nav_ancestor_membership(tenant_id, kb_id, parent_name, doc_id, add=False)
 
 
 async def remove_dataset_nav_doc(
@@ -1199,8 +1208,8 @@ async def remove_dataset_nav_doc(
 ) -> None:
     """Remove a document from the nav clustering tree.
 
-    Cascades: if the parent cluster becomes empty after removal, the cluster
-    itself is also removed.
+    Updates all ancestor document ranges. Empty topics remain available for
+    manual editing and moving.
     """
     if not doc_id or not kb_id:
         return
@@ -1376,9 +1385,9 @@ async def _maybe_split_cluster(
             if row:
                 payload = json.loads(row.get("content_with_weight") or "{}")
                 descs.append(payload.get("description", ""))
-                dids = row.get("doc_ids_kwd") or []
+                dids = [row.get("doc_id")] if is_doc else (row.get("doc_ids_kwd") or [])
                 for d in dids:
-                    if d not in doc_ids:
+                    if d and d not in doc_ids:
                         doc_ids.append(d)
         if descs:
             group_title, group_desc = await _llm_create_summary(chat_mdl, descs)

@@ -16,8 +16,20 @@
 
 import api from '@/utils/api';
 import request from '@/utils/next-request';
+import { NavigationTreeMode } from '@/interfaces/database/dataset-nav';
 
 const datasetNavService = {
+  getNavTargets: (datasetId: string) =>
+    request.get(`${api.getDatasetNav(datasetId)}/targets`),
+  updateNavNode: (
+    datasetId: string,
+    name: string,
+    changes: {
+      display_name?: string;
+      description?: string;
+      parent_name?: string;
+    },
+  ) => request.patch(api.deleteDatasetNavNode(datasetId, name), changes),
   getNav: (params: { datasetId: string; keywords?: string }) =>
     request.get(api.getDatasetNav(params.datasetId), {
       params: { keywords: params.keywords || undefined },
@@ -26,9 +38,13 @@ const datasetNavService = {
     datasetId: string;
     name: string;
     keywords?: string;
+    treeMode?: NavigationTreeMode;
   }) =>
     request.get(api.getDatasetNavChildren(params.datasetId, params.name), {
-      params: { keywords: params.keywords || undefined },
+      params: {
+        keywords: params.keywords || undefined,
+        tree_mode: params.treeMode,
+      },
     }),
   deleteNav: (params: { datasetId: string }) =>
     request.delete(api.deleteDatasetNav(params.datasetId)),

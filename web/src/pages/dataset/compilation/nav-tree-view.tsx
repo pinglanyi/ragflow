@@ -14,12 +14,16 @@ import { useTranslation } from 'react-i18next';
 import { useCompilationNav } from './hooks/use-compilation-nav';
 import { NavCompilingState } from './nav-compiling-state';
 import { NavTreeLeftPanel } from './nav-tree-left-panel';
+import { NavNodeEditor } from './nav-node-editor';
 
 export function NavTreeView() {
   const { t } = useTranslation();
   const isGo = useIsGoBackend();
   const { data: knowledgeBase } = useFetchKnowledgeBaseConfiguration();
   const {
+    treeRevision,
+    treeMode,
+    handleTreeModeChange,
     navList,
     navLoading,
     navError,
@@ -39,6 +43,7 @@ export function NavTreeView() {
     handleEntityClick,
     handleDeleteAll,
     handleDeleteNode,
+    handleNodeUpdated,
   } = useCompilationNav();
 
   const compiling =
@@ -59,15 +64,52 @@ export function NavTreeView() {
     return <NavCompilingState status={navStatus} data={navRunData} />;
   }
 
-  if (!isGo && !navLoading && !navError && !activeKeywords && (navList?.total ?? 0) === 0) {
-    return <CompilationEmptyState type={ViewMode.Tree} disabled={(knowledgeBase?.chunk_count ?? 0) === 0} data={navRunData} />;
+  if (
+    !isGo &&
+    !navLoading &&
+    !navError &&
+    !activeKeywords &&
+    (navList?.total ?? 0) === 0
+  ) {
+    return (
+      <CompilationEmptyState
+        type={ViewMode.Tree}
+        disabled={(knowledgeBase?.chunk_count ?? 0) === 0}
+        data={navRunData}
+      />
+    );
   }
 
   return (
     <Card className="flex-1 min-h-0 overflow-hidden flex border-border-button rounded-xl flex-col">
+      {!isGo && (
+        <div className="flex items-center gap-3 px-3 py-2 border-b border-border-button">
+          <label
+            htmlFor="navigation-tree-mode"
+            className="text-sm text-text-secondary"
+          >
+            {t('knowledgeCompilation.navTreeMode')}
+          </label>
+          <select
+            id="navigation-tree-mode"
+            value={treeMode}
+            onChange={handleTreeModeChange}
+            className="rounded-md border border-border-button bg-bg-base text-text-primary px-2 py-1 text-sm"
+          >
+            <option value="hierarchical">
+              {t('knowledgeCompilation.navHierarchical')}
+            </option>
+            <option value="two_layer">
+              {t('knowledgeCompilation.navTwoLayer')}
+            </option>
+          </select>
+        </div>
+      )}
       <ResizablePanelGroup direction="horizontal" className="flex-1">
         <ResizablePanel defaultSize={33} minSize={20} maxSize={50}>
           <NavTreeLeftPanel
+            treeRevision={treeRevision}
+            treeMode={treeMode}
             navList={navList}
             navLoading={navLoading}
             navError={navError}
@@ -104,6 +146,13 @@ export function NavTreeView() {
                 )}
               </header>
               <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 text-sm text-text-primary space-y-4">
+                {!isGo && selectedNode.editable && (
+                  <NavNodeEditor
+                    key={selectedNode.name}
+                    node={selectedNode}
+                    onSaved={handleNodeUpdated}
+                  />
+                )}
                 <div>
                   <h4 className="text-xs font-medium text-text-secondary mb-1">
                     {t('knowledgeCompilation.description')}
@@ -112,6 +161,12 @@ export function NavTreeView() {
                     {selectedNode.description ||
                       t('knowledgeCompilation.navNoDescription')}
                   </p>
+                  {selectedNode.docId &&
+                    structureMap[selectedNode.docId]?.length === 0 && (
+                      <p className="mt-3 text-text-secondary">
+                        {t('knowledgeCompilation.navDocumentStructureMissing')}
+                      </p>
+                    )}
                 </div>
                 {selectedNode.keywords && selectedNode.keywords.length > 0 && (
                   <div>

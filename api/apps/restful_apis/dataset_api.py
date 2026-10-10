@@ -1091,11 +1091,15 @@ async def list_dataset_navigation_children(tenant_id, dataset_id, name):
     GET /api/v1/datasets/<dataset_id>/navigation/<name>/children
     Success: {"code": 0, "data": {"total": <n>, "items": [{name, description, doc_count, type, doc_id, has_children}, ...]}}
     """
+    tree_mode = request.args.get("tree_mode", "hierarchical")
+    if tree_mode not in {"hierarchical", "two_layer"}:
+        return get_error_data_result(message="tree_mode must be hierarchical or two_layer")
     try:
         success, result = await dataset_api_service.list_nav_children(
             dataset_id,
             tenant_id,
             name,
+            tree_mode=tree_mode,
         )
         if success:
             return get_result(data=result)
@@ -1268,11 +1272,15 @@ async def list_dataset_nav_children(tenant_id, dataset_id, name):
     GET /api/v1/datasets/<dataset_id>/nav/<name>/children
     Success: {"code": 0, "data": {"total": <n>, "items": [{name, description, doc_count, type, doc_id, has_children}, ...]}}
     """
+    tree_mode = request.args.get("tree_mode", "hierarchical")
+    if tree_mode not in {"hierarchical", "two_layer"}:
+        return get_error_data_result(message="tree_mode must be hierarchical or two_layer")
     try:
         success, result = await dataset_api_service.list_nav_children(
             dataset_id,
             tenant_id,
             name,
+            tree_mode=tree_mode,
         )
         if success:
             return get_result(data=result)
@@ -1333,6 +1341,30 @@ async def delete_dataset_nav_node(tenant_id, dataset_id, name):
         return get_error_data_result(message="Internal server error")
 
 
+
+
+@manager.route("/datasets/<dataset_id>/navigation/targets", methods=["GET"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def list_navigation_targets(tenant_id, dataset_id):
+    success, result = await dataset_api_service.list_nav_targets(dataset_id, tenant_id)
+    if success:
+        return get_result(data=result)
+    return get_error_data_result(message=result)
+
+
+@manager.route("/datasets/<dataset_id>/navigation/<path:name>", methods=["PATCH"])  # noqa: F821
+@manager.route("/datasets/<dataset_id>/nav/<path:name>", methods=["PATCH"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def update_navigation_node(tenant_id, dataset_id, name):
+    payload = await request.get_json(silent=True)
+    success, result = await dataset_api_service.update_nav_node(dataset_id, tenant_id, name, payload)
+    if success:
+        return get_result(data=result)
+    if result == "No authorization.":
+        return get_result(data=False, message=result, code=RetCode.AUTHENTICATION_ERROR)
+    return get_error_data_result(message=result)
 
 
 # The two artifact-commit endpoints

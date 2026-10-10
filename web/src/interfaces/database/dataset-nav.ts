@@ -1,3 +1,5 @@
+export type NavigationTreeMode = 'hierarchical' | 'two_layer';
+
 export interface DatasetNavNode {
   name: string;
   display_name?: string;

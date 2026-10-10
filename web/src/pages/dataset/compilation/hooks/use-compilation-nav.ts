@@ -12,7 +12,10 @@ import {
 } from '@/hooks/use-dataset-nav-request';
 import { useFetchDocumentStructureGraphById } from '@/hooks/use-document-request';
 import { useKnowledgeBaseId } from '@/hooks/use-knowledge-request';
-import { DatasetNavNode } from '@/interfaces/database/dataset-nav';
+import {
+  DatasetNavNode,
+  NavigationTreeMode,
+} from '@/interfaces/database/dataset-nav';
 import { IStructureGraphTemplate } from '@/interfaces/database/document-structure';
 import { useIsGoBackend } from '@/utils/backend-variant';
 import { useQueryClient } from '@tanstack/react-query';
@@ -28,6 +31,7 @@ export interface SelectedNavNode {
   description: string;
   displayName?: string;
   docId?: string;
+  editable?: boolean;
   doc_count?: number;
   keywords?: string[];
   entities?: string[];
@@ -35,6 +39,18 @@ export interface SelectedNavNode {
 }
 
 export function useCompilationNav() {
+  const [treeRevision, setTreeRevision] = useState(0);
+  const [treeMode, setTreeMode] = useState<NavigationTreeMode>('hierarchical');
+  const handleTreeModeChange = useCallback(
+    (event: React.ChangeEvent<HTMLSelectElement>) => {
+      const mode = event.target.value;
+      if (mode === 'hierarchical' || mode === 'two_layer') {
+        setTreeMode(mode);
+        setSelectedNode(null);
+      }
+    },
+    [],
+  );
   const kbId = useKnowledgeBaseId();
   const [keywords, setKeywords] = useState('');
   const debouncedKeywords = useDebounce(keywords, { wait: 500 });
@@ -66,7 +82,7 @@ export function useCompilationNav() {
   );
 
   const { data: childrenData, isError: childrenError } =
-    useFetchDatasetNavChildren(loadingParent, activeKeywords);
+    useFetchDatasetNavChildren(loadingParent, activeKeywords, treeMode);
   // Opened documents get their FULL structure graph, without the nav keywords: a
   // keyword-filtered read would hide every entity that does not match (keyword
   // drill-down lives in the structure view's own search box).
@@ -125,6 +141,7 @@ export function useCompilationNav() {
   }, [loadingDocId, structureData, structurePlaceholder]);
 
   const clearExpandedData = useCallback(() => {
+    setTreeRevision((revision) => revision + 1);
     setChildrenMap({});
     setChildrenErrorParents({});
     setLoadingParent(null);
@@ -136,7 +153,7 @@ export function useCompilationNav() {
     // Loaded children/graphs were fetched under the previous keywords filter;
     // drop them so re-expansion refetches under the active filter.
     clearExpandedData();
-  }, [activeKeywords, clearExpandedData]);
+  }, [activeKeywords, treeMode, clearExpandedData]);
 
   const queryClient = useQueryClient();
   const isGo = useIsGoBackend();
@@ -144,7 +161,9 @@ export function useCompilationNav() {
   // Poll the Tree-scoped scheduler status (kind "raptor" normalizes to "Tree")
   // so the view can surface compile progress/logs and refresh the tree when a
   // run ends. Python keeps the read-only behavior (no polling, no log UI).
-  const { data: navRunData } = useTraceRunData(isGo ? GenerateType.Raptor : GenerateType.ToSkills);
+  const { data: navRunData } = useTraceRunData(
+    isGo ? GenerateType.Raptor : GenerateType.ToSkills,
+  );
   const { status: navStatus } = useGenerateStatus(navRunData);
 
   const handleCompileRunEnd = useCallback(() => {
@@ -243,6 +262,8 @@ export function useCompilationNav() {
         parentName,
         name: node.name,
         displayName: node.display_name || node.name,
+        docId: node.doc_id,
+        editable: true,
         description: node.description,
         doc_count: node.doc_count,
         keywords: node.keywords,
@@ -282,6 +303,11 @@ export function useCompilationNav() {
       resetNav();
     }
   }, [deleteNav, resetNav]);
+
+  const handleNodeUpdated = useCallback(() => {
+    resetNav();
+    queryClient.invalidateQueries({ queryKey: DatasetNavKeys.all(kbId) });
+  }, [resetNav, queryClient, kbId]);
 
   const handleDeleteNode = useCallback(
     async (name: string, parentName: string | null) => {
@@ -323,6 +349,9 @@ export function useCompilationNav() {
   );
 
   return {
+    treeRevision,
+    treeMode,
+    handleTreeModeChange,
     navList,
     navLoading,
     navError,
@@ -342,5 +371,6 @@ export function useCompilationNav() {
     handleEntityClick,
     handleDeleteAll,
     handleDeleteNode,
+    handleNodeUpdated,
   };
 }

@@ -5,7 +5,10 @@ import {
 } from '@/components/structure-graph/adapters';
 import { TreeDataItem } from '@/components/ui/tree-view';
 import { CompilationTemplateKind } from '@/constants/compilation';
-import { DatasetNavNode } from '@/interfaces/database/dataset-nav';
+import {
+  DatasetNavNode,
+  NavigationTreeMode,
+} from '@/interfaces/database/dataset-nav';
 import {
   IStructureGraphEntity,
   IStructureGraphTemplate,
@@ -34,6 +37,7 @@ type BuildNavTreeDataOptions = {
    * so branches come from the payload instead of a lazy /children request.
    */
   searchMode?: boolean;
+  treeMode?: NavigationTreeMode;
   getActions?: NavTreeActionsFactory;
   onNodeClick: (node: DatasetNavNode, parentName: string | null) => void;
   onNodeExpand: (node: DatasetNavNode) => void;
@@ -255,6 +259,28 @@ export function buildNavTreeData(
 ): TreeDataItem[] {
   if (options.searchMode) {
     const forest = nestNavSearchHits(items);
+    if (options.treeMode === 'two_layer') {
+      // Search already returns ancestor paths; project them without another
+      // request or dropping document structures attached below the leaves.
+      const flatten = (
+        nodes: DatasetNavNode[],
+        visited = new Set<string>(),
+      ): DatasetNavNode[] =>
+        nodes.flatMap((node) => {
+          const identity = navNodeIdentity(node);
+          if (visited.has(identity)) return [];
+          visited.add(identity);
+          return node.doc_id
+            ? [node]
+            : flatten(forest.children[identity] ?? [], visited);
+        });
+      for (const root of forest.roots) {
+        if (!root.doc_id) {
+          const identity = navNodeIdentity(root);
+          forest.children[identity] = flatten(forest.children[identity] ?? []);
+        }
+      }
+    }
     return buildNavSearchTreeData(
       forest.roots,
       forest,

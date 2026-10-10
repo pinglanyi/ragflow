@@ -1,4 +1,7 @@
-import { adaptTreeToTreeData } from '@/components/structure-graph/adapters';
+import {
+  adaptPageIndexToTreeData,
+  adaptTreeToTreeData,
+} from '@/components/structure-graph/adapters';
 import { CompilationTemplateKind } from '@/constants/compilation';
 
 import { buildNavTreeData, nestNavSearchHits } from './nav-tree';
@@ -106,6 +109,56 @@ describe('nestNavSearchHits', () => {
 
 describe('buildNavTreeData (search mode)', () => {
   const SearchOptions = { ...TreeOptions, childrenMap: {}, searchMode: true };
+
+  it('projects deep search branches into two layers and preserves PageIndex sections', () => {
+    jest.mocked(adaptPageIndexToTreeData).mockReturnValueOnce([
+      {
+        id: 'section-1',
+        name: '开模',
+        children: [{ id: 'section-2', name: '破模' }],
+      },
+    ]);
+    const onEntityClick = jest.fn();
+    const data = buildNavTreeData(
+      [
+        clusterIn('产品', 'root'),
+        clusterIn('注塑机', '产品'),
+        clusterIn('开模控制', '注塑机'),
+        doc('d1', '操作手册.pdf', '开模控制'),
+      ],
+      {
+        ...SearchOptions,
+        treeMode: 'two_layer',
+        onEntityClick,
+        structureMap: {
+          d1: [
+            {
+              template_id: 'page-index',
+              template_name: '章节目录',
+              kind: CompilationTemplateKind.PageIndex,
+              entities: [
+                { id: 'section-1', name: '开模' },
+                { id: 'section-2', name: '破模', description: '原文说明' },
+              ],
+              relations: [],
+            },
+          ],
+        },
+      },
+    );
+    expect(data[0].children?.map((child) => child.name)).toEqual([
+      '操作手册.pdf',
+    ]);
+    const section = data[0].children?.[0].children?.[0];
+    expect(section?.name).toBe('开模');
+    expect(section?.children?.[0].name).toBe('破模');
+    section?.children?.[0].onClick?.();
+    expect(onEntityClick).toHaveBeenCalledWith(
+      expect.objectContaining({ doc_id: 'd1' }),
+      '破模',
+      '原文说明',
+    );
+  });
 
   it('renders ONE tree per root cluster holding only the matched branches', () => {
     const data = buildNavTreeData(
