@@ -1969,6 +1969,14 @@ class RAGFlowPdfParser:
             if not valid_pns:
                 logging.warning(f"All page indices {pns} out of range for {page_count} pages; skipping.")
                 continue
+            if not np.isfinite([left, right, top, bottom]).all():
+                logging.warning("Non-finite coordinates in crop; skipping this position.")
+                continue
+            left, right = sorted((left, right))
+            # A multi-page tag stores top on the first page and bottom on the
+            # last page, so only single-page vertical bounds can be reordered.
+            if len(valid_pns) == 1:
+                top, bottom = sorted((top, bottom))
             filtered_poss.append((valid_pns, left, right, top, bottom))
 
         poss = filtered_poss
@@ -2002,36 +2010,32 @@ class RAGFlowPdfParser:
         )
 
         positions = []
+        context_images = []
         for ii, (pns, left, right, top, bottom) in enumerate(poss):
-            if 0 < ii < len(poss) - 1:
-                right = max(left + 10, right)
-            else:
-                right = left + max_width
-            bottom *= ZM
-            for pn in pns[1:]:
-                if 0 <= pn - 1 < page_count:
-                    bottom += self.page_images[pn - 1].size[1]
-                else:
-                    logging.warning(f"Page index {pn}-1 out of range for {page_count} pages during crop; skipping height accumulation.")
-
-            if not (0 <= pns[0] < page_count):
-                logging.warning(f"Base page index {pns[0]} out of range for {page_count} pages during crop; skipping this segment.")
-                continue
-
-            imgs.append(self.page_images[pns[0]].crop((left * ZM, top * ZM, right * ZM, min(bottom, self.page_images[pns[0]].size[1]))))
-            if 0 < ii < len(poss) - 1:
-                positions.append((pns[0] + self.page_from, left, right, top, min(bottom, self.page_images[pns[0]].size[1]) / ZM))
-            bottom -= self.page_images[pns[0]].size[1]
-            for pn in pns[1:]:
-                if not (0 <= pn < page_count):
-                    logging.warning(f"Page index {pn} out of range for {page_count} pages during crop; skipping this page.")
+            is_context = ii == 0 or ii == len(poss) - 1
+            right = left + max_width if is_context else max(left + 10, right)
+            for page_index, pn in enumerate(pns):
+                page = self.page_images[pn]
+                width, height = page.size
+                # Split cross-page tags before clamping to each page's size.
+                # Never pass an inverted or empty rectangle to Pillow.
+                x0 = max(0, min(left * ZM, width))
+                x1 = max(0, min(right * ZM, width))
+                y0 = max(0, min(top * ZM if page_index == 0 else 0, height))
+                y1 = max(0, min(bottom * ZM if page_index == len(pns) - 1 else height, height))
+                if round(x1) <= round(x0) or round(y1) <= round(y0):
+                    if not is_context:
+                        logging.warning(
+                            "Skipping empty DeepDOC crop: page=%s bounds=%s page_size=%s",
+                            pn + self.page_from, (left, right, top, bottom), page.size,
+                        )
                     continue
-                imgs.append(self.page_images[pn].crop((left * ZM, 0, right * ZM, min(bottom, self.page_images[pn].size[1]))))
-                if 0 < ii < len(poss) - 1:
-                    positions.append((pn + self.page_from, left, right, 0, min(bottom, self.page_images[pn].size[1]) / ZM))
-                bottom -= self.page_images[pn].size[1]
+                imgs.append(page.crop((x0, y0, x1, y1)))
+                context_images.append(is_context)
+                if not is_context:
+                    positions.append((pn + self.page_from, x0 / ZM, x1 / ZM, y0 / ZM, y1 / ZM))
 
-        if not imgs:
+        if not positions:
             if need_position:
                 return None, None
             return
@@ -2042,8 +2046,8 @@ class RAGFlowPdfParser:
         width = int(np.max([i.size[0] for i in imgs]))
         pic = Image.new("RGB", (width, height), (245, 245, 245))
         height = 0
-        for ii, img in enumerate(imgs):
-            if ii == 0 or ii + 1 == len(imgs):
+        for img, is_context in zip(imgs, context_images):
+            if is_context:
                 img = img.convert("RGBA")
                 overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
                 overlay.putalpha(128)
