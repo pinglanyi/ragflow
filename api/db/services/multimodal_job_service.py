@@ -30,6 +30,8 @@ def build_config(kb_config, doc_config, overrides, filename):
     allowed = {"enabled", "mode", "model", "prompt", "router_prompt", "router_max_tokens", "max_tokens", "enable_thinking", "model_revision", "reuse"}
     if set(overrides) - allowed:
         raise ValueError("Unknown multimodal fields: " + ", ".join(sorted(set(overrides) - allowed)))
+    if "enabled" in overrides and overrides["enabled"] is not True:
+        raise ValueError("This endpoint requires multimodal enabled=true")
     cfg = deepcopy(kb_config or {})
     cfg.update(deepcopy(doc_config or {}))
     options = {"enabled": True, "mode": "full", "prompt": "", "router_prompt": "", "router_max_tokens": 64, "max_tokens": 8192, "enable_thinking": False, "model_revision": "", "reuse": True}

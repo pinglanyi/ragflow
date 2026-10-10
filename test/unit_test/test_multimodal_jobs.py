@@ -16,6 +16,8 @@ from unittest.mock import Mock
 import peewee as pw
 from playhouse.sqlite_ext import JSONField
 
+from common.llm_request_context import normalize_llm_user_id
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -275,6 +277,7 @@ class JobsTest(unittest.TestCase):
             "seed_doc_chunking_counter": lambda *a: True,
             "abort_doc_chunking_counter": Mock(),
             "REDIS_CONN": types.SimpleNamespace(queue_product=publish),
+            "normalize_llm_user_id": normalize_llm_user_id,
         }
         exec(compile(ast.Module(body=[queue], type_ignores=[]), "<real-queue>", "exec"), ns)
         ns["queue_tasks"]({"id": "doc", "kb_id": "kb", "type": "visual", "parser_id": "picture", "_multimodal_job_id": self.job.id}, "bucket", "name", 0)

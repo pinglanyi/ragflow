@@ -172,7 +172,12 @@ def test_model(tenant_id, model_ref, model_type):
                     messages=[{"role": "user", "content": content}],
                     max_tokens=8,
                 )
-                ok = bool(response.choices and response.choices[0].message.content)
+                # A small probe budget may be consumed by a reasoning model
+                # before final text is emitted; reasoning still proves connectivity.
+                ok = bool(response.choices and (
+                    response.choices[0].message.content
+                    or getattr(response.choices[0].message, "reasoning_content", None)
+                ))
                 usage = response.usage.model_dump() if response.usage else {}
         return {
             "ok": ok,
