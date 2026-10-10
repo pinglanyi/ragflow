@@ -64,6 +64,20 @@ def _is_query_string_clause(clause: dict) -> bool:
     return isinstance(clause, dict) and "query_string" in clause
 
 
+def _navigation_parent_filter(value):
+    """Match navigation identities in keyword and dynamically mapped indices.
+
+    Some existing tenant indices mapped parent_kwd as text + keyword. Never
+    match its analyzed tokens when the exact subfield is available.
+    """
+    kind = "terms" if isinstance(value, list) else "term"
+    return Q("bool", should=[
+        Q(kind, **{"parent_kwd.keyword": value}),
+        Q("bool", filter=[Q(kind, parent_kwd=value)],
+          must_not=[Q("exists", field="parent_kwd.keyword")]),
+    ], minimum_should_match=1)
+
+
 def _remove_query_string_must_clauses(must_clauses):
     if isinstance(must_clauses, list):
         return [copy.deepcopy(clause) for clause in must_clauses if not _is_query_string_clause(clause)]
@@ -201,6 +215,9 @@ class ESConnection(ESConnectionBase):
         bool_query = Q("bool", must=[])
         condition["kb_id"] = knowledgebase_ids
         for k, v in condition.items():
+            if k == "parent_kwd" and v:
+                bool_query.filter.append(_navigation_parent_filter(v))
+                continue
             if k == "available_int":
                 if v == 0:
                     bool_query.filter.append(Q("range", available_int={"lt": 1}))
@@ -435,6 +452,9 @@ class ESConnection(ESConnectionBase):
         for k, v in condition.items():
             if not isinstance(k, str) or not v:
                 continue
+            if k == "parent_kwd":
+                bool_query.filter.append(_navigation_parent_filter(v))
+                continue
             if k == "exists":
                 bool_query.filter.append(Q("exists", field=v))
                 continue
@@ -576,6 +596,9 @@ class ESConnection(ESConnectionBase):
         for k, v in condition.items():
             if k == "id":
                 continue  # Already handled above
+            if k == "parent_kwd" and v:
+                bool_query.filter.append(_navigation_parent_filter(v))
+                continue
             if k == "exists":
                 bool_query.filter.append(Q("exists", field=v))
             elif k == "must_not":
