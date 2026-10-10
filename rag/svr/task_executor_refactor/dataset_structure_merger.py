@@ -53,6 +53,7 @@ from rag.advanced_rag.knowlege_compile._common import (
 )
 from rag.nlp import search
 from rag.svr.task_executor_refactor.task_context import TaskContext
+from rag.svr.task_executor_refactor.compile_policy import strict_compilation
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -138,6 +139,9 @@ async def _index_search(
     index = _index_name(tenant_id)
     if not settings.docStoreConn.index_exist(index, kb_id):
         return []
+    order = OrderByExpr()
+    if strict_compilation.get():
+        order.asc('doc_id').asc('name_kwd').asc('from_entity_kwd').asc('to_entity_kwd').asc('structure_row_id_kwd')
     try:
         res = await thread_pool_exec(
             settings.docStoreConn.search,
@@ -145,7 +149,7 @@ async def _index_search(
             [],
             condition,
             [],
-            OrderByExpr(),
+            order,
             offset,
             limit,
             index,
@@ -155,6 +159,8 @@ async def _index_search(
         return list(field_map.values())
     except Exception:
         logging.exception("structure_merge: search failed for kb=%s", kb_id)
+        if strict_compilation.get():
+            raise
         return []
 
 
@@ -164,6 +170,8 @@ async def _index_delete(tenant_id: str, kb_id: str, condition: dict) -> None:
         await thread_pool_exec(settings.docStoreConn.delete, condition, index, kb_id)
     except Exception:
         logging.exception("structure_merge: delete failed for kb=%s cond=%s", kb_id, condition)
+        if strict_compilation.get():
+            raise
 
 
 async def _index_insert(tenant_id: str, kb_id: str, rows: list[dict]) -> None:
@@ -173,11 +181,15 @@ async def _index_insert(tenant_id: str, kb_id: str, rows: list[dict]) -> None:
     try:
         insert = settings.docStoreConn.insert
         if _supports_bulk_refresh(type(settings.docStoreConn)):
-            await thread_pool_exec(insert, rows, index, kb_id, refresh=False)
+            errors = await thread_pool_exec(insert, rows, index, kb_id, refresh=False)
         else:
-            await thread_pool_exec(insert, rows, index, kb_id)
+            errors = await thread_pool_exec(insert, rows, index, kb_id)
+        if strict_compilation.get() and errors:
+            raise RuntimeError(f'Structure aggregation write failed: {str(errors)[:500]}')
     except Exception:
         logging.exception("structure_merge: insert failed for kb=%s", kb_id)
+        if strict_compilation.get():
+            raise
 
 
 async def _refresh_index(tenant_id: str, kb_id: str) -> None:
@@ -189,6 +201,8 @@ async def _refresh_index(tenant_id: str, kb_id: str) -> None:
         await thread_pool_exec(refresh_idx, _index_name(tenant_id))
     except Exception:
         logging.exception("structure_merge: final index refresh failed for kb=%s", kb_id)
+        if strict_compilation.get():
+            raise
 
 
 async def _embed_rows(embd_mdl, rows: list[dict], texts: list[str]) -> None:

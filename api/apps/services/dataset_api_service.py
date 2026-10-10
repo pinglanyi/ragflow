@@ -587,7 +587,7 @@ def delete_knowledge_graph(dataset_id: str, tenant_id: str):
     return True, True
 
 
-def run_index(dataset_id: str, tenant_id: str, index_type: str):
+def run_index(dataset_id: str, tenant_id: str, index_type: str, compile_existing_chunks: bool = False):
     """
     Run an indexing task (graph/raptor/mindmap) for a dataset.
 
@@ -598,6 +598,8 @@ def run_index(dataset_id: str, tenant_id: str, index_type: str):
     """
     if index_type not in _VALID_INDEX_TYPES:
         return False, f"Invalid index type '{index_type}'. Must be one of {sorted(_VALID_INDEX_TYPES)}"
+    if compile_existing_chunks and index_type != 'structure':
+        return False, 'Existing-chunk compilation requires structure type'
 
     if not dataset_id:
         return False, 'Lack of "Dataset ID"'
@@ -612,8 +614,11 @@ def run_index(dataset_id: str, tenant_id: str, index_type: str):
     task_id_field = _INDEX_TYPE_TO_TASK_ID_FIELD[index_type]
     display_name = _INDEX_TYPE_TO_DISPLAY_NAME[index_type]
 
-    existing_task_id = getattr(kb, task_id_field, None)
-    if existing_task_id:
+    task_fields = [task_id_field]
+    if compile_existing_chunks:
+        task_fields += ['graphrag_task_id', 'mindmap_task_id', 'timeline_task_id',
+                        'structure_graph_task_id', 'structure_mindmap_task_id']
+    for existing_task_id in {getattr(kb, field, None) for field in task_fields} - {None, ''}:
         ok, task = TaskService.get_by_id(existing_task_id)
         if not ok:
             logging.warning(f"A valid {display_name} task id is expected for Dataset {dataset_id}")
@@ -642,9 +647,10 @@ def run_index(dataset_id: str, tenant_id: str, index_type: str):
     sample_document = documents[0]
     document_ids = [document["id"] for document in documents]
 
-    task_id = queue_raptor_o_graphrag_tasks(sample_doc=sample_document, ty=task_type, priority=0, fake_doc_id=GRAPH_RAPTOR_FAKE_DOC_ID, doc_ids=list(document_ids))
+    options = {'compile_existing_chunks': True} if compile_existing_chunks else {}
+    task_id = queue_raptor_o_graphrag_tasks(sample_doc=sample_document, ty=task_type, priority=0, fake_doc_id=GRAPH_RAPTOR_FAKE_DOC_ID, doc_ids=list(document_ids), **options)
 
-    if not KnowledgebaseService.update_by_id(kb.id, {task_id_field: task_id}):
+    if not KnowledgebaseService.update_by_id(kb.id, {field: task_id for field in task_fields}):
         logging.warning(f"Cannot save {task_id_field} for Dataset {dataset_id}")
 
     return True, {"task_id": task_id}

@@ -1431,6 +1431,19 @@ async def update_wiki_page(tenant_id, dataset_id, page_type, slug):
         return get_error_data_result(message="Internal server error")
 
 
+@manager.route('/datasets/<dataset_id>/compile-existing', methods=['POST'])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def compile_existing(tenant_id, dataset_id):
+    """Compile existing source chunks and aggregate Graph, Mind map, Timeline."""
+    try:
+        success, result = dataset_api_service.run_index(dataset_id, tenant_id, 'structure', compile_existing_chunks=True)
+        return get_result(data=result) if success else get_error_data_result(message=result)
+    except Exception:
+        logging.exception('Existing-chunk compilation could not be queued')
+        return get_error_data_result(message='Failed to queue existing-chunk compilation')
+
+
 @manager.route("/datasets/<dataset_id>/index", methods=["POST"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs

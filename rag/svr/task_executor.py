@@ -300,6 +300,8 @@ async def collect():
 
     task_type = msg.get("task_type", "")
     task["task_type"] = task_type
+    if msg.get('compile_existing_chunks') and task_type in ('structure', 'structure_graph', 'structure_mindmap', 'timeline'):
+        task['compile_existing_chunks'] = True
     # Per-doc fan-out task types (today: doc-scoped raptor) carry their
     # participating doc id list on the Redis message but not on the DB
     # row. The KB-scoped branch above already does this for FAKE doc

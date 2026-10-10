@@ -291,6 +291,10 @@ class TaskHandler:
                     self._load_chunks_for_doc,
                 )
             elif is_structure_merge_task(task_type):
+                if self._task_context.get('compile_existing_chunks'):
+                    from rag.svr.task_executor_refactor.existing_chunks_compiler import run_existing_chunks_compile
+                    await run_existing_chunks_compile(self._task_context, embedding_model)
+                    return
                 from rag.svr.task_executor_refactor.dataset_structure_merger import (
                     run_structure_merge,
                 )

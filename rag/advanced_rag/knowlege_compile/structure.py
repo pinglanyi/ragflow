@@ -1561,6 +1561,9 @@ async def _struct_process_batch(
             )
         except Exception as e:
             logging.exception(f"compile_structure_from_text: extraction failed for batch {batch_idx}: {e}")
+            from rag.svr.task_executor_refactor.compile_policy import strict_compilation
+            if strict_compilation.get():
+                raise
             return _RechunkedDocs()
 
         # Validate claim evidence while the batch's source text is still in
@@ -2542,6 +2545,9 @@ async def _struct_doc_storage_dedup_batch(
             vectors = await _struct_embed(embd_mdl, texts)
         except Exception:
             logging.exception("merge_compiled_structures: grouped embedding failed for %d docs", len(batch))
+            from rag.svr.task_executor_refactor.compile_policy import strict_compilation
+            if strict_compilation.get():
+                raise
             vectors = []
         for job, vec in zip(batch, vectors):
             job["rebuilt"] = _struct_rebuild_doc_storage_doc(
@@ -2563,7 +2569,13 @@ async def _struct_doc_storage_dedup_batch(
         if not batch:
             continue
         try:
-            await thread_pool_exec(settings.docStoreConn.insert, batch, index, kb_id)
+            from rag.svr.task_executor_refactor.compile_policy import strict_compilation
+            if strict_compilation.get():
+                for row in batch:
+                    row['structure_row_id_kwd'] = row['id']
+            write_errors = await thread_pool_exec(settings.docStoreConn.insert, batch, index, kb_id)
+            if strict_compilation.get() and write_errors:
+                raise RuntimeError(f'Structure write failed: {str(write_errors)[:500]}')
             updated_in_batch = sum(1 for doc in batch if any(doc is job.get("rebuilt") for job in updated_jobs))
             updated += updated_in_batch
             inserted += len(batch) - updated_in_batch
@@ -2574,6 +2586,9 @@ async def _struct_doc_storage_dedup_batch(
                     successful_entity_aliases.update(job.get("entity_aliases") or {})
         except Exception:
             logging.exception("merge_compiled_structures: bulk insert failed for %d docs", len(batch))
+            from rag.svr.task_executor_refactor.compile_policy import strict_compilation
+            if strict_compilation.get():
+                raise
 
     # Only publish aliases after the canonical entity writes have completed.
     entity_aliases.update(successful_entity_aliases)
@@ -3924,6 +3939,9 @@ async def merge_compiled_structures(
         )
     except Exception:
         logging.exception("merge_compiled_structures: batched ES dedup failed")
+        from rag.svr.task_executor_refactor.compile_policy import strict_compilation
+        if strict_compilation.get():
+            raise
         inserted = updated = 0
     finally:
         if merge_lock is not None:
@@ -3954,6 +3972,9 @@ async def merge_compiled_structures(
                 compile_kwd,
                 template_id,
             )
+            from rag.svr.task_executor_refactor.compile_policy import strict_compilation
+            if strict_compilation.get():
+                raise
 
     info = {
         "inserted": inserted,

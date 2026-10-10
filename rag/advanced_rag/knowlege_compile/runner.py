@@ -431,6 +431,7 @@ async def run_structure_compile_over_batches(
         )
 
     async def _commit_result(batch_no: int, batch_len: int, template_id: str, docs: list[dict]) -> None:
+        agg_infos[template_id]['output_count'] = agg_infos[template_id].get('output_count', 0) + len(docs)
         if docs:
             accumulators[template_id].extend(docs)
         rechunked_chunks = getattr(docs, "rechunked_chunks", None)
@@ -649,6 +650,7 @@ async def run_structure_compile_over_batches(
         if cancel_check():
             raise TaskCanceledException("Task was cancelled during document knowledge compilation")
         agg = agg_infos[template_id]
+        agg['compile_kwds'] = sorted(compile_kwds_by_tid[template_id])
         if record:
             recorded_agg = {key: value for key, value in agg.items() if key != "rechunked_chunks"}
             recorded_agg["rechunked_chunk_count"] = len(agg.get("rechunked_chunks") or [])

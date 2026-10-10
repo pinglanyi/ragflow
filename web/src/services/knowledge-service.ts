@@ -377,6 +377,9 @@ export const updateKb = (datasetId: string, data: Record<string, any>) =>
 export const runIndex = (datasetId: string, indexType: string) =>
   request.post(api.runIndex(datasetId, indexType));
 
+export const compileExistingChunks = (datasetId: string) =>
+  request.post(api.compileExistingChunks(datasetId));
+
 export const traceIndex = (datasetId: string, indexType: string) =>
   request.get(api.traceIndex(datasetId, indexType));
 

@@ -1,4 +1,5 @@
 import BackButton from '@/components/back-button';
+import { BackendVariant } from '@/utils/backend-variant';
 import {
   SelectWithSearch,
   type SelectWithSearchFlagOptionType,
@@ -20,6 +21,7 @@ import { DatasetStructureView } from './dataset-structure-view';
 import { LlmWikiView } from './llm-wiki-view';
 import { NavTreeView } from './nav-tree-view';
 import { SkillsView } from './skills-view';
+import { CompileExistingButton } from './compile-existing-button.python';
 
 export default function Compilation() {
   const { t } = useTranslation();
@@ -69,6 +71,15 @@ export default function Compilation() {
           />
         </section>
       </header>
+
+      <BackendVariant
+        python={
+          <CompileExistingButton
+            enabled={(knowledgeBase?.chunk_count ?? 0) > 0}
+          />
+        }
+        go={null}
+      />
 
       {viewMode === ViewMode.LlmWiki && <LlmWikiView />}
       {viewMode === ViewMode.Skills && <SkillsView />}

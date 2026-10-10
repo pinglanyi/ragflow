@@ -1345,7 +1345,7 @@ class DocumentService(CommonService):
             return queue_tasks(doc, bucket, name, 0, user_id=llm_user_id)
 
 
-def queue_raptor_o_graphrag_tasks(sample_doc, ty, priority, fake_doc_id="", doc_ids=None):
+def queue_raptor_o_graphrag_tasks(sample_doc, ty, priority, fake_doc_id="", doc_ids=None, compile_existing_chunks=False):
     """
     You can provide a fake_doc_id to bypass the restriction of tasks at the knowledgebase level.
     Optionally, specify a list of doc_ids to determine which documents participate in the task.
@@ -1391,6 +1391,8 @@ def queue_raptor_o_graphrag_tasks(sample_doc, ty, priority, fake_doc_id="", doc_
     bulk_insert_into_db(Task, [task], True)
 
     task["doc_ids"] = doc_ids
+    if compile_existing_chunks:
+        task['compile_existing_chunks'] = True
     DocumentService.begin2parse(task["doc_id"], keep_progress=True)
     assert REDIS_CONN.queue_product(settings.get_svr_queue_name(priority, ty), message=task), "Can't access Redis. Please check the Redis' status."
     return task["id"]

@@ -231,6 +231,8 @@ export default {
   listPipelines: `${restAPIv1}/pipelines?type=builtin`,
   runIndex: (datasetId: string, indexType: string) =>
     `${restAPIv1}/datasets/${datasetId}/index?type=${indexType.toLowerCase()}`,
+  compileExistingChunks: (datasetId: string) =>
+    `${restAPIv1}/datasets/${datasetId}/compile-existing`,
   traceIndex: (datasetId: string, indexType: string) =>
     `${restAPIv1}/datasets/${datasetId}/index?type=${indexType.toLowerCase()}`,
   // Go scheduler compile-status contract.
