@@ -1074,14 +1074,18 @@ async def _compose_answer_from_evidence(state: AgenticState, tools, token_queue:
     question = state.get("question") or ""
     partial = state.get("partial_answer", False)
     abstain = state.get("abstain", False)
-    empty_result = state.get("empty_result", False)
 
     _note = " — partial answer, some gaps remain" if partial else (" — not enough evidence to answer" if abstain else "")
     _LOG.info('[Composing the answer] Writing the final answer to "%s" from %d gathered passage(s)%s.', _snip(question), len(kbinfos["chunks"]), _note)
 
     tools.kbinfos = kbinfos
 
-    no_evidence = abstain or empty_result or not kbinfos["chunks"]
+    # The materialized evidence pool is authoritative at composition time.
+    # ``empty_result`` is a retrieval-stage marker and can remain true after a
+    # later agentic research pass has populated the pool. Treating that stale
+    # marker as stronger than the actual chunks made medium/high/ultra discard
+    # valid evidence and return the configured empty response.
+    no_evidence = abstain or not kbinfos["chunks"]
     if no_evidence and getattr(tools, "empty_response", ""):
         _LOG.info("[Composing the answer] No supporting evidence was found; returning the configured empty response without calling the answer model.")
         token_queue.put_nowait(tools.empty_response)
