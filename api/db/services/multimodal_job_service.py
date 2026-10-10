@@ -27,14 +27,14 @@ def build_config(kb_config, doc_config, overrides, filename):
     }
     if suffix not in supported:
         raise ValueError("This file type cannot be rendered for multimodal parsing")
-    allowed = {"enabled", "mode", "model", "prompt", "router_prompt", "router_max_tokens", "max_tokens", "enable_thinking", "model_revision", "reuse"}
+    allowed = {"enabled", "mode", "model", "prompt", "description_prompt", "router_prompt", "router_max_tokens", "max_tokens", "enable_thinking", "model_revision", "reuse"}
     if set(overrides) - allowed:
         raise ValueError("Unknown multimodal fields: " + ", ".join(sorted(set(overrides) - allowed)))
     if "enabled" in overrides and overrides["enabled"] is not True:
         raise ValueError("This endpoint requires multimodal enabled=true")
     cfg = deepcopy(kb_config or {})
     cfg.update(deepcopy(doc_config or {}))
-    options = {"enabled": True, "mode": "full", "prompt": "", "router_prompt": "", "router_max_tokens": 64, "max_tokens": 8192, "enable_thinking": False, "model_revision": "", "reuse": True}
+    options = {"enabled": True, "mode": "full", "prompt": "", "description_prompt": "", "router_prompt": "", "router_max_tokens": 64, "max_tokens": 8192, "enable_thinking": False, "model_revision": "", "reuse": True}
     for source in (kb_config or {}, doc_config or {}):
         options.update(source.get("multimodal") or (source.get("ext") or {}).get("multimodal") or {})
     options.update(overrides)
@@ -46,7 +46,7 @@ def build_config(kb_config, doc_config, overrides, filename):
     for field in ("reuse", "enable_thinking"):
         if type(options[field]) is not bool:
             raise ValueError(f"{field} must be a boolean")
-    for field in ("model", "prompt", "router_prompt", "model_revision"):
+    for field in ("model", "prompt", "description_prompt", "router_prompt", "model_revision"):
         if not isinstance(options.get(field), str) or (field == "model" and not options[field].strip()):
             raise ValueError(f"{field} must be a string; model must not be empty")
     if type(options["max_tokens"]) is not int or not 256 <= options["max_tokens"] <= 65536:

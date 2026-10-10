@@ -21,7 +21,7 @@
 配置字段为 `parser_config.multimodal`（API 扩展配置也可放在 `parser_config.ext.multimodal`）：
 
 ```json
-{"enabled": true, "mode": "smart", "model": "模型设置返回的模型 ID", "router_prompt": "", "router_max_tokens": 64, "prompt": "", "max_tokens": 8192, "enable_thinking": false, "model_revision": "v1", "reuse": true}
+{"enabled": true, "mode": "smart", "model": "模型设置返回的模型 ID", "router_prompt": "", "router_max_tokens": 64, "prompt": "", "description_prompt": "", "max_tokens": 8192, "enable_thinking": false, "model_revision": "v1", "reuse": true}
 ```
 
 ## Ubuntu 持久化与同步
@@ -78,11 +78,11 @@ API 失败保留错误类型；收到响应后先保存完整响应，再校验�
 
 ### 输出校验失败时的文字兜底
 
-默认启用，适用于 `smart` 与 `full` 模式，不需要增加配置或修改 API 参数。
+默认启用，适用于 `smart` 与 `full` 模式。在知识库解析设置、单文档切分设置或图片多模态设置中，通过 **失败兜底描述提示词** 自定义文字描述要求，对应 API 字段 `parser_config.multimodal.description_prompt`，多模态专用接口也可在请求 `multimodal.description_prompt` 中覆盖。留空使用默认提示词；可用于医疗、财务等其他场景，但应要求输出纯文字。配置继承顺序为请求覆盖文档、文档覆盖知识库。修改此提示词会改变归档缓存键，避免复用其他要求下的旧结果。
 
 1. 正常 Markdown 转录，校验失败后再尝试修正一次。
-2. 两次均无效时，第三次使用原截图及内置文字描述提示词。表格按行写成句子，明确父级条件、行列标题、型号、数值、单位及对应关系；图示保留标注与连接关系。看不清或关系不确定的部分标注 `【不确定】`，不推断缺失值。
-3. 文字描述仍被截断、为空或不合格，或者第三次描述调用失败时，保留该 Chunk 的基础解析文本，重新分词后继续入库，后续 Chunk 照常处理。若基础文本为空，输出明确的 `【解析不确定】` 提示并保留截图和原文位置，不编造内容。
+2. 两次均无效时，第三次使用原截图及配置的兜底描述提示词。表格按行写成句子，明确父级条件、行列标题、型号、数值、单位及对应关系；图示保留标注与连接关系。看不清或关系不确定的部分标注 `【不确定】`，不推断缺失值。
+3. 文字描述仍被截断、为空或不合格，或者第三次描述调用失败时，在正文标注 `【解析失败】` 并保留该 Chunk 的 OCR／基础解析文本，重新分词后继续入库，后续 Chunk 照常处理。若基础文本为空，输出明确的 `【解析失败】` 提示并保留截图和原文位置，不编造内容。
 
 这种错误不限于表格：空回答、`finish_reason` 不是 `stop`、HTML 表格、JSON 内容包装、表格缺少分隔行、列数不一致都可能触发校验失败。具体原因查看每次尝试的 `status.json` 和 `response.json`。
 

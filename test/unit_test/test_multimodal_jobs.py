@@ -91,9 +91,16 @@ class JobsTest(unittest.TestCase):
         self.assertFalse(cfg["parent_child"]["use_parent_child"])
 
     def test_invalid_config(self):
-        for options in ({"enabled": False}, {"max_tokens": True}, {"max_tokens": 12}, {"reuse": "false"}, {"api_key": "secret"}, {"prompt": None}):
+        for options in ({"enabled": False}, {"max_tokens": True}, {"max_tokens": 12}, {"reuse": "false"}, {"api_key": "secret"}, {"prompt": None}, {"description_prompt": None}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.mod.build_config({}, {"multimodal": {"model": "m"}}, options, "x.pdf")
+
+    def test_description_prompt_inherits_and_allows_request_override(self):
+        kb = {"multimodal": {"model": "vision", "description_prompt": "知识库要求"}}
+        doc = {"multimodal": {"description_prompt": "文档要求"}}
+        self.assertEqual(self.mod.build_config(kb, {}, {}, "x.pdf")["multimodal"]["description_prompt"], "知识库要求")
+        self.assertEqual(self.mod.build_config(kb, doc, {}, "x.pdf")["multimodal"]["description_prompt"], "文档要求")
+        self.assertEqual(self.mod.build_config(kb, doc, {"description_prompt": "请求要求"}, "x.pdf")["multimodal"]["description_prompt"], "请求要求")
         for name in ("x.mp4", ""):
             with self.assertRaises(ValueError):
                 self.mod.build_config({}, {}, {}, name)

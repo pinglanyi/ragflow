@@ -183,6 +183,7 @@ class ScreenshotParser:
             "base_url": model["api_base"].rstrip("/"),
             "model_revision": options.get("model_revision", ""),
             "prompt": prompt,
+            "description_prompt": options.get("description_prompt", "").strip() or DESCRIPTION_PROMPT,
             "max_tokens": max_tokens,
             "enable_thinking": bool(options.get("enable_thinking", False)),
         }
@@ -261,7 +262,7 @@ class ScreenshotParser:
             for attempt_number in range(3):
                 output_mode = "description" if attempt_number == 2 else "markdown"
                 if output_mode == "description":
-                    prompt = DESCRIPTION_PROMPT
+                    prompt = self.config["description_prompt"]
                 attempt_id = uuid.uuid4().hex[:20]
                 attempt = entry / "attempts" / attempt_id
                 _write(attempt / "request.json", _json_bytes({"source": source, "prompt": prompt, "output_mode": output_mode, "created_at": datetime.now(timezone.utc).isoformat()}))
@@ -422,8 +423,10 @@ def parse_chunks(chunks, task, binary, options, model, progress_callback, cancel
                 reference = exc.reference
                 markdown = str(chunk.get("content_with_weight") or "").strip()
                 kept_base_parse = bool(markdown)
-                if not markdown:
-                    markdown = "【解析不确定】此分块的多模态转录和文字描述均失败，且基础解析没有可用文字。请查看原文及截图，不据此推断表格数值或图片内容。"
+                if markdown:
+                    markdown = "【解析失败】多模态转录和文字描述均失败，以下保留 OCR／基础解析结果：\n\n" + markdown
+                else:
+                    markdown = "【解析失败】多模态转录和文字描述均失败，且 OCR／基础解析没有可用文字。请查看原文及截图。"
                     reference = {**reference, "output_mode": "unreadable"}
             is_fallback = reference.get("output_mode", "markdown") != "markdown"
             if is_fallback:

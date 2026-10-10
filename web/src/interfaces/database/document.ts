@@ -44,6 +44,7 @@ export interface IParserConfig {
     enabled?: boolean;
     model?: string;
     prompt?: string;
+    description_prompt?: string;
     max_tokens?: number;
     model_revision?: string;
     enable_thinking?: boolean;

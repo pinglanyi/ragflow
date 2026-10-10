@@ -10,6 +10,7 @@ import { Textarea } from './ui/textarea';
 import {
   DEFAULT_MULTIMODAL_PROMPT,
   DEFAULT_MULTIMODAL_ROUTER_PROMPT,
+  DefaultMultimodalDescriptionPrompt,
 } from './multimodal-parser-defaults';
 
 export const multimodalParserSchema = z.object({
@@ -17,6 +18,7 @@ export const multimodalParserSchema = z.object({
   mode: z.enum(['off', 'smart', 'full']).optional(),
   model: z.string().optional(),
   prompt: z.string().optional(),
+  description_prompt: z.string().optional(),
   max_tokens: z.coerce.number().int().min(256).max(65536).optional(),
   router_prompt: z.string().optional(),
   router_max_tokens: z.coerce.number().int().min(1).max(1024).optional(),
@@ -53,6 +55,10 @@ export function MultimodalParserOptions({ ownerTenantId, picture = false }: { ow
         <RAGFlowFormItem name="parser_config.multimodal.prompt" label="解析提示词">
           {(field) => <Textarea {...field} value={field.value ?? DEFAULT_MULTIMODAL_PROMPT} rows={12} placeholder="默认规则会忠实 OCR、摊平复杂表格并描述图片；可按知识库覆盖。" />}
         </RAGFlowFormItem>
+        <RAGFlowFormItem name="parser_config.multimodal.description_prompt" label="失败兜底描述提示词">
+          {(field) => <Textarea {...field} value={field.value ?? DefaultMultimodalDescriptionPrompt} rows={7} placeholder="留空使用默认提示词；可按业务场景自定义纯文字描述要求。" />}
+        </RAGFlowFormItem>
+        <p className="text-sm text-text-secondary">Markdown 两次校验失败后使用此提示词描述原图。请要求输出纯文字；描述仍失败时保留 OCR 结果并标注“解析失败”。</p>
         {mode === 'smart' && <>
           <RAGFlowFormItem name="parser_config.multimodal.router_prompt" label="智能路由提示词">
             {(field) => <Textarea {...field} value={field.value ?? DEFAULT_MULTIMODAL_ROUTER_PROMPT} rows={7} placeholder="默认规则：纯文本保留 OCR；其余内容进入多模态解析。" />}

@@ -234,7 +234,8 @@ class ArchiveTest(unittest.TestCase):
         with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete", lambda *args: next(answers)):
             result = m.parse_chunks([bad, good], task, b"pdf", {}, self.model, lambda **kw: logs.append(kw["msg"]))
         self.assertEqual(len(result), 2)
-        self.assertEqual(result[0]["content_with_weight"], "基础表格：型号 A，功率 10 kW。")
+        self.assertIn("【解析失败】", result[0]["content_with_weight"])
+        self.assertIn("基础表格：型号 A，功率 10 kW。", result[0]["content_with_weight"])
         self.assertEqual(result[0]["position_int"], [[74, 0, 20, 0, 20]])
         self.assertEqual(result[1]["content_with_weight"], "下一分块正常内容")
         manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
@@ -261,7 +262,7 @@ class ArchiveTest(unittest.TestCase):
         chunk = {"image": Image.new("RGB", (20, 20)), "position_int": [[74, 0, 20, 0, 20]]}
         with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete", lambda *args: response("", "stop")):
             result = m.parse_chunks([chunk], task, b"pdf", {}, self.model, lambda **kw: None)
-        self.assertIn("【解析不确定】", result[0]["content_with_weight"])
+        self.assertIn("【解析失败】", result[0]["content_with_weight"])
         self.assertEqual(result[0]["position_int"], [[74, 0, 20, 0, 20]])
         manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
         self.assertEqual(manifest["chunks"][0]["output_mode"], "unreadable")
@@ -283,6 +284,20 @@ class ArchiveTest(unittest.TestCase):
         statuses = [p.read_text(encoding="utf-8") for p in Path(self.temp.name).rglob("status.json")]
         self.assertTrue(any('"api_error"' in status for status in statuses))
         self.assertFalse(any("SECRET" in status for status in statuses))
+
+    def test_custom_description_prompt_is_used_and_changes_cache_identity(self):
+        first = self.parser(description_prompt="用医学术语描述，只输出纯文字。")
+        second = self.parser(description_prompt="描述财务报表，只输出纯文字。")
+        prompts = []
+        def completion(png, prompt):
+            prompts.append(prompt)
+            return response("文字描述") if len(prompts) % 3 == 0 else response("", "stop")
+        first.completion = second.completion = completion
+        _, a = first.parse(b"same", {})
+        _, b = second.parse(b"same", {})
+        self.assertEqual(prompts[2], "用医学术语描述，只输出纯文字。")
+        self.assertEqual(prompts[5], "描述财务报表，只输出纯文字。")
+        self.assertNotEqual(a["key"], b["key"])
 
     def test_cancelled_task_does_not_call_models_or_create_fallback(self):
         fake_nlp = types.ModuleType("rag.nlp")
