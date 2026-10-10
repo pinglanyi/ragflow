@@ -86,6 +86,8 @@ The model produces Markdown with text transcription, detailed image descriptions
 
 ![PDF and PNG multimodal parsing and archive reuse flow](docs/images/ragflow-multimodal-pdf-png-flow.png)
 
+After two invalid Markdown responses, parsing tries a plain-text description of the original images. If that also fails, it retains the base parser text or an explicit unreadable-content notice and continues with subsequent chunks. Progress logs and archives identify each fallback, while screenshots and source positions are retained.
+
 PDF parsing still depends on the initial DeepDOC OCR stage. Format validation does not guarantee factual or table-cell accuracy. See the [configuration and archive guide](docs/chunk-multimodal-parser.md) for details.
 
 

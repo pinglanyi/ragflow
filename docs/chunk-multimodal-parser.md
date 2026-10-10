@@ -74,7 +74,31 @@ python scripts/multimodal_archive.py import /home/wangzilong/multimodal-results.
   runs/运行ID.json
 ```
 
-API 失败保留错误类型；收到响应后先保存完整响应，再校验。无效结果最多重新看图修正一次，两次都无效则任务失败。成功的 Markdown 与所有旧尝试均保留，`success.json` 只指向当前可复用版本。取消或失败后重新运行可复用前面已完成的截图；缓存命中不调用模型，但仍重新分词与生成向量。
+API 失败保留错误类型；收到响应后先保存完整响应，再校验。Markdown 输出最多重新看图修正一次；两次无效后按下述规则进行文字兜底。成功的 Markdown 或文字描述与所有旧尝试均保留，`success.json` 只指向当前可复用版本。取消或失败后重新运行可复用前面已完成的截图；缓存命中不调用模型，但仍重新分词与生成向量。
+
+### 输出校验失败时的文字兜底
+
+默认启用，适用于 `smart` 与 `full` 模式，不需要增加配置或修改 API 参数。
+
+1. 正常 Markdown 转录，校验失败后再尝试修正一次。
+2. 两次均无效时，第三次使用原截图及内置文字描述提示词。表格按行写成句子，明确父级条件、行列标题、型号、数值、单位及对应关系；图示保留标注与连接关系。看不清或关系不确定的部分标注 `【不确定】`，不推断缺失值。
+3. 文字描述仍被截断、为空或不合格，或者第三次描述调用失败时，保留该 Chunk 的基础解析文本，重新分词后继续入库，后续 Chunk 照常处理。若基础文本为空，输出明确的 `【解析不确定】` 提示并保留截图和原文位置，不编造内容。
+
+这种错误不限于表格：空回答、`finish_reason` 不是 `stop`、HTML 表格、JSON 内容包装、表格缺少分隔行、列数不一致都可能触发校验失败。具体原因查看每次尝试的 `status.json` 和 `response.json`。
+
+最多增加一次模型调用。正常成功路径和已成功归档的复用保持不变；文字描述成功也可缓存复用。基础文本兜底、无法识别提示不会写成模型成功缓存，重新解析时仍可再次尝试视觉识别。常规模型调用的连接/认证错误、源文件渲染失败、父子切分配置错误和任务取消仍明确失败，不被输出兜底吞掉。
+
+进度日志示例：
+
+```text
+Multimodal fallback 12/25: description (archived at <归档键>)
+Multimodal fallback 13/25: base_text (archived at <归档键>)
+Multimodal fallback 14/25: unreadable (archived at <归档键>)
+```
+
+归档 `runs/运行ID.json` 的 `status` 为 `ok_with_fallback` 表示完成但存在降级；`fallback_chunk_count` 是降级 Chunk 数。`chunks[]` 中的 `output_mode` 为 `description`、`base_text` 或 `unreadable`，同时记录 `fallback_reason`、`kept_base_parse`、来源位置、归档键及实际入库文本 `indexed_markdown`。Token 用量包含三次尝试中已经返回的 usage；失败调用未返回的 usage 无法统计。该状态是磁盘归档状态，原有 REST 任务接口的状态枚举不变。
+
+部署需重启 Python 解析 worker；只更新或重启 9380 API 不会让现有 worker 加载新逻辑。已经失败的页段需要重新提交文档解析，已归档成功结果可继续复用。
 
 ## Picture 图片文件直接解析（2026-09-09）
 
@@ -105,7 +129,7 @@ API 失败保留错误类型；收到响应后先保存完整响应，再校验�
 
 输入图片按 EXIF 纠正旋转方向后转换为 RGB PNG，不做有损缩放。表格要求将合并值复制到实际覆盖的行列，多层表头组合、嵌套表拆平；图示要求描述可见实体、连线和条件。不确定内容应标注，不允许补造。程序校验空响应、输出截断、HTML 表格及 Markdown 表格列数；**不能自动证明每个数值或连线都正确**，关键工业参数仍需抽检。
 
-归档中 `entries/.../attempts/.../result.md` 保存模型本身的输出；`runs/运行ID.json` 的 `chunks[].indexed_markdown` 保存本次实际入库文本（含文件名），同文件名、文档 ID 和归档键一起随原有同步脚本导出。响应无效或 API 失败不会悄悄退回 OCR 冒充多模态成功；失败记录保留，成功缓存不被失败重试覆盖。
+归档中 `entries/.../attempts/.../result.md` 保存模型本身的输出；`runs/运行ID.json` 的 `chunks[].indexed_markdown` 保存本次实际入库文本（含文件名），同文件名、文档 ID 和归档键一起随原有同步脚本导出。响应持续无效时依照上述规则降级为文字描述、基础文本或无法识别提示，并明确记录降级标记；失败记录保留，成功缓存不被失败重试覆盖。
 
 ### 模型类型修复
 

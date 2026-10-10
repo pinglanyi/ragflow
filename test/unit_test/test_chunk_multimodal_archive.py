@@ -199,8 +199,102 @@ class ArchiveTest(unittest.TestCase):
             parser.completion = lambda *args: raw
             with self.assertRaises(ValueError):
                 parser.parse(b"bad", {})
-        self.assertEqual(len(list(Path(self.temp.name).rglob("response.json"))), 4)
+        self.assertEqual(len(list(Path(self.temp.name).rglob("response.json"))), 6)
         self.assertEqual(len(list(Path(self.temp.name).rglob("success.json"))), 0)
+
+    def test_invalid_markdown_falls_back_to_description_and_reuses_it(self):
+        parser = self.parser()
+        calls = []
+        answers = iter([response("<table><tr><td>A</td></tr></table>"), response("partial", "length"), response("型号 A：额定功率为 10 kW。其余字段【不确定】。")])
+        def complete(png, prompt):
+            calls.append(prompt)
+            return next(answers)
+        parser.completion = complete
+        text, reference = parser.parse(b"table-image", {})
+        self.assertIn("10 kW", text)
+        self.assertEqual(reference["output_mode"], "description")
+        self.assertEqual(reference["usage"]["total_tokens"], 36)
+        self.assertIn("不要输出表格", calls[2])
+        cached_text, cached = parser.parse(b"table-image", {})
+        self.assertEqual(cached_text, text)
+        self.assertEqual(cached["output_mode"], "description")
+        self.assertTrue(cached["cache_hit"])
+        self.assertEqual(cached["usage"]["total_tokens"], 0)
+        self.assertEqual(len(calls), 3)
+
+    def test_invalid_chunk_keeps_base_text_and_processes_following_chunk(self):
+        from PIL import Image
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *args, **kw: chunk.update(content_with_weight=text, content_ltks="tokens:" + text)
+        bad = {"content_with_weight": "基础表格：型号 A，功率 10 kW。", "image": Image.new("RGB", (21, 20)), "position_int": [[74, 0, 20, 0, 20]]}
+        good = {"content_with_weight": "next", "image": Image.new("RGB", (22, 20))}
+        answers = iter([response("partial", "length")] * 3 + [response("下一分块正常内容")])
+        task = {"tenant_id": "tenant", "doc_id": "doc", "name": "manual.pdf", "id": "task", "language": "Chinese"}
+        logs = []
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete", lambda *args: next(answers)):
+            result = m.parse_chunks([bad, good], task, b"pdf", {}, self.model, lambda **kw: logs.append(kw["msg"]))
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["content_with_weight"], "基础表格：型号 A，功率 10 kW。")
+        self.assertEqual(result[0]["position_int"], [[74, 0, 20, 0, 20]])
+        self.assertEqual(result[1]["content_with_weight"], "下一分块正常内容")
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "ok_with_fallback")
+        self.assertEqual(manifest["fallback_chunk_count"], 1)
+        self.assertEqual(manifest["usage"]["total_tokens"], 48)
+        self.assertTrue(manifest["chunks"][0]["kept_base_parse"])
+        self.assertEqual(manifest["chunks"][0]["fallback_reason"], "invalid_multimodal_output")
+        self.assertTrue(any("fallback" in log.lower() for log in logs))
+
+    def test_description_fallback_cannot_accept_another_pipe_table(self):
+        parser = self.parser()
+        answers = iter([response("partial", "length"), response("partial", "length"), response()])
+        parser.completion = lambda *args: next(answers)
+        with self.assertRaises(ValueError):
+            parser.parse(b"bad-description", {})
+        self.assertEqual(len(list(Path(self.temp.name).rglob("success.json"))), 0)
+
+    def test_empty_base_text_has_explicit_uncertainty_not_invented_content(self):
+        from PIL import Image
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *args, **kw: chunk.update(content_with_weight=text)
+        task = {"tenant_id": "tenant", "doc_id": "doc", "name": "manual.pdf", "id": "task"}
+        chunk = {"image": Image.new("RGB", (20, 20)), "position_int": [[74, 0, 20, 0, 20]]}
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete", lambda *args: response("", "stop")):
+            result = m.parse_chunks([chunk], task, b"pdf", {}, self.model, lambda **kw: None)
+        self.assertIn("【解析不确定】", result[0]["content_with_weight"])
+        self.assertEqual(result[0]["position_int"], [[74, 0, 20, 0, 20]])
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["chunks"][0]["output_mode"], "unreadable")
+        self.assertEqual(len(list(Path(self.temp.name).rglob("success.json"))), 0)
+
+    def test_description_api_failure_retains_archived_usage_without_secrets(self):
+        parser = self.parser()
+        answers = iter([response("partial", "length")] * 2)
+        def complete(*args):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise RuntimeError("SECRET")
+        parser.completion = complete
+        with self.assertRaises(m.MultimodalOutputError) as caught:
+            parser.parse(b"bad-description-api", {})
+        self.assertEqual(caught.exception.reference["usage"]["total_tokens"], 24)
+        self.assertNotIn("SECRET", str(caught.exception))
+        statuses = [p.read_text(encoding="utf-8") for p in Path(self.temp.name).rglob("status.json")]
+        self.assertTrue(any('"api_error"' in status for status in statuses))
+        self.assertFalse(any("SECRET" in status for status in statuses))
+
+    def test_cancelled_task_does_not_call_models_or_create_fallback(self):
+        fake_nlp = types.ModuleType("rag.nlp")
+        task = {"tenant_id": "tenant", "doc_id": "doc", "name": "manual.pdf", "id": "task"}
+        fake_nlp.tokenize = lambda *args, **kw: None
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete") as complete:
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                m.parse_chunks([{"content_with_weight": "base"}], task, b"pdf", {}, self.model, lambda **kw: None, lambda: True)
+            complete.assert_not_called()
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["status"], "error")
+        self.assertEqual(manifest["fallback_chunk_count"], 0)
 
     def test_failed_refresh_preserves_previous_success(self):
         _, original = self.parser().parse(b"image", {})
