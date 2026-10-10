@@ -45,10 +45,20 @@ class MultimodalOutputError(ValueError):
 
 
 def _usage(raw):
-    value = raw.get("usage") or {} if isinstance(raw, dict) else {}
-    prompt = int(value.get("prompt_tokens", 0) or 0)
-    completion = int(value.get("completion_tokens", 0) or 0)
-    total = int(value.get("total_tokens", prompt + completion) or prompt + completion)
+    if not isinstance(raw, dict):
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    value = raw.get("usage") or raw.get("usage_metadata") or {}
+
+    def get(*names):
+        for name in names:
+            candidate = value.get(name) if isinstance(value, dict) else None
+            if candidate is not None:
+                return int(candidate or 0)
+        return 0
+
+    prompt = get("prompt_tokens", "input_tokens", "promptTokens", "inputTokens")
+    completion = get("completion_tokens", "output_tokens", "completionTokens", "outputTokens")
+    total = get("total_tokens", "totalTokens") or prompt + completion
     return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
 

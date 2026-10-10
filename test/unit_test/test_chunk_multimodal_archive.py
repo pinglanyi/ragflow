@@ -23,6 +23,16 @@ def response(content="# Motor\n\n| Model | Power |\n| --- | --- |\n| A | 10 kW |
 
 
 class ArchiveTest(unittest.TestCase):
+    def test_usage_normalizes_openai_compatible_token_field_names(self):
+        self.assertEqual(
+            m._usage({"usage": {"input_tokens": 11, "output_tokens": 7}}),
+            {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        )
+        self.assertEqual(
+            m._usage({"usage": {"promptTokens": 5, "completionTokens": 3, "totalTokens": 8}}),
+            {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        )
+
     def test_default_prompts_preserve_ocr_tables_images_and_route_only_non_text(self):
         self.assertIn("忠实 OCR", m.DEFAULT_PROMPT)
         self.assertIn("大表套小表拆成独立矩形表", m.DEFAULT_PROMPT)
