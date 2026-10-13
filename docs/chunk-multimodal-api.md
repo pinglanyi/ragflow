@@ -4,13 +4,14 @@
 
 ## 自定义异步接口（新增）
 
-9380 后端新增三个接口。两个提交入口不等待模型解析，成功提交返回 HTTP 202；文件上传传输、参数校验及入队准备仍需时间。后端 task executor 必须正常运行。
+9380 后端新增多模态提交、查询、取消和模型测试接口。两个提交入口不等待模型解析，成功提交返回 HTTP 202；文件上传传输、参数校验及入队准备仍需时间。后端 task executor 必须正常运行。
 
 | 功能 | 方法与路径 |
 | --- | --- |
 | 已有文档多模态解析 | POST `/api/v1/multimodal/parse` |
 | 上传单个文件并解析 | POST `/api/v1/multimodal/upload-and-parse` |
 | 查询任务状态 | GET `/api/v1/multimodal/tasks/{task_id}` |
+| 取消多模态任务 | POST `/api/v1/multimodal/tasks/{task_id}/cancel` |
 | 测试已注册模型 | POST `/api/v1/multimodal/models/test` |
 
 ### 输入示例
@@ -128,6 +129,17 @@ curl -sS "$BASE/multimodal/tasks/$TASK_ID" \
 查询接口 HTTP 200 / code 0 表示查询成功，任务是否成功必须检查 `data.status`。失败信息放在 `error`：例如 `parse_failed` 附内部任务 ID；`dispatch_error` 表示入队失败；`dispatch_interrupted` 表示提交过程超过 10 分钟仍未完成（可能 API 中断）；`empty_output` 表示没有有效 Chunk。为避免模型密钥泄露，接口不直接透传原始异常；详细异常到 RAGFlow 文档进度日志和归档中查看。
 
 建议每 3～5 秒查询一次，遇到 complete / failed / cancelled 停止轮询。不需要保持原提交连接。断线也不要直接重复 POST，先用已返回的 task_id 查询；若响应丢失，重复已有文档提交可能返回 409 并附现有任务 ID。上传入口不承诺幂等，重复上传可能新增文件。
+
+### 取消多模态任务
+
+```bash
+curl -sS -X POST "$BASE/multimodal/tasks/$TASK_ID/cancel" \
+  -H "Authorization: Bearer $RAGFLOW_API_KEY"
+```
+
+成功返回 HTTP 200、`code=0`，`data.status` 为 `cancelled`。服务会把尚未完成的子任务标记为取消，发送执行器取消信号，并把文档解析状态恢复为未开始；已完成子任务不会被改写。重复取消同一任务是幂等操作，仍返回 `cancelled`。任务不存在或不属于当前租户返回 404；已经 `complete` 或 `failed` 的任务返回 409。
+
+这个接口只负责 chunk-mm 多模态任务。普通 RAGFlow 文档解析应调用 `POST /api/v1/datasets/{dataset_id}/documents/stop`，请求体为 `{"document_ids":["文档ID"]}`。上层系统无法确定当前解析类型时，可以先取消多模态任务，再停止对应文档解析。
 
 `result_url` 指向现有 Chunk 列表，返回 Markdown 的 `content` 和图片引用 `image_id`，需继续分页获取。它指向该文档的当前索引，不是历史不可变快照；历史模型结果使用多模态磁盘归档。
 

@@ -77,6 +77,17 @@ async def task_status(tenant_id, task_id):
         return _error(exc)
 
 
+@manager.route("/multimodal/tasks/<task_id>/cancel", methods=["POST"])  # noqa: F821
+@login_required
+@add_tenant_id_to_kwargs
+async def cancel_task(tenant_id, task_id):
+    try:
+        data = await thread_pool_exec(service.cancel, tenant_id, _id(task_id, "task_id"))
+        return jsonify(code=0, data=data)
+    except service.ApiError as exc:
+        return _error(exc)
+
+
 @manager.route("/multimodal/models/test", methods=["POST"])  # noqa: F821
 @login_required
 @add_tenant_id_to_kwargs

@@ -137,6 +137,34 @@ class MultimodalJobService:
                 cls._update(job_id, status="failed", message=message, error={"code": code, "message": message})
 
     @classmethod
+    def cancel(cls, job_id, tenant_id):
+        """Cancel an owned multimodal job and every unfinished child task."""
+
+        with DB.lock("mmjob-" + job_id, -1):
+            job = cls.get_owned(job_id, tenant_id)
+            if job is None:
+                return None
+            if job.status == "cancelled":
+                return job
+            if job.status in {"complete", "failed"}:
+                return job
+            task_ids = list(job.task_ids or [])
+            if task_ids:
+                Task.update(progress=-1).where(
+                    Task.id.in_(task_ids) & (Task.progress >= 0) & (Task.progress < 1)
+                ).execute()
+                _signal_cancel(task_ids)
+            Document.update(run="2", progress=0).where(Document.id == job.document_id).execute()
+            cls._update(
+                job_id,
+                status="cancelled",
+                progress=0,
+                message="Cancelled by user",
+                error={},
+            )
+            return MultimodalJob.get_by_id(job_id)
+
+    @classmethod
     def record_metrics(cls, job_id, *, usage, elapsed_seconds, routed_chunks, multimodal_chunks):
         with DB.lock("mmjob-metrics-" + job_id, -1):
             job = MultimodalJob.get_by_id(job_id)

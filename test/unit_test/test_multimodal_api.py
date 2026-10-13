@@ -37,6 +37,12 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
                 raise ApiError("Task not found", 404)
             return {"task_id": args[-1], "status": "complete", "progress": 1}
 
+        def cancel(*args):
+            self.calls.append(("cancel", args))
+            if args[-1] == "missing":
+                raise ApiError("Task not found", 404)
+            return {"task_id": args[-1], "status": "cancelled", "progress": 0}
+
         def login_required(fn):
             @functools.wraps(fn)
             async def wrapped(*args, **kwargs):
@@ -69,7 +75,7 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
             "login_required": login_required,
             "add_tenant_id_to_kwargs": add_tenant,
             "thread_pool_exec": thread_pool_exec,
-            "service": SimpleNamespace(submit=submit, upload=upload, status=status, ApiError=ApiError),
+            "service": SimpleNamespace(submit=submit, upload=upload, status=status, cancel=cancel, ApiError=ApiError),
         }
         exec(compile(tree, str(path), "exec"), ns)
         self.service = ns["service"]
@@ -107,6 +113,14 @@ class ApiTest(unittest.IsolatedAsyncioTestCase):
         res = await self.client.get("/api/v1/multimodal/tasks/job", headers=self.headers)
         self.assertEqual((await res.get_json())["data"]["status"], "complete")
         res = await self.client.get("/api/v1/multimodal/tasks/missing", headers=self.headers)
+        self.assertEqual(res.status_code, 404)
+
+    async def test_cancel_task_and_missing(self):
+        res = await self.client.post("/api/v1/multimodal/tasks/job/cancel", headers=self.headers)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual((await res.get_json())["data"]["status"], "cancelled")
+        self.assertEqual(self.calls[-1], ("cancel", ("tenant", "job")))
+        res = await self.client.post("/api/v1/multimodal/tasks/missing/cancel", headers=self.headers)
         self.assertEqual(res.status_code, 404)
 
     async def test_upload_and_parse(self):

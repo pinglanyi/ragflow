@@ -170,6 +170,22 @@ class JobsTest(unittest.TestCase):
         self.Document.update(run="2").execute()
         self.assertEqual(self.svc.refresh(self.job.id).status, "cancelled")
 
+    def test_cancel_stops_children_and_is_idempotent(self):
+        self.child()
+        self.child("b", progress=1, chunks="complete")
+        self.svc.bind_tasks(self.job.id, ["a", "b"])
+        self.svc.mark_dispatched(self.job.id)
+
+        cancelled = self.svc.cancel(self.job.id, "tenant")
+
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(self.Task.get_by_id("a").progress, -1)
+        self.assertEqual(self.Task.get_by_id("b").progress, 1)
+        self.assertEqual(self.Document.get_by_id("doc").run, "2")
+        self.mod._signal_cancel.assert_called_with(["a", "b"])
+        self.assertEqual(self.svc.cancel(self.job.id, "tenant").status, "cancelled")
+        self.assertIsNone(self.svc.cancel(self.job.id, "another"))
+
     def test_native_reparse_keeps_old_terminal_status(self):
         self.child(progress=1, chunks="c")
         self.svc.bind_tasks(self.job.id, ["a"])

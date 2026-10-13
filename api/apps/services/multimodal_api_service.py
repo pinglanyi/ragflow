@@ -126,6 +126,17 @@ def status(tenant_id, job_id):
     return Jobs.response(Jobs.refresh(job_id))
 
 
+@DB.connection_context()
+def cancel(tenant_id, job_id):
+    job = Jobs.get_owned(job_id, tenant_id)
+    if not job:
+        raise ApiError("Task not found", 404)
+    _dataset(tenant_id, job.dataset_id)
+    if job.status in {"complete", "failed"}:
+        raise ApiError("Task is already terminal", 409, Jobs.response(job))
+    return Jobs.response(Jobs.cancel(job_id, tenant_id))
+
+
 def test_model(tenant_id, model_ref, model_type):
     """Probe a registered OpenAI-compatible model without exposing its secret."""
 
