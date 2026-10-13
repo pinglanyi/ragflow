@@ -41,6 +41,17 @@ class ArchiveTest(unittest.TestCase):
         self.assertIn("只要不是纯文本", m.DEFAULT_ROUTER_PROMPT)
         self.assertIn("MULTIMODAL", m.DEFAULT_ROUTER_PROMPT)
 
+    def test_router_decision_accepts_deepseek_reasoning_wrapper(self):
+        self.assertEqual(
+            m.normalize_router_decision(
+                "<think>Need inspect the image.</think>\nFinal answer: MULTIMODAL"
+            ),
+            "MULTIMODAL",
+        )
+        self.assertEqual(m.normalize_router_decision("```\nTEXT\n```"), "TEXT")
+        with self.assertRaisesRegex(ValueError, "must return TEXT or MULTIMODAL"):
+            m.normalize_router_decision("TEXT or MULTIMODAL")
+
     def test_connectivity_probe_uses_provider_acceptable_image_dimensions(self):
         import base64
         import io

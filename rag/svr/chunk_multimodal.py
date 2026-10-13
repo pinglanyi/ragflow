@@ -36,6 +36,26 @@ DESCRIPTION_PROMPT = """你是工业文档解析器。只读取提供的原图�
 看不清或无法确定对应关系时明确标注【不确定】，不得编造或猜测图片 URL。"""
 
 
+def normalize_router_decision(content):
+    """Accept a strict answer plus common reasoning-model wrappers."""
+
+    value = str(content or "").strip().upper()
+    if value in {"TEXT", "MULTIMODAL"}:
+        return value
+    value = re.sub(r"<THINK>.*?</THINK>", "", value, flags=re.DOTALL).strip()
+    final = re.search(
+        r"(?:^|\n)\s*(?:FINAL(?: ANSWER)?|ANSWER|结论)?\s*[:：]?\s*"
+        r"(TEXT|MULTIMODAL)\s*[.!。]?\s*$",
+        value,
+    )
+    if final:
+        return final.group(1)
+    tokens = re.findall(r"(?<![A-Z])(TEXT|MULTIMODAL)(?![A-Z])", value)
+    if tokens and len(set(tokens)) == 1:
+        return tokens[0]
+    raise ValueError("Smart multimodal router must return TEXT or MULTIMODAL")
+
+
 class MultimodalOutputError(ValueError):
     """All output formats failed; carry archived usage to the chunk fallback."""
 
@@ -326,11 +346,9 @@ class ScreenshotParser:
             raw = self.completion(visuals, prompt)
             _write(entry / "response.json", _json_bytes(raw))
             try:
-                content = str(raw["choices"][0]["message"]["content"]).strip().upper()
+                content = normalize_router_decision(raw["choices"][0]["message"]["content"])
             except (KeyError, TypeError, IndexError) as exc:
                 raise ValueError("Smart multimodal router returned an invalid response") from exc
-            if content not in {"TEXT", "MULTIMODAL"}:
-                raise ValueError("Smart multimodal router must return TEXT or MULTIMODAL")
             _write(cached_path, _json_bytes({"decision": content, "key": key}))
             return content, {"key": key, "cache_hit": False, "usage": _usage(raw)}
 
