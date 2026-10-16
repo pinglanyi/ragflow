@@ -34,7 +34,7 @@ def build_config(kb_config, doc_config, overrides, filename):
         raise ValueError("This endpoint requires multimodal enabled=true")
     cfg = deepcopy(kb_config or {})
     cfg.update(deepcopy(doc_config or {}))
-    options = {"enabled": True, "mode": "full", "prompt": "", "description_prompt": "", "router_prompt": "", "router_max_tokens": 64, "max_tokens": 8192, "enable_thinking": False, "model_revision": "", "reuse": True}
+    options = {"enabled": True, "mode": "full", "prompt": "", "description_prompt": "", "router_prompt": "", "router_max_tokens": 2048, "max_tokens": 8192, "enable_thinking": False, "model_revision": "", "reuse": True}
     for source in (kb_config or {}, doc_config or {}):
         options.update(source.get("multimodal") or (source.get("ext") or {}).get("multimodal") or {})
     options.update(overrides)
@@ -51,8 +51,10 @@ def build_config(kb_config, doc_config, overrides, filename):
             raise ValueError(f"{field} must be a string; model must not be empty")
     if type(options["max_tokens"]) is not int or not 256 <= options["max_tokens"] <= 65536:
         raise ValueError("max_tokens must be an integer between 256 and 65536")
-    if type(options["router_max_tokens"]) is not int or not 1 <= options["router_max_tokens"] <= 1024:
-        raise ValueError("router_max_tokens must be an integer between 1 and 1024")
+    if type(options["router_max_tokens"]) is not int or not 1 <= options["router_max_tokens"] <= 8192:
+        raise ValueError("router_max_tokens must be an integer between 1 and 8192")
+    if options["router_max_tokens"] < 1024:
+        options["router_max_tokens"] = 2048
     cfg.update(multimodal=options, layout_recognize="DeepDOC", enable_children=False, parent_child={"use_parent_child": False}, children_delimiter="")
     # Do not leave contradictory extension values that downstream merging could restore.
     ext = cfg.get("ext") or {}

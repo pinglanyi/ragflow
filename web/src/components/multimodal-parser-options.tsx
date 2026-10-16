@@ -21,7 +21,7 @@ export const multimodalParserSchema = z.object({
   description_prompt: z.string().optional(),
   max_tokens: z.coerce.number().int().min(256).max(65536).optional(),
   router_prompt: z.string().optional(),
-  router_max_tokens: z.coerce.number().int().min(1).max(1024).optional(),
+  router_max_tokens: z.coerce.number().int().min(1).max(8192).optional(),
   model_revision: z.string().optional(),
   enable_thinking: z.boolean().optional(),
   reuse: z.boolean().optional(),
@@ -64,13 +64,13 @@ export function MultimodalParserOptions({ ownerTenantId, picture = false }: { ow
             {(field) => <Textarea {...field} value={field.value ?? DEFAULT_MULTIMODAL_ROUTER_PROMPT} rows={7} placeholder="默认规则：纯文本保留 OCR；其余内容进入多模态解析。" />}
           </RAGFlowFormItem>
           <RAGFlowFormItem name="parser_config.multimodal.router_max_tokens" label="路由最大输出 Token">
-            {(field) => <Input {...field} value={field.value ?? 64} type="number" min={1} max={1024} />}
+            {(field) => <Input {...field} value={field.value && field.value >= 1024 ? field.value : 2048} type="number" min={1024} max={8192} />}
           </RAGFlowFormItem>
         </>}
         <RAGFlowFormItem name="parser_config.multimodal.max_tokens" label="最大输出 Token">
           {(field) => <Input {...field} value={field.value ?? 8192} type="number" min={256} max={65536} />}
         </RAGFlowFormItem>
-        <RAGFlowFormItem name="parser_config.multimodal.enable_thinking" label="Qwen 思考模式">
+        <RAGFlowFormItem name="parser_config.multimodal.enable_thinking" label="模型思考模式（Qwen / DeepSeek）">
           {(field) => <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />}
         </RAGFlowFormItem>
         <RAGFlowFormItem name="parser_config.multimodal.model_revision" label="模型版本标记">

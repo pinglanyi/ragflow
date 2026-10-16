@@ -21,7 +21,7 @@
 配置字段为 `parser_config.multimodal`（API 扩展配置也可放在 `parser_config.ext.multimodal`）：
 
 ```json
-{"enabled": true, "mode": "smart", "model": "模型设置返回的模型 ID", "router_prompt": "", "router_max_tokens": 64, "prompt": "", "description_prompt": "", "max_tokens": 8192, "enable_thinking": false, "model_revision": "v1", "reuse": true}
+{"enabled": true, "mode": "smart", "model": "模型设置返回的模型 ID", "router_prompt": "", "router_max_tokens": 2048, "prompt": "", "description_prompt": "", "max_tokens": 8192, "enable_thinking": false, "model_revision": "v1", "reuse": true}
 ```
 
 ## Ubuntu 持久化与同步
@@ -188,3 +188,7 @@ python test/unit_test/test_chunk_multimodal_archive.py -v
 ```
 
 先用一份带图片和合并表的短 PDF 开启功能；核对正文、表格列与图片描述，检查截图引用。重复解析确认缓存命中且模型请求数不增加；改变切分长度检查仅相同截图复用。提高版本标记确认产生新尝试。导出到另一持久目录、导入并复测，确认归档可以恢复。模型质量和完整服务联调需在实际 Ubuntu RAGFlow/模型服务环境完成。
+
+### 智能路由输出预算与失败恢复
+
+路由默认预算为 2048 Token，旧的 64 Token（以及其他低于 1024 的值）自动升级为 2048。最多调用三次；回答截断、为空或无法识别时保持原提示词重试，预算按倍数增加，最多 8192。截断回答即使含 TEXT 也不作为有效决策。三次均无有效回答时，将该 Chunk 交给完整多模态解析，记录 fallback 原因及全部尝试的 Token，不将兜底决定缓存成成功分类。网络/鉴权等服务异常仍报错。成功缓存命中不产生本次模型 Token。路由始终关闭思考；DeepSeek 原生接口使用 thinking.type=disabled，完整解析则遵从 enable_thinking。原解析、路由和描述提示词均未更改。

@@ -36,7 +36,7 @@ curl -sS -X POST "$BASE/multimodal/parse" \
       "mode": "smart",
       "model": "实际模型名@实际实例名@VLLM",
       "router_prompt": "",
-      "router_max_tokens": 64,
+      "router_max_tokens": 2048,
       "prompt": "",
       "max_tokens": 8192,
       "enable_thinking": false,
@@ -277,10 +277,10 @@ PNG 将 `chunk_method` 改为 `picture`；此时 `layout_recognize` 不参与 Pi
 | mode | `off` / `smart` / `full` | 普通原生配置可关闭；自定义异步提交接口只接受 smart 或 full |
 | model | string / 开启时必填 | 已注册的 vision 模型引用，可为模型 ID 或 `模型名@实例名@供应商`；优先使用前端实际保存的值，不要照抄示例占位符 |
 | router_prompt | string / 空字符串 | smart 路由提示；空值使用内置 TEXT/MULTIMODAL 判定规则 |
-| router_max_tokens | integer / 64 | 路由输出上限，允许 1～1024 |
+| router_max_tokens | integer / 2048 | 路由输出预算，推荐 1024～8192；兼容接收旧值 1～1023 并升级为 2048 |
 | prompt | string / 空字符串 | 空字符串使用内置工业文档提示词；非空时替换提示词，需要自己保留文字、图片和表格处理要求 |
 | max_tokens | integer / 8192 | 允许 256～65536；实际仍受模型服务上限限制 |
-| enable_thinking | boolean / false | Qwen 思考开关；VLLM 与其他供应商使用不同兼容参数 |
+| enable_thinking | boolean / false | Qwen / DeepSeek 思考开关；智能路由固定关闭思考，完整解析按此配置执行 |
 | model_revision | string / 空字符串 | 自定义缓存版本标记，不会自动切换模型权重 |
 | reuse | boolean / true | 复用成功归档；false 强制重新调用模型，增加开销 |
 
@@ -392,3 +392,7 @@ Authorization: Bearer <RAGFlow API Key>
 - `api/apps/restful_apis/chunk_api.py`：分页返回 `content`、`image_id`、`positions`。
 - `api/utils/validation_utils.py`：`ParserConfig.ext` 扩展入口。
 - `rag/svr/chunk_multimodal.py`：模型解析、缓存复用、结果归档。
+
+### 智能路由输出预算与失败恢复
+
+路由默认预算为 2048 Token，旧的 64 Token（以及其他低于 1024 的值）自动升级为 2048。最多调用三次；回答截断、为空或无法识别时保持原提示词重试，预算按倍数增加，最多 8192。截断回答即使含 TEXT 也不作为有效决策。三次均无有效回答时，将该 Chunk 交给完整多模态解析，记录 fallback 原因及全部尝试的 Token，不将兜底决定缓存成成功分类。网络/鉴权等服务异常仍报错。成功缓存命中不产生本次模型 Token。路由始终关闭思考；DeepSeek 原生接口使用 thinking.type=disabled，完整解析则遵从 enable_thinking。原解析、路由和描述提示词均未更改。

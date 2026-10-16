@@ -7,7 +7,7 @@ import types
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 spec = importlib.util.spec_from_file_location("chunk_multimodal", Path(__file__).resolve().parents[2] / "rag/svr/chunk_multimodal.py")
@@ -23,6 +23,110 @@ def response(content="# Motor\n\n| Model | Power |\n| --- | --- |\n| A | 10 kW |
 
 
 class ArchiveTest(unittest.TestCase):
+    def test_malformed_router_response_is_retried_before_a_valid_decision(self):
+        parser = m.ScreenshotParser(self.temp.name, "tenant", self.model, {"_router": True, "max_tokens": 2048})
+        parser.completion = MagicMock(side_effect=[{"choices": [None]}, response("TEXT")])
+        decision, reference = parser.decide_visuals([types.SimpleNamespace(png=b"malformed", label="page")], {})
+        self.assertEqual(decision, "TEXT")
+        self.assertEqual(reference["attempts"], 2)
+        self.assertEqual(reference["usage"]["total_tokens"], 12)
+
+    def test_router_provider_errors_are_not_silently_classified_or_retried(self):
+        parser = m.ScreenshotParser(self.temp.name, "tenant", self.model, {"_router": True, "max_tokens": 2048})
+        parser.completion = MagicMock(side_effect=RuntimeError("provider unavailable"))
+        with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+            parser.decide_visuals([types.SimpleNamespace(png=b"network", label="page")], {})
+        self.assertEqual(parser.completion.call_count, 1)
+        status = json.loads(next(Path(self.temp.name).rglob("attempts/*/status.json")).read_text())
+        self.assertEqual(status, {"status": "api_error", "error_type": "RuntimeError"})
+
+    def test_router_stops_retries_after_cancellation(self):
+        calls = []
+        parser = m.ScreenshotParser(self.temp.name, "tenant", self.model, {"_router": True, "max_tokens": 2048})
+        def complete(*args):
+            calls.append(1)
+            return response("", "length")
+        parser.completion = complete
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            parser.decide_visuals([types.SimpleNamespace(png=b"cancel", label="page")], {}, cancelled=lambda: bool(calls))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(parser.config["max_tokens"], 2048)
+
+    def test_route_budget_defaults_and_legacy_configuration_upgrade(self):
+        from copy import deepcopy
+        source = Path(__file__).resolve().parents[2] / "api/db/services/multimodal_job_service.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "build_config")
+        ns = {"Path": Path, "deepcopy": deepcopy, "IMAGE_SUFFIXES": {".png"}}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), ns)
+        config = ns["build_config"]({}, {}, {"model": "vision"}, "test.pdf")
+        self.assertEqual(config["multimodal"]["router_max_tokens"], 2048)
+        for budget, expected in [(64, 2048), (8192, 8192)]:
+            config = ns["build_config"]({}, {}, {"model": "vision", "router_max_tokens": budget}, "test.pdf")
+            self.assertEqual(config["multimodal"]["router_max_tokens"], expected)
+        with self.assertRaises(ValueError):
+            ns["build_config"]({}, {}, {"model": "vision", "router_max_tokens": 8193}, "test.pdf")
+
+    def test_route_fallback_runs_full_parser_and_preserves_usage_and_location(self):
+        from PIL import Image
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *a, **kw: chunk.update(content_with_weight=text)
+        answers = iter([response("", "length") for _ in range(3)] + [response("# Recovered visual")])
+        chunk = {"content_with_weight": "base OCR", "image": Image.new("RGB", (20, 20)), "page_num_int": [2]}
+        task = {"tenant_id": "tenant", "doc_id": "doc", "name": "test.pdf", "id": "task", "kb_id": "kb", "location": "test.pdf"}
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete", lambda *args: next(answers)):
+            result = m.parse_chunks([chunk], task, b"pdf", {"mode": "smart"}, self.model, lambda **kw: None)
+        self.assertIn("Recovered visual", result[0]["content_with_weight"])
+        self.assertEqual(result[0]["page_num_int"], [2])
+        manifest = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["usage"]["total_tokens"], 48)
+        self.assertTrue(manifest["chunks"][0]["route"]["fallback"])
+
+    def test_deepseek_thinking_flag_is_sent_to_provider(self):
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.chat.completions.create.return_value.model_dump.return_value = response("TEXT")
+        fake_openai = types.ModuleType("openai")
+        fake_openai.OpenAI = MagicMock(return_value=client)
+        for enabled in (False, True):
+            parser = m.ScreenshotParser(self.temp.name, "tenant", {**self.model, "llm_name": "deepseek-flash", "llm_factory": "DeepSeek"}, {"enable_thinking": enabled})
+            with patch.dict("sys.modules", {"openai": fake_openai}):
+                parser._complete(b"png", "unchanged prompt")
+            self.assertEqual(client.chat.completions.create.call_args.kwargs["extra_body"], {"thinking": {"type": "enabled" if enabled else "disabled"}})
+
+    def test_router_retries_truncation_with_larger_budget_and_counts_all_usage(self):
+        answers = iter([response("TEXT", "length"), response("MULTIMODAL")])
+        budgets, prompts = [], []
+        parser = m.ScreenshotParser(self.temp.name, "tenant", self.model, {"_router": True, "max_tokens": 64, "prompt": m.DEFAULT_ROUTER_PROMPT, "enable_thinking": True})
+        def complete(visuals, prompt):
+            budgets.append(parser.config["max_tokens"])
+            prompts.append(prompt)
+            return next(answers)
+        parser.completion = complete
+        decision, reference = parser.decide_visuals([types.SimpleNamespace(png=b"png", label="page")], {}, "OCR")
+        self.assertEqual(decision, "MULTIMODAL")
+        self.assertEqual(budgets, [2048, 4096])
+        self.assertEqual(prompts[0], prompts[1])
+        self.assertFalse(parser.config["enable_thinking"])
+        self.assertEqual(reference["usage"]["total_tokens"], 24)
+        self.assertFalse(reference.get("fallback", False))
+
+    def test_invalid_router_answers_fall_back_to_multimodal_without_caching_failure(self):
+        calls = []
+        parser = m.ScreenshotParser(self.temp.name, "tenant", self.model, {"_router": True, "max_tokens": 2048, "prompt": m.DEFAULT_ROUTER_PROMPT})
+        def complete(*args):
+            calls.append(1)
+            return response("", "length")
+        parser.completion = complete
+        visuals = [types.SimpleNamespace(png=b"bad-route", label="page")]
+        for _ in range(2):
+            decision, reference = parser.decide_visuals(visuals, {})
+            self.assertEqual(decision, "MULTIMODAL")
+            self.assertTrue(reference["fallback"])
+            self.assertEqual(reference["usage"]["total_tokens"], 36)
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(list(Path(self.temp.name).rglob("attempts/*/response.json"))), 6)
+
     def test_usage_normalizes_openai_compatible_token_field_names(self):
         self.assertEqual(
             m._usage({"usage": {"input_tokens": 11, "output_tokens": 7}}),
