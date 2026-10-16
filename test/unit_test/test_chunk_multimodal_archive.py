@@ -2,6 +2,7 @@ import importlib.util
 import ast
 import asyncio
 import json
+import io
 import tempfile
 import types
 import unittest
@@ -23,6 +24,72 @@ def response(content="# Motor\n\n| Model | Power |\n| --- | --- |\n| A | 10 kW |
 
 
 class ArchiveTest(unittest.TestCase):
+    def test_batched_parse_preserves_order_usage_archive_reuse_and_source(self):
+        visuals = [types.SimpleNamespace(png=f"tile-{n}".encode(), label=f"Tile {n}") for n in range(9)]
+        parser = self.parser()
+        parser.completion = MagicMock(side_effect=[response(f"# Part {n}") for n in range(3)])
+        source = {"positions": [[3, 1, 2, 3, 4]], "doc_id": "doc"}
+        text, ref = parser.parse_visuals(visuals, source)
+        self.assertEqual(text, "# Part 0\n\n# Part 1\n\n# Part 2")
+        self.assertEqual(ref["usage"]["total_tokens"], 36)
+        self.assertEqual(len(ref["parts"]), 3)
+        self.assertEqual([len(call.args[0]) for call in parser.completion.call_args_list], [4, 4, 1])
+        again, cached = parser.parse_visuals(visuals, source)
+        self.assertEqual(again, text)
+        self.assertTrue(cached["cache_hit"])
+        self.assertEqual(cached["usage"]["total_tokens"], 0)
+        self.assertEqual(parser.completion.call_count, 3)
+        requests = [json.loads(p.read_text(encoding="utf-8")) for p in Path(self.temp.name).rglob("attempts/*/request.json")]
+        self.assertTrue(all(r["source"]["positions"] == source["positions"] for r in requests))
+
+    def test_batched_router_is_text_only_when_every_batch_is_text(self):
+        visuals = [types.SimpleNamespace(png=f"tile-{n}".encode(), label=f"Tile {n}") for n in range(5)]
+        parser = m.ScreenshotParser(self.temp.name, "tenant", self.model, {"_router": True})
+        parser.completion = MagicMock(side_effect=[response("TEXT"), response("MULTIMODAL")])
+        decision, ref = parser.decide_visuals(visuals, {})
+        self.assertEqual(decision, "MULTIMODAL")
+        self.assertEqual(ref["usage"]["total_tokens"], 24)
+        self.assertEqual(len(ref["parts"]), 2)
+
+    def test_batched_parser_checks_cancellation_between_requests(self):
+        visuals = [types.SimpleNamespace(png=b"tile", label=str(n)) for n in range(5)]
+        parser = self.parser()
+        parser.completion = MagicMock(return_value=response())
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            parser.parse_visuals(visuals, {}, cancelled=lambda: parser.completion.call_count > 0)
+        self.assertEqual(parser.completion.call_count, 1)
+
+    def test_failed_later_batch_preserves_prior_token_usage(self):
+        visuals = [types.SimpleNamespace(png=b"tile", label=str(n)) for n in range(5)]
+        parser = self.parser()
+        parser.completion = MagicMock(side_effect=[response("# First"), response("", "length"), response("", "length"), response("", "length")])
+        with self.assertRaises(m.MultimodalOutputError) as caught:
+            parser.parse_visuals(visuals, {})
+        self.assertEqual(caught.exception.reference["usage"]["total_tokens"], 48)
+
+    def test_long_image_pipeline_preserves_location_and_counts_all_batches(self):
+        from PIL import Image
+        fake_nlp = types.ModuleType("rag.nlp")
+        fake_nlp.tokenize = lambda chunk, text, *a, **kw: chunk.update(content_with_weight=text)
+        task = {"tenant_id": "tenant", "doc_id": "doc", "name": "long.pdf", "id": "task", "kb_id": "kb", "location": "long.pdf"}
+        positions = [[2, 10, 40, 20, 80]]
+        chunk = {"content_with_weight": "OCR", "image": Image.new("RGB", (100, 9000)), "page_num_int": [2], "position_int": positions}
+        calls = []
+        def complete(parser, visuals, prompt):
+            for visual in visuals:
+                self.assertLessEqual(max(Image.open(io.BytesIO(visual.png)).size), 2048)
+            self.assertLessEqual(len(visuals), 4)
+            calls.append(parser.options.get("_router", False))
+            return response("MULTIMODAL" if parser.options.get("_router") else "# Recovered")
+        with patch.dict("sys.modules", {"rag.nlp": fake_nlp}), patch.dict("os.environ", {"RAGFLOW_MULTIMODAL_ARCHIVE_DIR": self.temp.name}), patch.object(m.ScreenshotParser, "_complete", complete):
+            result = m.parse_chunks([chunk], task, b"source", {"mode": "smart"}, self.model, lambda **kw: None)
+        self.assertEqual(calls, [True, True, False, False])
+        self.assertEqual(result[0]["position_int"], positions)
+        self.assertEqual(result[0]["page_num_int"], [2])
+        run = json.loads(next(Path(self.temp.name).rglob("runs/*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(run["usage"]["total_tokens"], 48)
+        self.assertEqual(run["chunks"][0]["visuals"][0]["locator"]["location"], "long.pdf")
+
     def test_malformed_router_response_is_retried_before_a_valid_decision(self):
         parser = m.ScreenshotParser(self.temp.name, "tenant", self.model, {"_router": True, "max_tokens": 2048})
         parser.completion = MagicMock(side_effect=[{"choices": [None]}, response("TEXT")])

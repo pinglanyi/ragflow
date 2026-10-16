@@ -43,6 +43,52 @@ class RenderedVisual:
     label: str
 
 
+def split_visuals(visuals: list[RenderedVisual], *, max_edge: int = 2048, max_bytes: int = 2 * 1024 * 1024) -> list[RenderedVisual]:
+    """Tile at native resolution; bounds refer to the rendered image, not PDF coordinates."""
+    result = []
+    for visual in visuals:
+        image = Image.open(io.BytesIO(visual.png))
+        image.load()
+        if max(image.size) <= max_edge and len(visual.png) <= max_bytes:
+            result.append(visual)
+            continue
+        image = image.convert("RGB")
+        tiles = []
+
+        def encode(bounds):
+            png = _png_bytes(image.crop(bounds))
+            if len(png) <= max_bytes:
+                tiles.append((bounds, png))
+                return
+            x0, y0, x1, y1 = bounds
+            if max(x1 - x0, y1 - y0) <= 1:
+                raise ValueError("Image byte limit is too small for a PNG tile")
+            if y1 - y0 >= x1 - x0:
+                mid = (y0 + y1) // 2
+                overlap = min(32, (y1 - y0) // 8)
+                encode((x0, y0, x1, mid + overlap))
+                encode((x0, mid - overlap, x1, y1))
+            else:
+                mid = (x0 + x1) // 2
+                overlap = min(32, (x1 - x0) // 8)
+                encode((x0, y0, mid + overlap, y1))
+                encode((mid - overlap, y0, x1, y1))
+
+        step = max(1, max_edge - min(64, max_edge // 8))
+        for y in range(0, image.height, step):
+            for x in range(0, image.width, step):
+                encode((x, y, min(x + max_edge, image.width), min(y + max_edge, image.height)))
+        for index, (bounds, png) in enumerate(tiles, 1):
+            result.append(RenderedVisual(png, {
+                **visual.locator,
+                "rendered_image_size": list(image.size),
+                "rendered_pixel_bounds": list(bounds),
+                "tile_index": index,
+                "tile_count": len(tiles),
+            }, f"{visual.label} / tile {index}/{len(tiles)} {bounds}"))
+    return result
+
+
 def _png_bytes(image: Any) -> bytes:
     if isinstance(image, (bytes, bytearray, memoryview)):
         image = Image.open(io.BytesIO(bytes(image)))

@@ -6,6 +6,7 @@ from PIL import Image
 
 from rag.svr.multimodal_source_renderer import (
     OfficeRenderError,
+    split_visuals,
     RenderedVisual,
     convert_office_to_pdf,
     render_chunk_visuals,
@@ -13,6 +14,39 @@ from rag.svr.multimodal_source_renderer import (
 
 
 class MultimodalSourceRendererTest(unittest.TestCase):
+    def test_long_image_tiles_preserve_pixels_and_source_locator(self):
+        image = Image.new("RGB", (600, 9000), "white")
+        image.putpixel((599, 8999), (12, 34, 56))
+        data = io.BytesIO()
+        image.save(data, format="PNG")
+        locator = {"page": 2, "positions": [[2, 10, 20, 30, 40]], "doc_id": "doc"}
+        result = split_visuals([RenderedVisual(data.getvalue(), locator, "Source 2")])
+        self.assertGreater(len(result), 1)
+        covered_until = 0
+        for visual in result:
+            tile = Image.open(io.BytesIO(visual.png))
+            self.assertLessEqual(max(tile.size), 2048)
+            self.assertEqual(visual.locator["positions"], locator["positions"])
+            self.assertEqual(visual.locator["doc_id"], "doc")
+            x0, y0, x1, y1 = visual.locator["rendered_pixel_bounds"]
+            self.assertLessEqual(y0, covered_until)
+            covered_until = max(covered_until, y1)
+            self.assertEqual(tile.size, (x1 - x0, y1 - y0))
+        self.assertEqual(covered_until, image.height)
+        last = Image.open(io.BytesIO(result[-1].png))
+        self.assertEqual(last.getpixel((last.width - 1, last.height - 1)), (12, 34, 56))
+        self.assertNotIn("tile_index", locator)
+
+    def test_wide_image_and_encoded_byte_limit_are_split_without_downscaling(self):
+        image = Image.effect_noise((2200, 50), 100).convert("RGB")
+        data = io.BytesIO()
+        image.save(data, format="PNG")
+        result = split_visuals([RenderedVisual(data.getvalue(), {}, "Wide")], max_bytes=12000)
+        self.assertGreater(len(result), 1)
+        for visual in result:
+            self.assertLessEqual(len(visual.png), 12000)
+            self.assertLessEqual(max(Image.open(io.BytesIO(visual.png)).size), 2048)
+
     def test_attached_chunk_image_keeps_original_position_locator(self):
         chunk = {
             "image": Image.new("RGB", (32, 24), "white"),
