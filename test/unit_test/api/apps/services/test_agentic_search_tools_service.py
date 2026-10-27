@@ -22,8 +22,8 @@ def test_all_native_tools_have_validated_contracts(name):
 
 
 def test_search_defaults_and_comma_separated_dataset_ids():
-    request = MODULE.validate_tool_request("search", {"query": " CAN 接线 ", "dataset_ids": " a, b,a ", "exclude_ids": ["x", "x"]})
-    assert request == {"query": "CAN 接线", "top_k": 5, "exclude_ids": ["x"], "dataset_ids": ["a", "b"],
+    request = MODULE.validate_tool_request("search", {"query": " CAN 接线 ", "dataset_ids": " a, b,a ", "exclude_chunk_ids": ["x", "x"]})
+    assert request == {"query": "CAN 接线", "top_k": 5, "exclude_chunk_ids": ["x"], "dataset_ids": ["a", "b"],
                        "dataset_selection_mode": "all"}
 
 
@@ -182,7 +182,7 @@ def test_search_rejects_ambiguous_dataset_name(monkeypatch):
 
 @pytest.mark.parametrize("payload", [
     {"query": "x", "top_k": 0},
-    {"query": "x", "exclude_ids": "a"},
+    {"query": "x", "exclude_chunk_ids": "a"},
     {"query": "x", "dataset_ids": ["a"]},
     {"query": "x", "dataset_names": ["a"]},
     {"query": "x", "unknown": 1},
@@ -194,15 +194,15 @@ def test_search_rejects_invalid_arguments(payload):
 
 def test_navigation_requires_valid_ordinal_range_and_direction():
     assert MODULE.validate_tool_request("navigate", {
-        "source_id": "doc", "start_offset": 2, "end_offset": 2, "direction": "previous"
+        "doc_id": "doc", "start_offset": 2, "end_offset": 2, "direction": "previous"
     })["top_k"] == 1
     with pytest.raises(ValueError):
         MODULE.validate_tool_request("navigate", {
-            "source_id": "doc", "start_offset": 3, "end_offset": 2, "direction": "next"
+            "doc_id": "doc", "start_offset": 3, "end_offset": 2, "direction": "next"
         })
     with pytest.raises(ValueError):
         MODULE.validate_tool_request("navigate", {
-            "source_id": "doc", "start_offset": 2, "end_offset": 2, "direction": "up"
+            "doc_id": "doc", "start_offset": 2, "end_offset": 2, "direction": "up"
         })
 
 
@@ -212,8 +212,8 @@ def test_normalized_chunk_keeps_source_coordinates():
         "docnm_kwd": "手册.pdf", "positions": [[2, 0, 0, 3, 4]], "similarity": 0.7,
         "chunk_order": 4,
     })
-    assert chunk["id"] == "ck"
-    assert chunk["source_id"] == "doc"
+    assert chunk["chunk_id"] == "ck"
+    assert chunk["doc_id"] == "doc"
     assert chunk["start_offset"] == chunk["end_offset"] == 4
     assert chunk["metadata"]["coordinate"] == "visible_chunk_ordinal"
     assert chunk["content"] == "原文"
@@ -225,6 +225,14 @@ def test_legacy_chunk_without_order_is_identified_as_not_navigable():
     chunk = MODULE.normalize_chunk({"chunk_id": "legacy", "doc_id": "doc"})
     assert chunk["start_offset"] is None
     assert chunk["metadata"]["navigable"] is False
+
+
+def test_ids_from_upstream_metadata_never_confuse_document_with_chunk():
+    result = MODULE.normalize_chunk({"id": "chunk", "metafield": {"doc_id": "doc", "dataset_id": "kb"}})
+    assert result["chunk_id"] == "chunk"
+    assert result["doc_id"] == "doc"
+    assert result["dataset_id"] == "kb"
+    assert MODULE.normalize_chunk({"id": "chunk"})["doc_id"] == ""
 
 
 def test_write_tools_are_disabled_by_default(monkeypatch):
@@ -249,26 +257,66 @@ def _ordered_chunks():
              "content_with_weight": f"text {i}", "positions": [[i + 1, 0, 0, 0, 0]]} for i in range(5)]
 
 
+@pytest.mark.parametrize("offset, expected, more", [(0, 2, True), (2, 2, True), (4, 1, False), (5, 0, False)])
+def test_grep_pages_count_all_matches(monkeypatch, offset, expected, more):
+    async def tools(user_id, doc_id):
+        return object()
+
+    async def ordered(tools, doc_id):
+        return _ordered_chunks()
+
+    monkeypatch.setattr(MODULE, "_tools_for_source", tools)
+    monkeypatch.setattr(MODULE, "_ordered_document", ordered)
+    result = asyncio.run(MODULE.execute_tool("grep", {
+        "doc_id": "doc", "pattern": "text", "top_k": 2, "offset": offset,
+    }, user_id="user"))
+    assert result["total"] == 5
+    assert result["has_more"] is more
+    assert len(result["chunks"]) == expected
+    assert [c["start_offset"] for c in result["chunks"]] == list(range(offset, offset + expected))
+    if expected:
+        assert result["chunks"][0]["chunk_id"] == f"ck-{offset}"
+        assert result["chunks"][0]["doc_id"] == "doc"
+        assert result["chunks"][0]["dataset_id"] == "kb"
+
+
+def test_grep_empty_results_and_invalid_offset(monkeypatch):
+    async def tools(user_id, doc_id):
+        return object()
+
+    async def ordered(tools, doc_id):
+        return _ordered_chunks()
+
+    monkeypatch.setattr(MODULE, "_tools_for_source", tools)
+    monkeypatch.setattr(MODULE, "_ordered_document", ordered)
+    result = asyncio.run(MODULE.execute_tool("grep", {"doc_id": "doc", "pattern": "missing"}, user_id="user"))
+    assert result["chunks"] == []
+    assert result["total"] == 0 and result["has_more"] is False
+    for offset in (-1, True, "1"):
+        with pytest.raises(ValueError):
+            MODULE.validate_tool_request("grep", {"doc_id": "doc", "pattern": "text", "offset": offset})
+
+
 def test_open_returns_anchor_and_symmetric_neighbours():
     result = MODULE.select_open_chunks(_ordered_chunks(), "ck-2", 1)
-    assert [item["id"] for item in result] == ["ck-1", "ck-2", "ck-3"]
+    assert [item["chunk_id"] for item in result] == ["ck-1", "ck-2", "ck-3"]
     with pytest.raises(ValueError, match="chunk"):
         MODULE.select_open_chunks(_ordered_chunks(), "missing", 1)
 
 
 def test_navigate_and_read_follow_document_order():
     chunks = _ordered_chunks()
-    assert [item["id"] for item in MODULE.select_navigate_chunks(chunks, 2, 2, "next", 2)] == ["ck-3", "ck-4"]
-    assert [item["id"] for item in MODULE.select_navigate_chunks(chunks, 2, 2, "previous", 2)] == ["ck-0", "ck-1"]
-    assert [item["id"] for item in MODULE.select_read_chunks(chunks, 1, 3, 20)] == ["ck-1", "ck-2", "ck-3"]
+    assert [item["chunk_id"] for item in MODULE.select_navigate_chunks(chunks, 2, 2, "next", 2)] == ["ck-3", "ck-4"]
+    assert [item["chunk_id"] for item in MODULE.select_navigate_chunks(chunks, 2, 2, "previous", 2)] == ["ck-0", "ck-1"]
+    assert [item["chunk_id"] for item in MODULE.select_read_chunks(chunks, 1, 3, 20)] == ["ck-1", "ck-2", "ck-3"]
 
 
 def test_grep_supports_phrase_and_all_terms():
     chunks = _ordered_chunks()
     chunks[0]["content_with_weight"] = "CAN 接线 接地"
     chunks[1]["content_with_weight"] = "接地 CAN 接线"
-    assert [item["id"] for item in MODULE.select_grep_chunks(chunks, "CAN 接线", "phrase", 5)] == ["ck-0", "ck-1"]
-    assert [item["id"] for item in MODULE.select_grep_chunks(chunks, "CAN 接地", "term", 5)] == ["ck-0", "ck-1"]
+    assert [item["chunk_id"] for item in MODULE.select_grep_chunks(chunks, "CAN 接线", "phrase", 5)] == ["ck-0", "ck-1"]
+    assert [item["chunk_id"] for item in MODULE.select_grep_chunks(chunks, "CAN 接地", "term", 5)] == ["ck-0", "ck-1"]
 
 
 def test_search_forwards_exclusions_and_preserves_chunk_order(monkeypatch):
@@ -299,7 +347,7 @@ def test_search_forwards_exclusions_and_preserves_chunk_order(monkeypatch):
     monkeypatch.setattr(MODULE, "_authorized_tools", tools)
     monkeypatch.setattr(MODULE, "_ordered_document", ordered)
     result = asyncio.run(MODULE.execute_tool("search", {
-        "query": "CAN", "dataset_ids": "kb", "exclude_ids": ["seen"]
+        "query": "CAN", "dataset_ids": "kb", "exclude_chunk_ids": ["seen"]
     }, user_id="user"))
     assert calls[0][1]["exclude_ids"] == ["seen"]
     assert result["chunks"][0]["start_offset"] == 3
@@ -320,6 +368,7 @@ def test_search_all_mode_merges_results_across_embedding_groups(monkeypatch):
                 "content_with_weight": dataset_id, "similarity": score,
             }],
             "search_metadata": {"dataset": dataset_id},
+            "total": 16,
         }
 
     search_module.hybrid_search = hybrid_search
@@ -346,19 +395,21 @@ def test_search_all_mode_merges_results_across_embedding_groups(monkeypatch):
     monkeypatch.setattr(MODULE, "_ordered_document", ordered)
 
     result = asyncio.run(MODULE._search("user", {
-        "query": "破模", "top_k": 2, "exclude_ids": [], "dataset_ids": [], "dataset_selection_mode": "all",
+        "query": "破模", "top_k": 2, "exclude_chunk_ids": [], "dataset_ids": [], "dataset_selection_mode": "all",
     }))
 
     assert calls == ["kb-a", "kb-b"]
     assert [chunk["metadata"]["dataset_id"] for chunk in result["chunks"]] == ["kb-b", "kb-a"]
     assert result["dataset_selection_mode"] == "all"
     assert result["search_metadata"]["embedding_group_count"] == 2
+    assert result["total"] == 32
+    assert result["has_more"] is True
 
 
 def test_execute_write_tool_denied_before_side_effects(monkeypatch):
     monkeypatch.delenv("RAGFLOW_AGENTIC_SEARCH_WRITE_TOOLS_ENABLED", raising=False)
     with pytest.raises(PermissionError, match="disabled"):
-        asyncio.run(MODULE.execute_tool("delete", {"source_id": "doc"}, user_id="user"))
+        asyncio.run(MODULE.execute_tool("delete", {"doc_id": "doc"}, user_id="user"))
 
 
 def test_authorized_tools_include_indexed_field_mapped_dataset(monkeypatch):
@@ -459,9 +510,9 @@ def test_delete_checks_owner_and_removes_only_one_document(monkeypatch):
     for module in (document_module, file_module, kb_module, misc_module):
         monkeypatch.setitem(sys.modules, module.__name__, module)
     with pytest.raises(PermissionError):
-        asyncio.run(MODULE._delete("outsider", {"source_id": "doc"}))
+        asyncio.run(MODULE._delete("outsider", {"doc_id": "doc"}))
     assert deleted == []
-    result = asyncio.run(MODULE._delete("owner", {"source_id": "doc"}))
+    result = asyncio.run(MODULE._delete("owner", {"doc_id": "doc"}))
     assert result["deleted"] is True
     assert deleted == [(["doc"], "owner")]
 

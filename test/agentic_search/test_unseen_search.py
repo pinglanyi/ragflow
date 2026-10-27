@@ -15,7 +15,12 @@ def load_search():
     path = Path(__file__).resolve().parents[2] / "rag/advanced_rag/harness/tools/search.py"
     spec = importlib.util.spec_from_file_location("rag.advanced_rag.harness.tools.unseen_search_under_test", path)
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(sys.modules, {"common": common}):
+    # Compiled-structure navigation is not exercised by these retrieval tests.
+    # Keep its model/provider imports outside this dependency-free unit boundary.
+    navigation = types.ModuleType("rag.advanced_rag.harness.tools.navigation")
+    navigation._expand_related_via_structure = None
+    navigation._kg_scopes = None
+    with patch.dict(sys.modules, {"common": common, navigation.__name__: navigation}):
         spec.loader.exec_module(module)
     return module
 
@@ -39,6 +44,24 @@ class Retriever:
         for chunk in chunks:
             chunk["chunk_id"] = chunk.pop("mom_id", chunk["chunk_id"])
         return chunks
+
+
+class CompleteSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_total_counts_normalized_unique_unexcluded_chunks(self):
+        search = load_search()
+        retriever = Retriever([
+            chunk("one", mom_id="parent"), chunk("two", mom_id="parent"),
+            chunk("three"), chunk("four"),
+        ])
+        search.settings.retriever = retriever
+        tools = types.SimpleNamespace(kb_ids=["kb"], tenant_ids=["tenant"], embed_mdl=None, search_cache={})
+        first = await search.hybrid_search(tools, "q", top_n=1, complete_results=True)
+        self.assertEqual(first["total"], 3)
+        self.assertTrue(first["has_more"])
+        second = await search.hybrid_search(tools, "q", top_n=2, exclude_ids=["parent", "unknown"], complete_results=True)
+        self.assertEqual(second["total"], 2)
+        self.assertFalse(second["has_more"])
+        self.assertEqual([c["chunk_id"] for c in second["chunks"]], ["three", "four"])
 
 
 def chunk(cid, **extra):

@@ -8,13 +8,13 @@ from urllib.request import url2pathname
 
 TOOL_NAMES = frozenset({"search", "open", "navigate", "read", "grep", "metadata_search", "ingest", "delete"})
 _FIELDS = {
-    "search": {"query", "top_k", "exclude_ids", "dataset_ids", "dataset_names", "dataset_selection_mode"},
+    "search": {"query", "top_k", "exclude_chunk_ids", "dataset_ids", "dataset_names", "dataset_selection_mode"},
     "open": {"chunk_id", "window"},
-    "navigate": {"source_id", "start_offset", "end_offset", "direction", "top_k"},
-    "read": {"source_id", "start_offset", "end_offset", "top_k"},
-    "grep": {"source_id", "pattern", "mode", "top_k"},
+    "navigate": {"doc_id", "start_offset", "end_offset", "direction", "top_k"},
+    "read": {"doc_id", "start_offset", "end_offset", "top_k"},
+    "grep": {"doc_id", "pattern", "mode", "top_k", "offset"},
     "ingest": {"uri", "dataset_id"},
-    "delete": {"source_id"},
+    "delete": {"doc_id"},
     "metadata_search": {"filters", "logic", "dataset_ids", "dataset_names", "limit"},
 }
 
@@ -57,9 +57,9 @@ def validate_tool_request(name: str, payload: dict) -> dict:
     if name == "search":
         query = _text(payload.get("query"), "query")
         top_k = _number(payload.get("top_k", 5), "top_k", minimum=1, maximum=20)
-        excludes = payload.get("exclude_ids", [])
-        if not isinstance(excludes, list) or len(excludes) > 200 or any(not isinstance(item, str) or not item.strip() for item in excludes):
-            raise ValueError("exclude_ids must be a list of up to 200 chunk IDs")
+        excludes = payload.get("exclude_chunk_ids", [])
+        if not isinstance(excludes, list) or len(excludes) > 10000 or any(not isinstance(item, str) or not item.strip() for item in excludes):
+            raise ValueError("exclude_chunk_ids must be a list of up to 10000 chunk IDs")
         if "dataset_ids" in payload and "dataset_names" in payload:
             raise ValueError("Specify dataset_ids or dataset_names, not both")
         scope_key = "dataset_names" if "dataset_names" in payload else "dataset_ids"
@@ -72,13 +72,13 @@ def validate_tool_request(name: str, payload: dict) -> dict:
             raise ValueError("dataset_selection_mode must be all or auto")
         if selection_mode == "auto" and dataset_ids:
             raise ValueError("dataset_selection_mode=auto cannot be combined with dataset_names or dataset_ids")
-        return {"query": query, "top_k": top_k, "exclude_ids": list(dict.fromkeys(excludes)),
+        return {"query": query, "top_k": top_k, "exclude_chunk_ids": list(dict.fromkeys(excludes)),
                 "dataset_ids": dataset_ids, "dataset_selection_mode": selection_mode}
     if name == "open":
         return {"chunk_id": _text(payload.get("chunk_id"), "chunk_id"),
                 "window": _number(payload.get("window", 2), "window", maximum=20)}
     if name == "navigate":
-        source_id = _text(payload.get("source_id"), "source_id")
+        source_id = _text(payload.get("doc_id"), "doc_id")
         start = _number(payload.get("start_offset"), "start_offset")
         end = _number(payload.get("end_offset"), "end_offset")
         if end < start:
@@ -86,10 +86,10 @@ def validate_tool_request(name: str, payload: dict) -> dict:
         direction = payload.get("direction")
         if direction not in ("next", "previous"):
             raise ValueError("direction must be next or previous")
-        return {"source_id": source_id, "start_offset": start, "end_offset": end,
+        return {"doc_id": source_id, "start_offset": start, "end_offset": end,
                 "direction": direction, "top_k": _number(payload.get("top_k", 1), "top_k", minimum=1, maximum=20)}
     if name == "read":
-        source_id = _text(payload.get("source_id"), "source_id")
+        source_id = _text(payload.get("doc_id"), "doc_id")
         start = payload.get("start_offset")
         end = payload.get("end_offset")
         if start is not None:
@@ -98,35 +98,40 @@ def validate_tool_request(name: str, payload: dict) -> dict:
             end = _number(end, "end_offset")
         if start is not None and end is not None and end < start:
             raise ValueError("end_offset must be at least start_offset")
-        return {"source_id": source_id, "start_offset": start, "end_offset": end,
+        return {"doc_id": source_id, "start_offset": start, "end_offset": end,
                 "top_k": _number(payload.get("top_k", 20), "top_k", minimum=1, maximum=20)}
     if name == "grep":
-        source_id = _text(payload.get("source_id"), "source_id")
+        source_id = _text(payload.get("doc_id"), "doc_id")
         pattern = _text(payload.get("pattern"), "pattern")
         if len(pattern) > 1000:
             raise ValueError("pattern is too long")
         mode = payload.get("mode", "phrase")
         if mode not in ("phrase", "term"):
             raise ValueError("mode must be phrase or term")
-        return {"source_id": source_id, "pattern": pattern, "mode": mode,
-                "top_k": _number(payload.get("top_k", 5), "top_k", minimum=1, maximum=20)}
+        return {"doc_id": source_id, "pattern": pattern, "mode": mode,
+                "top_k": _number(payload.get("top_k", 5), "top_k", minimum=1, maximum=20),
+                "offset": _number(payload.get("offset", 0), "offset", maximum=2147483647)}
     if name == "ingest":
         return {"uri": _text(payload.get("uri"), "uri"), "dataset_id": _text(payload.get("dataset_id"), "dataset_id")}
-    return {"source_id": _text(payload.get("source_id"), "source_id")}
+    return {"doc_id": _text(payload.get("doc_id"), "doc_id")}
 
 
 def normalize_chunk(chunk: dict) -> dict:
     """Expose a stable source identity and explicit ordinal coordinate system."""
     order = chunk.get("chunk_order")
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    metafield = chunk.get("metafield") if isinstance(chunk.get("metafield"), dict) else {}
+    dataset_id = chunk.get("dataset_id") or chunk.get("kb_id") or metadata.get("dataset_id") or metafield.get("dataset_id") or ""
     return {
-        "id": str(chunk.get("chunk_id") or chunk.get("id") or ""),
+        "chunk_id": str(chunk.get("chunk_id") or chunk.get("id") or ""),
+        "dataset_id": dataset_id,
         "score": chunk.get("similarity"),
         "content": chunk.get("content_with_weight") or chunk.get("content") or "",
-        "source_id": chunk.get("doc_id"),
+        "doc_id": chunk.get("doc_id") or chunk.get("document_id") or chunk.get("source_id") or metafield.get("doc_id") or "",
         "start_offset": order,
         "end_offset": order,
         "metadata": {
-            "dataset_id": chunk.get("kb_id"), "document_name": chunk.get("docnm_kwd"),
+            "dataset_id": dataset_id, "document_name": chunk.get("docnm_kwd") or metadata.get("document_name"),
             "positions": chunk.get("positions") or chunk.get("position_int") or [],
             "image_id": chunk.get("image_id") or chunk.get("img_id") or "",
             "coordinate": "visible_chunk_ordinal",
@@ -367,16 +372,18 @@ async def _search(user_id: str, options: dict) -> dict:
     groups = await _search_embedding_groups(user_id, ids)
     chunks = []
     group_metadata = []
+    total = 0
     tools_by_source = {}
     for group_ids in groups:
         tools = await _authorized_tools(user_id, group_ids, embedding=True)
         result = await hybrid_search(
-            tools, options["query"], top_n=options["top_k"], exclude_ids=options["exclude_ids"]
+            tools, options["query"], top_n=options["top_k"], exclude_ids=options["exclude_chunk_ids"], complete_results=True
         )
         if result.get("error"):
             raise ValueError(result["error"])
         group_chunks = result.get("chunks") or []
         chunks.extend(group_chunks)
+        total += result.get("total", len(group_chunks))
         group_metadata.append({
             "dataset_ids": group_ids,
             "search_metadata": result.get("search_metadata") or {},
@@ -404,7 +411,7 @@ async def _search(user_id: str, options: dict) -> dict:
     search_metadata = group_metadata[0]["search_metadata"] if len(group_metadata) == 1 else {
         "embedding_group_count": len(group_metadata), "groups": group_metadata,
     }
-    return {"chunks": normalized, "selected_datasets": selected,
+    return {"chunks": normalized, "total": total, "has_more": total > len(normalized), "selected_datasets": selected,
             "dataset_selection_mode": mode, "search_metadata": search_metadata,
             "coordinate": "visible_chunk_ordinal"}
 
@@ -417,7 +424,7 @@ async def _read_only_tool(name: str, user_id: str, options: dict) -> dict:
 
         ids = await _metadata_scope(user_id, options["dataset_ids"])
         return await select_metadata_documents(ids, options["filters"], options["logic"], limit=options["limit"])
-    source_id = options.get("source_id")
+    source_id = options.get("doc_id")
     if name == "open":
         source_id = await _source_for_chunk(user_id, options["chunk_id"])
     tools = await _tools_for_source(user_id, source_id)
@@ -429,8 +436,12 @@ async def _read_only_tool(name: str, user_id: str, options: dict) -> dict:
     elif name == "read":
         selected = select_read_chunks(chunks, options["start_offset"], options["end_offset"], options["top_k"])
     else:
-        selected = select_grep_chunks(chunks, options["pattern"], options["mode"], options["top_k"])
-    return {"chunks": selected, "source_id": source_id, "coordinate": "visible_chunk_ordinal"}
+        matches = select_grep_chunks(chunks, options["pattern"], options["mode"], len(chunks))
+        offset = options["offset"]
+        selected = matches[offset:offset + options["top_k"]]
+        return {"chunks": selected, "doc_id": source_id, "total": len(matches),
+                "has_more": offset + len(selected) < len(matches), "coordinate": "visible_chunk_ordinal"}
+    return {"chunks": selected, "doc_id": source_id, "coordinate": "visible_chunk_ordinal"}
 
 
 async def _metadata_scope(user_id: str, requested: list[str]) -> list[str]:
@@ -518,7 +529,7 @@ async def _ingest(user_id: str, options: dict) -> dict:
             raise ValueError("Document upload failed: " + "; ".join(errors))
         for doc, _ in files:
             await thread_pool_exec(DocumentService.run, kb.tenant_id, dict(doc), {})
-            uploaded.append({"source_id": doc["id"], "dataset_id": dataset_id, "name": doc["name"], "parse_status": "QUEUED"})
+            uploaded.append({"doc_id": doc["id"], "dataset_id": dataset_id, "name": doc["name"], "parse_status": "QUEUED"})
     return {"documents": uploaded, "document_count": len(uploaded)}
 
 
@@ -528,7 +539,7 @@ async def _delete(user_id: str, options: dict) -> dict:
     from api.db.services.knowledgebase_service import KnowledgebaseService
     from common.misc_utils import thread_pool_exec
 
-    source_id = options["source_id"]
+    source_id = options["doc_id"]
     docs = await thread_pool_exec(DocumentService.query, id=source_id)
     if not docs:
         raise ValueError("Document not found")
@@ -539,7 +550,7 @@ async def _delete(user_id: str, options: dict) -> dict:
     errors = await thread_pool_exec(FileService.delete_docs, [source_id], user_id)
     if errors:
         raise ValueError("Document deletion failed: " + str(errors))
-    return {"deleted": True, "source_id": source_id, "dataset_id": dataset_id}
+    return {"deleted": True, "doc_id": source_id, "dataset_id": dataset_id}
 
 
 async def execute_tool(name: str, payload: dict, *, user_id: str) -> dict:

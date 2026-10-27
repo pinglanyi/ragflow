@@ -111,9 +111,28 @@ def _normalize(kbinfos: dict, tenant_ids: list[str] | str | None) -> dict:
 
 
 async def hybrid_search(
-    tools, query: str, kb_ids: list[str] | None = None, top_n: int | None = None, doc_scope: list[str] | None = None, keywords: str = "", retrieval_query: str = "", use_compiled: bool = False, exclude_ids: list[str] | None = None
+    tools, query: str, kb_ids: list[str] | None = None, top_n: int | None = None, doc_scope: list[str] | None = None, keywords: str = "", retrieval_query: str = "", use_compiled: bool = False, exclude_ids: list[str] | None = None, *, complete_results: bool = False
 ) -> dict:
     top_n = _resolve_top_n(tools, top_n)
+    if complete_results:
+        # A fixed candidate window makes exclusions a page over the same ranked
+        # result set. Count after child-to-parent normalization and deduplication.
+        candidate_limit = max(_resolve_top_k(tools), _resolve_rerank_candidates(tools, top_n))
+        result = await hybrid_search(
+            tools, query, kb_ids=kb_ids, top_n=candidate_limit, doc_scope=doc_scope,
+            keywords=keywords, retrieval_query=retrieval_query, use_compiled=use_compiled,
+        )
+        if result.get("error"):
+            return result
+        excluded = set(exclude_ids or [])
+        candidates = {}
+        for chunk in result.get("chunks") or []:
+            chunk_id = str(chunk.get("chunk_id") or chunk.get("id") or "")
+            if chunk_id and chunk_id not in excluded:
+                candidates.setdefault(chunk_id, chunk)
+        remaining = list(candidates.values())
+        return {**result, "chunks": remaining[:top_n], "total": len(remaining),
+                "has_more": len(remaining) > top_n}
     authorized_ids = list(dict.fromkeys(tools.kb_ids + [kb.id for kb in getattr(tools, "sql_kbs", [])]))
     target_ids = authorized_ids if kb_ids is None else kb_ids
     if not set(target_ids).issubset(set(authorized_ids)):
