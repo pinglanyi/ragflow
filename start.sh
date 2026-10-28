@@ -4,7 +4,7 @@
 # 参考 deepagents/scripts/start_ragflow.sh 改写: 去掉了 DeepAgents 代理,
 # 端口改为从 conf/service_conf.yaml 自动解析, 组件入口适配本仓库代码。
 #
-# 用法: bash start.sh [run|start|start-taskexec|stop|status|restart|check-runtime|check-executors|logs [name]]
+# 用法: bash start.sh [start|stop|status|restart|start-mcp|stop-mcp|restart-mcp|logs [name]]
 #
 # 启动内容:
 #   1. 依赖服务  (docker compose -f docker/docker-compose-base.yml up -d)
@@ -12,6 +12,7 @@
 #   3. 任务执行器 rag/svr/task_executor.py -i <id> -t <type>  (多个 worker)
 #   4. 前端       web/ (npm run dev, 端口默认 9222)
 #   5. [可选] Admin 服务 admin/server/admin_server.py  (START_ADMIN=1 时启动)
+#   6. MCP 服务 mcp/server/server.py (默认启动，START_MCP=0 可跳过)
 #
 # 常用环境变量 (均有默认值, 也可覆盖):
 #   FRONTEND_PORT=9222       前端端口 (与 web/vite.config.ts 默认一致)
@@ -26,6 +27,10 @@
 #                            后端与 worker 必须一致；首次切换需 restart，旧队列任务不搬迁
 #   MAX_CONCURRENT_TASKS=10  每 worker 并发任务数 (导出给子进程)
 #   START_ADMIN=1            额外启动 Admin 服务 (conf 中 admin.http_port=9381)
+#   START_MCP=0              全量启动时跳过 MCP (默认开启)
+#   RAGFLOW_MCP_PORT=19382   MCP 端口，支持 /sse 和 /mcp
+#   RAGFLOW_MCP_HOST=0.0.0.0 MCP 监听地址，客户端须提供 Bearer API Key
+#   RAGFLOW_MCP_BASE_URL=http://127.0.0.1:9380  MCP 对接的后端 (默认随 BACKEND_PORT)
 #   RAGFLOW_ALLOW_CPU=1      允许 OCR 走 CPU: 关闭 GPU 断言, 只告警不终止
 #   RAGFLOW_REQUIRE_GPU=1    连后端/Admin 也强制要求 GPU
 #   RAGFLOW_SERVICE_CONF=    自定义 service_conf.yaml 路径
@@ -37,7 +42,7 @@
 #     需要时用: cd docker && docker compose -f docker-compose-base.yml down
 #   * 本脚本按 conf 默认的 elasticsearch 引擎启动依赖; 若改用 DOC_ENGINE=
 #     infinity/opensearch/oceanbase, 请相应调整 REQUIRED_DEPS。
-#   * GPU: 所有 Python 服务经 scripts/start_python.py 启动, 它前置 .venv 的
+#   * GPU: 后端和执行器经 scripts/start_python.py 启动, 它前置 .venv 的
 #     NVIDIA/cuDNN 库并断言 CUDA 真的可用 (torch 可见 + ORT CUDA EP 可加载)。
 #     断言失败时 start 直接终止, 避免 OCR 静默回退 CPU; 确实要用 CPU 就
 #     RAGFLOW_ALLOW_CPU=1。执行器启动前还会经 scripts/check_executors.py
@@ -62,6 +67,8 @@ LOG_WEB="$LOG_DIR/web.log"
 PID_SERVER="$LOG_DIR/server.pid"
 PID_ADMIN="$LOG_DIR/admin.pid"
 PID_WEB="$LOG_DIR/web.pid"
+LOG_MCP="$LOG_DIR/mcp.log"
+PID_MCP="$LOG_DIR/mcp.pid"
 
 # HuggingFace 镜像 (国内服务器必须, 可覆盖)
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
@@ -460,8 +467,68 @@ start_web() {
 # ============================================================================
 # 停止 / 状态
 # ============================================================================
+# MCP uses the native server and each client's Bearer API key (host mode).
+# No model/GPU runtime or Docker container is needed for this process.
+mcp_pid_is_ours() {
+    local pid="$1"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    grep -zFxq -- "$PROJECT_DIR/mcp/server/server.py" "/proc/$pid/cmdline" 2>/dev/null
+}
+
+start_mcp() {
+    local pid i
+    if [ -f "$PID_MCP" ]; then
+        pid="$(cat "$PID_MCP")"
+        if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+            if mcp_pid_is_ours "$pid" && check_port "$RAGFLOW_MCP_PORT"; then
+                echo "[mcp] 已运行 (PID=$pid, 端口 $RAGFLOW_MCP_PORT)"
+                return 0
+            fi
+            echo "[mcp] PID 文件指向存活但未就绪或不属于本项目的进程，拒绝重复启动" >&2
+            return 1
+        fi
+        rm -f "$PID_MCP"
+    fi
+    if check_port "$RAGFLOW_MCP_PORT"; then
+        echo "[mcp] 端口 $RAGFLOW_MCP_PORT 已被占用，保留现有服务" >&2
+        return 1
+    fi
+    [ -x "$VENV_PYTHON" ] && [ -f "$PROJECT_DIR/mcp/server/server.py" ] || {
+        echo "[mcp] 缺少项目 Python 环境或原生 MCP 入口" >&2; return 1;
+    }
+    launch_bg "$PID_MCP" "$LOG_MCP" "$VENV_PYTHON" "$PROJECT_DIR/mcp/server/server.py"
+    pid="$(cat "$PID_MCP")"
+    for ((i=0; i<20; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        if mcp_pid_is_ours "$pid" && check_port "$RAGFLOW_MCP_PORT"; then
+            echo "[mcp] 已启动 (PID=$pid, 端口 $RAGFLOW_MCP_PORT)，日志: $LOG_MCP"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "[mcp] 启动失败，请检查 $LOG_MCP" >&2
+    stop_mcp
+    return 1
+}
+
+stop_mcp() {
+    local pid
+    [ -f "$PID_MCP" ] || return 0
+    pid="$(cat "$PID_MCP")"
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then
+        mcp_pid_is_ours "$pid" || {
+            echo "[mcp] PID=$pid 不属于本项目，拒绝停止" >&2; return 1;
+        }
+        stop_pidfile "$PID_MCP"
+    else
+        rm -f "$PID_MCP"
+    fi
+}
+
 stop_all() {
     local pid_file
+    stop_mcp || return 1
     stop_pidfile "$PID_SERVER"
     stop_pidfile "$PID_WEB"
     stop_pidfile "$PID_ADMIN"
@@ -480,11 +547,12 @@ status_all() {
     echo " Task queue namespace: ${RAGFLOW_TASK_QUEUE_NAMESPACE} (本次脚本配置；运行中进程以心跳为准)"
     echo "══════════════════════════════════════════════════"
     local name port running=""
-    for name in server web admin; do
+    for name in server web admin mcp; do
         case "$name" in
             server) port="$BACKEND_PORT";;
             web)    port="$FRONTEND_PORT";;
             admin)  [ "${START_ADMIN:-0}" = "1" ] || continue; port="${ADMIN_PORT:-9381}";;
+            mcp)    port="${RAGFLOW_MCP_PORT:-19382}";;
         esac
         pid_file="$LOG_DIR/$name.pid"
         if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
@@ -510,6 +578,8 @@ status_all() {
     echo ""
     echo " 后端 API : http://${LAN_IP}:${BACKEND_PORT}/"
     echo " 前端 UI  : http://${LAN_IP}:${FRONTEND_PORT}/"
+    echo " MCP SSE  : http://${LAN_IP}:${RAGFLOW_MCP_PORT:-19382}/sse"
+    echo " MCP HTTP : http://${LAN_IP}:${RAGFLOW_MCP_PORT:-19382}/mcp (Bearer RAGFlow API Key)"
     [ "${START_ADMIN:-0}" = "1" ] && echo " Admin    : http://${LAN_IP}:${ADMIN_PORT:-9381}/"
     echo ""
     echo "端口监听:"
@@ -536,15 +606,16 @@ logs_all() {
         server)  tail -n 100 -f "$LOG_SERVER";;
         web)     tail -n 100 -f "$LOG_WEB";;
         admin)   tail -n 100 -f "$LOG_ADMIN";;
+        mcp)     tail -n 100 -f "$LOG_MCP";;
         taskexec)
             # 找最近修改的一个 task executor 日志
             local latest; latest="$(ls -t "$LOG_DIR"/taskexec_*.log 2>/dev/null | head -1)"
             [ -n "$latest" ] && tail -n 100 -f "$latest" || echo "无 task executor 日志"
             ;;
-        all|"")  tail -n 100 -f "$LOG_SERVER" "$LOG_WEB" 2>/dev/null;;
+        all|"")  tail -n 100 -f "$LOG_SERVER" "$LOG_WEB" "$LOG_MCP" 2>/dev/null;;
         *)
             local f="$LOG_DIR/taskexec_${name}.log"
-            [ -f "$f" ] && tail -n 100 -f "$f" || { echo "用法: bash start.sh logs [server|web|admin|taskexec|taskexec_<type>_<id>|all]"; exit 1; }
+            [ -f "$f" ] && tail -n 100 -f "$f" || { echo "用法: bash start.sh logs [server|web|admin|mcp|taskexec|taskexec_<type>_<id>|all]"; exit 1; }
             ;;
     esac
 }
@@ -557,7 +628,23 @@ check_executor_conflicts() {
 }
 
 # ============================================================================
+# Native MCP settings; also accepted by mcp/server/server.py directly.
+# START_MCP=0 skips MCP during full start. Standalone start-mcp remains available.
+export RAGFLOW_MCP_HOST="${RAGFLOW_MCP_HOST:-0.0.0.0}"
+export RAGFLOW_MCP_PORT="${RAGFLOW_MCP_PORT:-19382}"
+export RAGFLOW_MCP_BASE_URL="${RAGFLOW_MCP_BASE_URL:-http://127.0.0.1:${BACKEND_PORT}}"
+export RAGFLOW_MCP_LAUNCH_MODE="${RAGFLOW_MCP_LAUNCH_MODE:-host}"
+
 case "${1:-start}" in
+    start-mcp)
+        start_mcp || exit 1
+        ;;
+    stop-mcp)
+        stop_mcp || exit 1
+        ;;
+    restart-mcp)
+        stop_mcp && start_mcp || exit 1
+        ;;
     start-taskexec)
         "$VENV_PYTHON" "$PYTHON_BOOTSTRAP" --check || exit 1
         check_executor_conflicts
@@ -569,6 +656,7 @@ case "${1:-start}" in
         check_executor_conflicts
         check_and_start_deps || { echo "[deps] 依赖启动失败, 终止"; exit 1; }
         start_server || exit 1
+        if [ "${START_MCP:-1}" = "1" ]; then start_mcp || exit 1; fi
         start_taskexec || exit 1
         start_web || exit 1
         start_admin || exit 1
@@ -596,7 +684,7 @@ case "${1:-start}" in
         logs_all "${2:-all}"
         ;;
     *)
-        echo "用法: bash start.sh [run|start|start-taskexec|stop|status|restart|check-runtime|check-executors [--strict]|logs [server|web|taskexec|admin|all]]"
+        echo "用法: bash start.sh [run|start|start-taskexec|start-mcp|stop-mcp|restart-mcp|stop|status|restart|check-runtime|check-executors [--strict]|logs [server|web|taskexec|admin|mcp|all]]"
         exit 1
         ;;
 esac

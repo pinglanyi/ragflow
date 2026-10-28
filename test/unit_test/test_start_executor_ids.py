@@ -24,6 +24,7 @@ class ExecutorIdsTests(unittest.TestCase):
                 Path(folder, f"taskexec_common_{index}.pid").write_text("123", encoding="utf-8")
             harness = f"""
 {config}
+TASK_EXECUTOR_COUNT=3
 LOG_DIR='{Path(folder).as_posix()}'
 PROJECT_DIR="$LOG_DIR"
 PID_SERVER=server; PID_WEB=web; PID_ADMIN=admin
@@ -34,6 +35,7 @@ sleep() {{ :; }}
 pkill() {{ :; }}
 kill_port() {{ :; }}
 check_port() {{ return 1; }}
+stop_mcp() {{ :; }}
 stop_pidfile() {{ echo "STOP:$1"; }}
 launch_bg() {{ echo "LAUNCH:$*"; printf 123 > "$1"; }}
 {functions}
